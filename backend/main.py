@@ -1,12 +1,15 @@
 
+# -*- coding: utf-8 -*-
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
 from dotenv import load_dotenv
 import json
+import requests
+import base64
+import mimetypes
 
 # 加载环境变量
 load_dotenv()
@@ -31,8 +34,8 @@ class TrafficAnalysisOutput(BaseModel):
 # 如果没有API密钥，将返回此示例数据
 mock_analysis_data = {
   "semantic_search": {
-    "description": "这是一张在傍晚拍摄的高速公路监控图像。天气晴朗，路面干燥。双向四车道，交通流量稀疏。一辆白色SUV在近处车道行驶，远处有其他车辆。道路两侧装有标准的金属护栏。",
-    "keywords": ["高速公路", "傍晚", "晴天", "交通稀疏", "白色SUV", "护栏"]
+    "description": "这是在傍晚拍摄的高速公路监控图像。天气晴朗，路面干燥。双向四车道，交通流量稀疏。一辆白色SUV在近处车道行驶，远处有其他车辆。道路两侧装有标准的金属护栏。(此为无API-KEY时的模拟数据)",
+    "keywords": ["高速公路", "傍晚", "晴天", "交通稀疏", "白色SUV", "护栏", "模拟数据"]
   },
   "training_data": {
     "clip_captions": [
@@ -55,7 +58,6 @@ mock_analysis_data = {
 app = FastAPI()
 
 # --- CORS 中间件 ---
-# 允许所有来源的跨域请求，方便本地开发
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -63,17 +65,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# --- Gemini AI 设置 ---
-def get_gemini_model():
-    """配置并返回Gemini模型"""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return None
-    genai.configure(api_key=api_key)
-    # 使用支持图片和文本输入的模型 - 更新为新模型名称
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-    return model
 
 # --- 提示词 ---
 PROMPT = """
@@ -100,6 +91,56 @@ PROMPT = """
 **请务必只输出 JSON 对象，不要包含任何其他文本或标记。**
 """
 
+# --- Gemini API 调用 ---
+API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+MODEL = "gemini-pro-vision" 
+
+def call_gemini_api(api_key: str, image_b64: str, mime_type: str):
+    url = API_URL_TEMPLATE.format(model=MODEL)
+    headers = {
+        'Content-Type': 'application/json',
+        'X-goog-api-key': api_key
+    }
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": PROMPT},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": image_b64
+                        }
+                    }
+                ]
+            }
+        ]
+        # "generationConfig": { "response_mime_type": "application/json" } # This can sometimes cause issues
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        
+        api_result = response.json()
+        
+        content_text = api_result['candidates'][0]['content']['parts'][0]['text']
+        if content_text.startswith("```json"):
+            content_text = content_text.strip().removeprefix("```json").removesuffix("```").strip()
+            
+        return json.loads(content_text)
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling API: {e}")
+        if 'response' in locals() and response is not None:
+             print(f"Response content: {response.text}")
+        raise HTTPException(status_code=500, detail=f"调用Gemini API时出错: {e}")
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        print(f"Error parsing API response: {e}")
+        raise HTTPException(status_code=500, detail="解析AI模型返回的数据时出错")
+
+
 def extract_image_part(data_uri: str):
     """从Data URI中分离出MIME类型和Base64数据"""
     try:
@@ -114,30 +155,29 @@ def extract_image_part(data_uri: str):
 # --- API 路由 ---
 @app.post("/analyze", response_model=TrafficAnalysisOutput)
 async def analyze_image(request: ImageAnalysisRequest):
-    model = get_gemini_model()
+    api_key = os.getenv("GEMINI_API_KEY")
 
     # 如果没有配置API密钥，则返回模拟数据
-    if not model:
+    if not api_key:
         print("警告: 未找到 GEMINI_API_KEY，将返回模拟数据。")
         return mock_analysis_data
 
     try:
-        image_part = extract_image_part(request.image)
-
-        # 调用Gemini API
-        response = model.generate_content([PROMPT, image_part])
-
-        # 清理和解析API的响应
-        # Gemini可能会返回被```json ... ```包围的文本
-        cleaned_response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        image_parts = extract_image_part(request.image)
         
-        analysis_result = json.loads(cleaned_response_text)
-        
-        # 使用Pydantic模型验证结果
+        analysis_result = await asyncio.to_thread(
+            call_gemini_api, 
+            api_key, 
+            image_parts["data"], 
+            image_parts["mime_type"]
+        )
+
         validated_result = TrafficAnalysisOutput(**analysis_result)
-
         return validated_result
 
+    except HTTPException as e:
+        # 直接重新抛出已知的HTTP异常
+        raise e
     except Exception as e:
         print(f"处理图片时发生错误: {e}")
         raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
@@ -149,5 +189,8 @@ def read_root():
 
 # --- 运行服务器 ---
 if __name__ == "__main__":
+    import asyncio
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    
