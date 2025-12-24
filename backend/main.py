@@ -94,8 +94,8 @@ PROMPT = """
 
 # --- Gemini API 调用 ---
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-VISION_MODEL = "gemini-pro-vision" 
-TEXT_MODEL = "gemini-pro"
+VISION_MODEL = "gemini-1.0-pro-vision-latest" 
+TEXT_MODEL = "gemini-1.0-pro"
 
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
     """调用Gemini Vision模型进行图片分析"""
@@ -118,7 +118,10 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
                     }
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json"
+        }
     }
     
     try:
@@ -128,10 +131,7 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
         api_result = response.json()
         
         content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-        # 清理可能的Markdown代码块标记
-        if content_text.strip().startswith("```json"):
-            content_text = content_text.strip().removeprefix("```json").removesuffix("```").strip()
-            
+        
         return json.loads(content_text)
         
     except requests.exceptions.RequestException as e:
@@ -234,3 +234,5 @@ if __name__ == "__main__":
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
     # 注意: reload=True 会导致启动脚本运行两次，所以连接测试也会显示两次
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    
