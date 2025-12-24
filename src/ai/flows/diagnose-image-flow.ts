@@ -1,7 +1,11 @@
 'use server';
+// This file is no longer used for the primary AI analysis, 
+// as the logic has been moved to an external Python/C++ backend.
+// It is kept here as a reference or for potential future use in other flows.
 
 /**
  * @fileOverview An AI agent to perform detailed image analysis.
+ * THIS FLOW IS DEPRECATED AND REPLACED BY AN EXTERNAL BACKEND CALL.
  *
  * - diagnoseImage - A function that handles the image diagnosis process.
  * - DiagnoseImageInput - The input type for the diagnoseImage function.
@@ -30,14 +34,21 @@ const DiagnoseImageOutputSchema = z.object({
 });
 export type DiagnoseImageOutput = z.infer<typeof DiagnoseImageOutputSchema>;
 
+// This function is deprecated. The main logic now resides in `src/app/actions.ts`
 export async function diagnoseImage(input: DiagnoseImageInput): Promise<DiagnoseImageOutput> {
+  console.warn("diagnoseImage flow is deprecated and should not be called directly.");
   return diagnoseImageFlow(input);
 }
 
 const prompt = ai.definePrompt({
   name: 'diagnoseImagePrompt',
   input: { schema: DiagnoseImageInputSchema },
-  output: { schema: Omit<DiagnoseImageOutput, 'uuid'> },
+  output: { schema: z.object({
+      sceneClassification: z.string(),
+      semanticSummary: z.string(),
+      visualTags: z.array(z.string())
+    }) 
+  },
   prompt: `You are a sophisticated AI image analyst. Your task is to analyze the provided image and return a structured JSON object with a scene classification, a semantic summary, and a list of visual tags.
 
   - **sceneClassification**: Classify the image into one of the following broad categories: "Nature", "Urban", "Portrait", "Event", "Food", "Animal", "Art", "Abstract", "Technology", or "Other".

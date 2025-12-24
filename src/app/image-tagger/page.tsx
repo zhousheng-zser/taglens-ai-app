@@ -7,11 +7,11 @@ import { handleImageAnalysis } from '@/app/actions';
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Terminal } from 'lucide-react';
-import type { DiagnoseImageOutput } from '@/ai/flows/diagnose-image-flow';
+import type { TrafficAnalysisOutput } from '@/types/analysis';
 
 export default function ImageTaggerPage() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [analysis, setAnalysis] = useState<DiagnoseImageOutput | null>(null);
+  const [analysis, setAnalysis] = useState<TrafficAnalysisOutput | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
@@ -26,7 +26,6 @@ export default function ImageTaggerPage() {
   }, [imagePreview]);
 
   const handleImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    // Revoke the old object URL if a new image is being uploaded.
     if (imagePreview) {
       URL.revokeObjectURL(imagePreview);
       setImagePreview(null);
@@ -54,20 +53,19 @@ export default function ImageTaggerPage() {
         const dataUri = reader.result as string;
         setIsLoading(true);
         try {
-          // Changed from handleTagGeneration to handleImageAnalysis
           const result = await handleImageAnalysis({ photoDataUri: dataUri });
           if (result.error) {
             setError(result.error);
             toast({
               variant: 'destructive',
-              title: 'AI 错误',
+              title: '后端错误',
               description: result.error,
             });
           } else {
             setAnalysis(result.analysis || null);
           }
         } catch (e: any) {
-          const errorMessage = '发生意外错误。请重试。';
+          const errorMessage = '发生意外的前端错误。请重试。';
           setError(errorMessage);
           toast({
             variant: 'destructive',
@@ -92,10 +90,10 @@ export default function ImageTaggerPage() {
   };
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-12 animate-in fade-in-50 duration-500">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 md:gap-12 animate-in fade-in-50 duration-500">
       <div className="space-y-6">
         <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          1. 上传图片
+          1. 上传交通监控图片
         </h2>
         <ImageUploader
           onImageUpload={handleImageUpload}
@@ -106,7 +104,7 @@ export default function ImageTaggerPage() {
       </div>
       <div className="space-y-6">
         <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          2. 查看分析结果
+          2. 查看AI分析结果
         </h2>
         <div className="flex flex-col h-full">
           <ImageAnalysisDisplay

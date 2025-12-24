@@ -1,37 +1,46 @@
 'use server';
 
-import type { DiagnoseImageInput, DiagnoseImageOutput } from '@/ai/flows/diagnose-image-flow';
+import type { TrafficAnalysisOutput } from '@/types/analysis';
 
 interface ActionResult {
-  analysis?: DiagnoseImageOutput;
+  analysis?: TrafficAnalysisOutput;
   error?: string;
 }
 
-// This function will eventually be responsible for saving the analysis to a local JSON file.
-// For now, it just returns the data from the AI flow.
-export async function handleImageAnalysis(input: DiagnoseImageInput): Promise<ActionResult> {
-  try {
-    // In a real scenario, you would dynamically import diagnoseImage
-    // but for simplicity in this environment, we'll assume it's available.
-    // We are simulating a call to a local service that runs the Genkit flow.
-    const { diagnoseImage } = await import('@/ai/flows/diagnose-image-flow');
-    
-    const analysisResult = await diagnoseImage(input);
+interface AnalyzeImageInput {
+  photoDataUri: string;
+}
 
-    if (analysisResult) {
-      // Here, you would implement the logic to save `analysisResult` to a JSON file.
-      // For example:
-      // import fs from 'fs/promises';
-      // import path from 'path';
-      // const filePath = path.join(process.cwd(), 'public', 'data', `${analysisResult.uuid}.json`);
-      // await fs.writeFile(filePath, JSON.stringify(analysisResult, null, 2));
-      
-      return { analysis: analysisResult };
+// This function now calls an external Python/C++ backend service.
+export async function handleImageAnalysis(input: AnalyzeImageInput): Promise<ActionResult> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000/analyze';
+
+  try {
+    const response = await fetch(backendUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        // The backend expects a 'image' field with the data URI
+        image: input.photoDataUri,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('Backend Error:', errorBody);
+      throw new Error(`后端服务响应错误: ${response.status} ${response.statusText}`);
     }
-    return { error: '未能分析图片。AI没有返回任何结果。' };
+
+    const analysisResult: TrafficAnalysisOutput = await response.json();
+    return { analysis: analysisResult };
+
   } catch (error: any) {
-    console.error('分析图片时出错:', error);
-    // This simulates calling a Python backend, so we keep the error message generic.
-    return { error: `与AI服务通信时发生错误。请稍后再试。` };
+    console.error('调用后端服务时出错:', error);
+    if (error.code === 'ECONNREFUSED') {
+        return { error: '无法连接到后端分析服务。请确保您的Python/C++程序正在运行。' };
+    }
+    return { error: `与后端服务通信时发生错误: ${error.message}` };
   }
 }
