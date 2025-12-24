@@ -94,7 +94,7 @@ PROMPT = """
 
 # --- Gemini API 调用 ---
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-VISION_MODEL = "gemini-1.0-pro-vision-latest" 
+VISION_MODEL = "gemini-1.0-pro-vision-latest"
 TEXT_MODEL = "gemini-1.0-pro"
 
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
@@ -238,3 +238,5 @@ if __name__ == "__main__":
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
     # 注意: reload=True 会导致启动脚本运行两次，所以连接测试也会显示两次
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    
