@@ -2,7 +2,7 @@
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -71,8 +71,8 @@ def get_gemini_model():
     if not api_key:
         return None
     genai.configure(api_key=api_key)
-    # 使用支持图片和文本输入的模型
-    model = genai.GenerativeModel('gemini-pro-vision')
+    # 使用支持图片和文本输入的模型 - 更新为新模型名称
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     return model
 
 # --- 提示词 ---
@@ -151,5 +151,3 @@ def read_root():
 if __name__ == "__main__":
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-    
