@@ -1,126 +1,60 @@
 'use client';
 
-import React, { useState, type ChangeEvent, useEffect } from 'react';
-import { ImageUploader } from '@/components/ImageUploader';
-import { TagManager } from '@/components/TagManager';
-import { handleTagGeneration } from '@/app/actions';
-import { useToast } from '@/hooks/use-toast';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Terminal } from 'lucide-react';
+import React from 'react';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+import { ArrowRight, Image as ImageIcon, Info } from 'lucide-react';
 
 export default function Home() {
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [tags, setTags] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { toast } = useToast();
-
-  useEffect(() => {
-    // Clean up the object URL to avoid memory leaks
-    return () => {
-      if (imagePreview) {
-        URL.revokeObjectURL(imagePreview);
-      }
-    };
-  }, [imagePreview]);
-
-  const handleImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    // Revoke the old object URL if a new image is being uploaded.
-    if (imagePreview) {
-      URL.revokeObjectURL(imagePreview);
-      setImagePreview(null);
-    }
-
-    const file = event.target.files?.[0];
-    if (file) {
-      if (!file.type.startsWith('image/')) {
-        toast({
-          variant: 'destructive',
-          title: '文件类型无效',
-          description: '请上传图片文件（例如PNG、JPG）。',
-        });
-        return;
-      }
-
-      setTags([]);
-      setError(null);
-
-      const previewUrl = URL.createObjectURL(file);
-      setImagePreview(previewUrl);
-
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const dataUri = reader.result as string;
-        setIsLoading(true);
-        try {
-          const result = await handleTagGeneration({ photoDataUri: dataUri });
-          if (result.error) {
-            setError(result.error);
-            toast({
-              variant: 'destructive',
-              title: 'AI 错误',
-              description: result.error,
-            });
-          } else {
-            setTags(result.tags || []);
-          }
-        } catch (e: any) {
-          const errorMessage = '发生意外错误。请重试。';
-          setError(errorMessage);
-          toast({
-            variant: 'destructive',
-            title: '错误',
-            description: errorMessage,
-          });
-        } finally {
-          setIsLoading(false);
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const clearImage = () => {
-    if (imagePreview) {
-      URL.revokeObjectURL(imagePreview);
-    }
-    setImagePreview(null);
-    setTags([]);
-    setError(null);
-  };
-
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-12 animate-in fade-in-50 duration-500">
-      <div className="space-y-6">
-        <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          1. 上传图片
-        </h2>
-        <ImageUploader
-          onImageUpload={handleImageUpload}
-          imagePreview={imagePreview}
-          onClear={clearImage}
-          isLoading={isLoading}
-        />
+    <div className="animate-in fade-in-50 duration-500">
+      <div className="text-center mb-12">
+        <h1 className="text-5xl font-extrabold tracking-tight text-foreground font-headline mb-4">
+          欢迎使用 TagLens AI
+        </h1>
+        <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
+          一个强大且智能的工具集，旨在通过AI技术简化您的工作流程。
+        </p>
       </div>
-      <div className="space-y-6">
-        <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          2. 管理标签
-        </h2>
-        <div className="flex flex-col h-full">
-          <TagManager
-            tags={tags}
-            setTags={setTags}
-            isLoading={isLoading}
-            hasImage={!!imagePreview}
-          />
-          {error && !isLoading && (
-            <Alert variant="destructive" className="mt-4">
-              <Terminal className="h-4 w-4" />
-              <AlertTitle>生成标签时出错</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-        </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+        <Card className="shadow-lg hover:shadow-primary/20 transition-all duration-300 hover:scale-105">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ImageIcon className="text-primary" />
+              图片智能标签
+            </CardTitle>
+            <CardDescription>
+              上传您的图片，AI将自动为您提取和生成相关的标签，方便您进行分类和管理。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link href="/image-tagger" passHref>
+              <Button className="w-full">
+                开始使用 <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+        <Card className="shadow-lg hover:shadow-primary/20 transition-all duration-300 hover:scale-105">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Info className="text-primary" />
+              关于我们
+            </CardTitle>
+            <CardDescription>
+              了解更多关于 TagLens AI 项目的愿景、技术栈以及其背后的开发理念。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link href="/about" passHref>
+              <Button className="w-full" variant="outline">
+                了解更多 <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
