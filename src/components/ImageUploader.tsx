@@ -46,12 +46,12 @@ export function ImageUploader({ onImageUpload, imagePreview, onClear, isLoading 
           <div className="relative group aspect-video">
             <Image
               src={imagePreview}
-              alt="Uploaded image preview"
+              alt="上传的图片预览"
               fill
               className="rounded-md object-contain"
             />
             <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
-              <Button variant="destructive" size="icon" onClick={onClear} aria-label="Clear image">
+              <Button variant="destructive" size="icon" onClick={onClear} aria-label="清除图片">
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -65,7 +65,7 @@ export function ImageUploader({ onImageUpload, imagePreview, onClear, isLoading 
           <div className="relative flex flex-col items-center justify-center w-full aspect-video border-2 border-dashed border-border rounded-lg p-6 text-center hover:border-primary hover:bg-accent/10 transition-colors duration-300">
             <UploadCloud className="w-12 h-12 text-muted-foreground mb-4" />
             <p className="mb-2 text-sm text-muted-foreground">
-              <span className="font-semibold text-primary">Click to upload</span> or drag and drop
+              <span className="font-semibold text-primary">点击上传</span> 或拖拽文件
             </p>
             <p className="text-xs text-muted-foreground">PNG, JPG, WEBP, GIF</p>
             <input 
@@ -74,7 +74,7 @@ export function ImageUploader({ onImageUpload, imagePreview, onClear, isLoading 
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
               accept="image/png, image/jpeg, image/webp, image/gif"
               onChange={onImageUpload}
-              aria-label="Upload image"
+              aria-label="上传图片"
             />
           </div>
         )}

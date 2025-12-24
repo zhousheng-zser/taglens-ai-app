@@ -5,8 +5,8 @@ import { Footer } from '@/components/layout/Footer';
 import { Toaster } from '@/components/ui/toaster';
 
 export const metadata: Metadata = {
-  title: 'TagLens AI',
-  description: 'An AI-powered image tag extraction tool with a clean, tech-inspired interface.',
+  title: 'TagLens AI - 智能图片标签提取',
+  description: '一个由AI驱动的图片标签提取工具，拥有简洁、富有科技感的界面。',
 };
 
 export default function RootLayout({
@@ -15,7 +15,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="zh" className="dark">
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />

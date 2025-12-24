@@ -70,7 +70,7 @@ export function TagManager({ tags, setTags, isLoading, hasImage }: TagManagerPro
         return (
             <div className="flex flex-col items-center justify-center text-center text-muted-foreground p-8 space-y-4 min-h-[200px]">
                 <Tag className="w-12 h-12"/>
-                <p>Upload an image to generate tags.</p>
+                <p>上传图片以生成标签。</p>
             </div>
         )
     }
@@ -81,7 +81,7 @@ export function TagManager({ tags, setTags, isLoading, hasImage }: TagManagerPro
           {tags.map(tag => (
             <Badge key={tag} variant="secondary" className="text-base py-1 px-3 flex items-center gap-2 group transition-all hover:bg-primary hover:text-primary-foreground cursor-default">
               <span>{tag}</span>
-              <button onClick={() => removeTag(tag)} className="opacity-50 group-hover:opacity-100 transition-opacity rounded-full hover:bg-black/20" aria-label={`Remove tag ${tag}`}>
+              <button onClick={() => removeTag(tag)} className="opacity-50 group-hover:opacity-100 transition-opacity rounded-full hover:bg-black/20" aria-label={`移除标签 ${tag}`}>
                 <X className="h-4 w-4" />
               </button>
             </Badge>
@@ -93,7 +93,7 @@ export function TagManager({ tags, setTags, isLoading, hasImage }: TagManagerPro
     return (
          <div className="flex flex-col items-center justify-center text-center text-muted-foreground p-8 space-y-4 min-h-[200px]">
             <Tag className="w-12 h-12"/>
-            <p>No tags were generated. You can add some manually below.</p>
+            <p>没有生成任何标签。您可以在下方手动添加。</p>
         </div>
     )
   };
@@ -103,7 +103,7 @@ export function TagManager({ tags, setTags, isLoading, hasImage }: TagManagerPro
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           {isLoading && <Loader2 className="h-5 w-5 animate-spin" />}
-          Extracted Tags
+          提取的标签
         </CardTitle>
       </CardHeader>
       <CardContent className="flex-grow min-h-[200px]">
@@ -116,7 +116,7 @@ export function TagManager({ tags, setTags, isLoading, hasImage }: TagManagerPro
             <div className="flex gap-2">
               <Input
                 type="text"
-                placeholder="Add a new tag"
+                placeholder="添加一个新标签"
                 value={newTag}
                 onChange={e => setNewTag(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && addTag()}
@@ -124,13 +124,13 @@ export function TagManager({ tags, setTags, isLoading, hasImage }: TagManagerPro
                 className="bg-background/50"
               />
               <Button onClick={addTag} disabled={!hasImage || isLoading || !newTag.trim()}>
-                <Plus className="h-4 w-4 sm:mr-2" /> <span className="hidden sm:inline">Add</span>
+                <Plus className="h-4 w-4 sm:mr-2" /> <span className="hidden sm:inline">添加</span>
               </Button>
             </div>
           </CardContent>
           <CardFooter className="flex-col sm:flex-row items-stretch sm:items-center gap-2 justify-end">
              <Button variant="outline" onClick={clearAllTags} disabled={tags.length === 0 || isLoading} className="flex-grow sm:flex-grow-0">
-              <Trash2 className="h-4 w-4 mr-2" /> Clear All
+              <Trash2 className="h-4 w-4 mr-2" /> 清除全部
             </Button>
             <div className="flex gap-2">
               <Button variant="outline" onClick={exportJson} disabled={tags.length === 0 || isLoading} className="flex-1">

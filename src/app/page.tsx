@@ -36,8 +36,8 @@ export default function Home() {
       if (!file.type.startsWith('image/')) {
         toast({
           variant: 'destructive',
-          title: 'Invalid File Type',
-          description: 'Please upload an image file (e.g., PNG, JPG).',
+          title: '文件类型无效',
+          description: '请上传图片文件（例如PNG、JPG）。',
         });
         return;
       }
@@ -58,18 +58,18 @@ export default function Home() {
             setError(result.error);
             toast({
               variant: 'destructive',
-              title: 'AI Error',
+              title: 'AI 错误',
               description: result.error,
             });
           } else {
             setTags(result.tags || []);
           }
         } catch (e: any) {
-          const errorMessage = 'An unexpected error occurred. Please try again.';
+          const errorMessage = '发生意外错误。请重试。';
           setError(errorMessage);
           toast({
             variant: 'destructive',
-            title: 'Error',
+            title: '错误',
             description: errorMessage,
           });
         } finally {
@@ -93,7 +93,7 @@ export default function Home() {
     <div className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-12 animate-in fade-in-50 duration-500">
       <div className="space-y-6">
         <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          1. Upload Image
+          1. 上传图片
         </h2>
         <ImageUploader
           onImageUpload={handleImageUpload}
@@ -104,7 +104,7 @@ export default function Home() {
       </div>
       <div className="space-y-6">
         <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          2. Manage Tags
+          2. 管理标签
         </h2>
         <div className="flex flex-col h-full">
           <TagManager
@@ -116,7 +116,7 @@ export default function Home() {
           {error && !isLoading && (
             <Alert variant="destructive" className="mt-4">
               <Terminal className="h-4 w-4" />
-              <AlertTitle>Error Generating Tags</AlertTitle>
+              <AlertTitle>生成标签时出错</AlertTitle>
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
