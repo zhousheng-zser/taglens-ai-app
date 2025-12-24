@@ -9,6 +9,7 @@ import json
 import requests
 import base64
 import asyncio
+import time
 
 # 加载环境变量
 load_dotenv()
@@ -94,7 +95,7 @@ PROMPT = """
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
-    """调用Gemini Vision模型进行图片分析"""
+    """调用Gemini Vision模型进行图片分析，包含重试逻辑"""
     model = "gemini-3-pro-preview"
     url = API_URL_TEMPLATE.format(model=model)
     headers = {
@@ -121,29 +122,38 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
         }
     }
     
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        
-        api_result = response.json()
-        
-        content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-        # 移除可能的 ```json ... ``` 包装 
-        if content_text.strip().startswith("```json"):
-            content_text = content_text.strip()[7:-3]
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            if response.status_code == 429:
+                print(f"Vision API 速率限制，将在5秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                time.sleep(5)
+                continue
+            
+            response.raise_for_status()
+            
+            api_result = response.json()
+            
+            content_text = api_result['candidates'][0]['content']['parts'][0]['text']
+            if content_text.strip().startswith("```json"):
+                content_text = content_text.strip()[7:-3]
 
-        return json.loads(content_text.strip())
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling Vision API: {e}")
-        if 'response' in locals() and response is not None:
-             print(f"Response content: {response.text}")
-        raise HTTPException(status_code=500, detail=f"调用Gemini Vision API时出错: {e}")
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        print(f"Error parsing Vision API response: {e}")
-        if 'content_text' in locals():
-            print(f"Raw response text: {content_text}")
-        raise HTTPException(status_code=500, detail="解析AI模型返回的数据时出错")
+            return json.loads(content_text.strip())
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error calling Vision API: {e}")
+            if 'response' in locals() and response is not None:
+                 print(f"Response content: {response.text}")
+            if attempt == max_retries - 1:
+                raise HTTPException(status_code=500, detail=f"调用Gemini Vision API时出错: {e}")
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            print(f"Error parsing Vision API response: {e}")
+            if 'content_text' in locals():
+                print(f"Raw response text: {content_text}")
+            raise HTTPException(status_code=500, detail="解析AI模型返回的数据时出错")
+    
+    raise HTTPException(status_code=500, detail="多次重试后，调用Gemini Vision API仍然失败")
 
 
 def test_gemini_connection():
@@ -164,22 +174,36 @@ def test_gemini_connection():
         'X-goog-api-key': api_key
     }
     payload = {"contents": [{"parts": [{"text": "你好"}]}]}
+    
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
+            if response.status_code == 429:
+                print(f"Test API 速率限制，将在5秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                time.sleep(5)
+                continue
+                
+            response.raise_for_status()
+            api_result = response.json()
+            reply = api_result['candidates'][0]['content']['parts'][0]['text']
+            print(f">> Gemini 连接成功！回复: \"{reply.strip()}\"")
+            return
+        except requests.exceptions.RequestException as e:
+            print(f">> 错误: 调用 Gemini API 失败。请检查网络或API密钥。")
+            print(f">> 详细信息: {e}")
+            if attempt == max_retries - 1:
+                break
+        except (KeyError, IndexError) as e:
+            print(">> 错误: 从 Gemini 收到了意外的响应格式。")
+            if 'response' in locals() and response is not None:
+                print(f">> 原始响应: {response.text}")
+            break
+        finally:
+            if attempt == max_retries - 1:
+                print("-" * 50)
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-        response.raise_for_status()
-        api_result = response.json()
-        reply = api_result['candidates'][0]['content']['parts'][0]['text']
-        print(f">> Gemini 连接成功！回复: \"{reply.strip()}\"")
-    except requests.exceptions.RequestException as e:
-        print(f">> 错误: 调用 Gemini API 失败。请检查网络或API密钥。")
-        print(f">> 详细信息: {e}")
-    except (KeyError, IndexError) as e:
-        print(">> 错误: 从 Gemini 收到了意外的响应格式。")
-        if 'response' in locals() and response is not None:
-            print(f">> 原始响应: {response.text}")
-    finally:
-        print("-" * 50)
+    print("-" * 50)
 
 
 def extract_image_part(data_uri: str):
@@ -200,6 +224,7 @@ async def analyze_image(request: ImageAnalysisRequest):
 
     if not api_key:
         print("警告: 未找到 GEMINI_API_KEY，将返回模拟数据。")
+        await asyncio.sleep(1) # 模拟处理时间
         return mock_analysis_data
 
     try:
@@ -231,7 +256,6 @@ if __name__ == "__main__":
     test_gemini_connection()
     
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
-    # 注意: reload=True 会导致启动脚本运行两次
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
     
