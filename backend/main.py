@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 import json
 import requests
 import base64
-import mimetypes
 import asyncio
 
 # 加载环境变量
@@ -94,12 +93,11 @@ PROMPT = """
 
 # --- Gemini API 调用 ---
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-VISION_MODEL = "gemini-1.0-pro-vision-latest"
-TEXT_MODEL = "gemini-1.0-pro"
 
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
     """调用Gemini Vision模型进行图片分析"""
-    url = API_URL_TEMPLATE.format(model=VISION_MODEL)
+    model = "gemini-1.0-pro-vision-latest"
+    url = API_URL_TEMPLATE.format(model=model)
     headers = {
         'Content-Type': 'application/json',
         'X-goog-api-key': api_key
@@ -119,7 +117,7 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
                 ]
             }
         ],
-        "generationConfig": {
+         "generationConfig": {
             "response_mime_type": "application/json"
         }
     }
@@ -130,10 +128,10 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
         
         api_result = response.json()
         
-        # 移除可能存在的 ```json ... ``` 包装
         content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-        if content_text.startswith("```json"):
-            content_text = content_text.replace("```json", "").replace("```", "")
+        # 移除可能的 ```json ... ``` 包装
+        if content_text.strip().startswith("```json"):
+            content_text = content_text.strip()[7:-3]
 
         return json.loads(content_text.strip())
         
@@ -160,7 +158,8 @@ def test_gemini_connection():
         print("-" * 50)
         return
 
-    url = API_URL_TEMPLATE.format(model=TEXT_MODEL)
+    model = "gemini-1.0-pro"
+    url = API_URL_TEMPLATE.format(model=model)
     headers = {
         'Content-Type': 'application/json',
         'X-goog-api-key': api_key
@@ -176,9 +175,10 @@ def test_gemini_connection():
     except requests.exceptions.RequestException as e:
         print(f">> 错误: 调用 Gemini API 失败。请检查网络或API密钥。")
         print(f">> 详细信息: {e}")
-    except (KeyError, IndexError):
+    except (KeyError, IndexError) as e:
         print(">> 错误: 从 Gemini 收到了意外的响应格式。")
-        print(f">> 原始响应: {response.text if 'response' in locals() else 'N/A'}")
+        if 'response' in locals() and response is not None:
+            print(f">> 原始响应: {response.text}")
     finally:
         print("-" * 50)
 
@@ -199,7 +199,6 @@ def extract_image_part(data_uri: str):
 async def analyze_image(request: ImageAnalysisRequest):
     api_key = os.getenv("GEMINI_API_KEY")
 
-    # 如果没有配置API密钥，则返回模拟数据
     if not api_key:
         print("警告: 未找到 GEMINI_API_KEY，将返回模拟数据。")
         return mock_analysis_data
@@ -207,7 +206,6 @@ async def analyze_image(request: ImageAnalysisRequest):
     try:
         image_parts = extract_image_part(request.image)
         
-        # 使用 asyncio.to_thread 在后台线程中运行阻塞的API调用
         analysis_result = await asyncio.to_thread(
             call_gemini_vision_api, 
             api_key, 
@@ -219,7 +217,6 @@ async def analyze_image(request: ImageAnalysisRequest):
         return validated_result
 
     except HTTPException as e:
-        # 直接重新抛出已知的HTTP异常
         raise e
     except Exception as e:
         print(f"处理图片时发生错误: {e}")
@@ -232,11 +229,10 @@ def read_root():
 
 # --- 运行服务器 ---
 if __name__ == "__main__":
-    # 在启动服务器前测试连接
     test_gemini_connection()
     
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
-    # 注意: reload=True 会导致启动脚本运行两次，所以连接测试也会显示两次
+    # 注意: reload=True 会导致启动脚本运行两次
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
     
