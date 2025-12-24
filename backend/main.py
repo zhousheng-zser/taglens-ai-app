@@ -234,5 +234,3 @@ if __name__ == "__main__":
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
     # 注意: reload=True 会导致启动脚本运行两次，所以连接测试也会显示两次
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-    
