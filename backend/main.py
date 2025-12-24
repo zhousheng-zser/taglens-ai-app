@@ -130,9 +130,12 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
         
         api_result = response.json()
         
+        # 移除可能存在的 ```json ... ``` 包装
         content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-        
-        return json.loads(content_text)
+        if content_text.startswith("```json"):
+            content_text = content_text.replace("```json", "").replace("```", "")
+
+        return json.loads(content_text.strip())
         
     except requests.exceptions.RequestException as e:
         print(f"Error calling Vision API: {e}")
@@ -141,7 +144,8 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
         raise HTTPException(status_code=500, detail=f"调用Gemini Vision API时出错: {e}")
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         print(f"Error parsing Vision API response: {e}")
-        print(f"Raw response text: {content_text}")
+        if 'content_text' in locals():
+            print(f"Raw response text: {content_text}")
         raise HTTPException(status_code=500, detail="解析AI模型返回的数据时出错")
 
 
