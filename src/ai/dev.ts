@@ -1,4 +1,4 @@
 import { config } from 'dotenv';
 config();
 
-import '@/ai/flows/generate-initial-tags.ts';
+import '@/ai/flows/diagnose-image-flow.ts';

@@ -2,15 +2,16 @@
 
 import React, { useState, type ChangeEvent, useEffect } from 'react';
 import { ImageUploader } from '@/components/ImageUploader';
-import { TagManager } from '@/components/TagManager';
-import { handleTagGeneration } from '@/app/actions';
+import { ImageAnalysisDisplay } from '@/components/ImageAnalysisDisplay';
+import { handleImageAnalysis } from '@/app/actions';
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Terminal } from 'lucide-react';
+import type { DiagnoseImageOutput } from '@/ai/flows/diagnose-image-flow';
 
 export default function ImageTaggerPage() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [tags, setTags] = useState<string[]>([]);
+  const [analysis, setAnalysis] = useState<DiagnoseImageOutput | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
@@ -42,7 +43,7 @@ export default function ImageTaggerPage() {
         return;
       }
 
-      setTags([]);
+      setAnalysis(null);
       setError(null);
 
       const previewUrl = URL.createObjectURL(file);
@@ -53,7 +54,8 @@ export default function ImageTaggerPage() {
         const dataUri = reader.result as string;
         setIsLoading(true);
         try {
-          const result = await handleTagGeneration({ photoDataUri: dataUri });
+          // Changed from handleTagGeneration to handleImageAnalysis
+          const result = await handleImageAnalysis({ photoDataUri: dataUri });
           if (result.error) {
             setError(result.error);
             toast({
@@ -62,7 +64,7 @@ export default function ImageTaggerPage() {
               description: result.error,
             });
           } else {
-            setTags(result.tags || []);
+            setAnalysis(result.analysis || null);
           }
         } catch (e: any) {
           const errorMessage = '发生意外错误。请重试。';
@@ -85,7 +87,7 @@ export default function ImageTaggerPage() {
       URL.revokeObjectURL(imagePreview);
     }
     setImagePreview(null);
-    setTags([]);
+    setAnalysis(null);
     setError(null);
   };
 
@@ -104,19 +106,18 @@ export default function ImageTaggerPage() {
       </div>
       <div className="space-y-6">
         <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-          2. 管理标签
+          2. 查看分析结果
         </h2>
         <div className="flex flex-col h-full">
-          <TagManager
-            tags={tags}
-            setTags={setTags}
+          <ImageAnalysisDisplay
+            analysis={analysis}
             isLoading={isLoading}
             hasImage={!!imagePreview}
           />
           {error && !isLoading && (
             <Alert variant="destructive" className="mt-4">
               <Terminal className="h-4 w-4" />
-              <AlertTitle>生成标签时出错</AlertTitle>
+              <AlertTitle>生成分析时出错</AlertTitle>
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
