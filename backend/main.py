@@ -10,6 +10,7 @@ import json
 import requests
 import base64
 import mimetypes
+import asyncio
 
 # 加载环境变量
 load_dotenv()
@@ -93,10 +94,12 @@ PROMPT = """
 
 # --- Gemini API 调用 ---
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-MODEL = "gemini-pro-vision" 
+VISION_MODEL = "gemini-pro-vision" 
+TEXT_MODEL = "gemini-pro"
 
-def call_gemini_api(api_key: str, image_b64: str, mime_type: str):
-    url = API_URL_TEMPLATE.format(model=MODEL)
+def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
+    """调用Gemini Vision模型进行图片分析"""
+    url = API_URL_TEMPLATE.format(model=VISION_MODEL)
     headers = {
         'Content-Type': 'application/json',
         'X-goog-api-key': api_key
@@ -116,7 +119,6 @@ def call_gemini_api(api_key: str, image_b64: str, mime_type: str):
                 ]
             }
         ]
-        # "generationConfig": { "response_mime_type": "application/json" } # This can sometimes cause issues
     }
     
     try:
@@ -126,19 +128,55 @@ def call_gemini_api(api_key: str, image_b64: str, mime_type: str):
         api_result = response.json()
         
         content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-        if content_text.startswith("```json"):
+        # 清理可能的Markdown代码块标记
+        if content_text.strip().startswith("```json"):
             content_text = content_text.strip().removeprefix("```json").removesuffix("```").strip()
             
         return json.loads(content_text)
         
     except requests.exceptions.RequestException as e:
-        print(f"Error calling API: {e}")
+        print(f"Error calling Vision API: {e}")
         if 'response' in locals() and response is not None:
              print(f"Response content: {response.text}")
-        raise HTTPException(status_code=500, detail=f"调用Gemini API时出错: {e}")
+        raise HTTPException(status_code=500, detail=f"调用Gemini Vision API时出错: {e}")
     except (KeyError, IndexError, json.JSONDecodeError) as e:
-        print(f"Error parsing API response: {e}")
+        print(f"Error parsing Vision API response: {e}")
+        print(f"Raw response text: {content_text}")
         raise HTTPException(status_code=500, detail="解析AI模型返回的数据时出错")
+
+
+def test_gemini_connection():
+    """在启动时测试与Gemini的连接"""
+    print("-" * 50)
+    print("正在测试与 Gemini API 的连接...")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print(">> 警告: 未找到 GEMINI_API_KEY 环境变量。")
+        print(">> 后端将只能返回模拟数据。")
+        print("-" * 50)
+        return
+
+    url = API_URL_TEMPLATE.format(model=TEXT_MODEL)
+    headers = {
+        'Content-Type': 'application/json',
+        'X-goog-api-key': api_key
+    }
+    payload = {"contents": [{"parts": [{"text": "你好"}]}]}
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        response.raise_for_status()
+        api_result = response.json()
+        reply = api_result['candidates'][0]['content']['parts'][0]['text']
+        print(f">> Gemini 连接成功！回复: \"{reply.strip()}\"")
+    except requests.exceptions.RequestException as e:
+        print(f">> 错误: 调用 Gemini API 失败。请检查网络或API密钥。")
+        print(f">> 详细信息: {e}")
+    except (KeyError, IndexError):
+        print(">> 错误: 从 Gemini 收到了意外的响应格式。")
+        print(f">> 原始响应: {response.text if 'response' in locals() else 'N/A'}")
+    finally:
+        print("-" * 50)
 
 
 def extract_image_part(data_uri: str):
@@ -165,8 +203,9 @@ async def analyze_image(request: ImageAnalysisRequest):
     try:
         image_parts = extract_image_part(request.image)
         
+        # 使用 asyncio.to_thread 在后台线程中运行阻塞的API调用
         analysis_result = await asyncio.to_thread(
-            call_gemini_api, 
+            call_gemini_vision_api, 
             api_key, 
             image_parts["data"], 
             image_parts["mime_type"]
@@ -189,8 +228,9 @@ def read_root():
 
 # --- 运行服务器 ---
 if __name__ == "__main__":
-    import asyncio
-    print("启动 TagLens AI 后端服务于 http://localhost:8000")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
+    # 在启动服务器前测试连接
+    test_gemini_connection()
     
+    print("启动 TagLens AI 后端服务于 http://localhost:8000")
+    # 注意: reload=True 会导致启动脚本运行两次，所以连接测试也会显示两次
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
