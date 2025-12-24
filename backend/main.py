@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os
 import uvicorn
@@ -96,7 +95,7 @@ API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{mod
 
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
     """调用Gemini Vision模型进行图片分析"""
-    model = "gemini-1.0-pro-vision-latest"
+    model = "gemini-3-pro-preview"
     url = API_URL_TEMPLATE.format(model=model)
     headers = {
         'Content-Type': 'application/json',
@@ -129,7 +128,7 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
         api_result = response.json()
         
         content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-        # 移除可能的 ```json ... ``` 包装
+        # 移除可能的 ```json ... ``` 包装 
         if content_text.strip().startswith("```json"):
             content_text = content_text.strip()[7:-3]
 
@@ -158,7 +157,7 @@ def test_gemini_connection():
         print("-" * 50)
         return
 
-    model = "gemini-1.0-pro"
+    model = "gemini-3-pro-preview"
     url = API_URL_TEMPLATE.format(model=model)
     headers = {
         'Content-Type': 'application/json',
