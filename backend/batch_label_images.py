@@ -25,7 +25,7 @@ except Exception as e:
     print(f"Warning: Failed to apply proxy workaround: {e}")
 
 # 默认配置
-DEFAULT_MODEL = "gemini-1.5-flash-latest" # 使用免费额度更高的模型
+DEFAULT_MODEL = "gemini-pro-vision" # 使用免费且兼容v1beta API的稳定视觉模型
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 # V5.1 交通视频全景分析提示词 (All-in-Vector 策略)
@@ -117,10 +117,7 @@ def call_gemini_api(api_key, image_path, model):
                     }
                 ]
             }
-        ],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        ]
     }
     
     try:
@@ -159,6 +156,11 @@ def process_single_image(img_path, api_key, model, idx, total):
             with print_lock:
                 print(f"  -> Rate limit hit for {file_name}, waiting {wait_time}s...")
             time.sleep(wait_time)
+        elif 'response' in locals() and locals()['response'] is not None and locals()['response'].status_code == 429:
+            wait_time = (attempt + 1) * 5
+            with print_lock:
+                print(f"  -> Rate limit hit for {file_name}, waiting {wait_time}s...")
+            time.sleep(wait_time)
         else:
             # 其他错误，不重试
             break
@@ -171,7 +173,7 @@ def process_single_image(img_path, api_key, model, idx, total):
             if content_text.startswith("```json"):
                 content_text = content_text.replace("```json", "").replace("```", "")
             
-            parsed_json = json.loads(content_text)
+            parsed_json = json.loads(content_text.strip())
             
             # 提取 Token 使用情况
             usage_metadata = result.get('usageMetadata', {})
@@ -201,9 +203,11 @@ def process_single_image(img_path, api_key, model, idx, total):
                 print(f"  -> ✅ Saved: {os.path.basename(json_path)} ({round(end_time - start_time, 1)}s)")
             return True
             
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, KeyError, IndexError):
             with print_lock:
-                print(f"  -> ❌ JSON Error: {file_name}")
+                print(f"  -> ❌ JSON/Parsing Error: {file_name}")
+                if 'content_text' in locals():
+                    print(f"     Raw response: {content_text}")
             return False
     else:
         with print_lock:
@@ -244,7 +248,7 @@ if __name__ == "__main__":
     parser.add_argument("input_path", help="Path to the image directory or a single image file")
     parser.add_argument("--key", required=True, help="Google Gemini API Key")
     parser.add_argument("--limit", type=int, help="Number of images to process")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name. Recommended: 'gemini-1.5-flash-latest', 'gemini-pro-vision'. Default: {DEFAULT_MODEL}")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name. Default: {DEFAULT_MODEL}")
     parser.add_argument("--workers", type=int, default=4, help="Number of concurrent threads (default: 4)")
     
     args = parser.parse_args()
@@ -253,6 +257,3 @@ if __name__ == "__main__":
         print(f"Error: Path '{args.input_path}' not found.")
     else:
         process_images(args.input_path, args.key, args.limit, args.model, args.workers)
-
-
-    

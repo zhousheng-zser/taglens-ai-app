@@ -9,9 +9,15 @@ import json
 import requests
 import base64
 import time
+import asyncio
 
 # 加载环境变量
 load_dotenv()
+
+# --- 模型定义 ---
+# 使用 gemini-pro-vision，这是一个稳定且免费的视觉模型，与 v1beta API 兼容
+MODEL_NAME = "gemini-pro-vision"
+API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 # --- Pydantic 模型定义 ---
 class ImageAnalysisRequest(BaseModel):
@@ -91,12 +97,9 @@ PROMPT = """
 """
 
 # --- Gemini API 调用 ---
-API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
     """调用Gemini Vision模型进行图片分析，包含重试逻辑"""
-    model = "gemini-1.5-flash-latest" # 使用免费额度更高的模型
-    url = API_URL_TEMPLATE.format(model=model)
+    url = API_URL_TEMPLATE.format(model=MODEL_NAME)
     headers = {
         'Content-Type': 'application/json',
         'X-goog-api-key': api_key
@@ -115,10 +118,7 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
                     }
                 ]
             }
-        ],
-         "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        ]
     }
     
     max_retries = 2
@@ -134,6 +134,10 @@ def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
             
             api_result = response.json()
             
+            # 兼容处理，Gemini-pro-vision可能不返回 application/json
+            if 'candidates' not in api_result:
+                raise KeyError("API响应中缺少'candidates'字段")
+
             content_text = api_result['candidates'][0]['content']['parts'][0]['text']
             if content_text.strip().startswith("```json"):
                 content_text = content_text.strip()[7:-3]
@@ -166,13 +170,14 @@ def test_gemini_connection():
         print("-" * 50)
         return
 
-    model = "gemini-1.5-flash-latest" # 使用免费额度更高的模型
-    url = API_URL_TEMPLATE.format(model=model)
+    # 使用一个简单的文本模型进行测试
+    url = API_URL_TEMPLATE.format(model=MODEL_NAME)
     headers = {
         'Content-Type': 'application/json',
         'X-goog-api-key': api_key
     }
-    payload = {"contents": [{"parts": [{"text": "你好"}]}]}
+    # gemini-pro-vision can handle text-only prompts
+    payload = {"contents": [{"parts": [{"text": "你好, 你能看见这段文字吗？"}]}]}
     
     max_retries = 2
     for attempt in range(max_retries):
@@ -186,15 +191,17 @@ def test_gemini_connection():
             response.raise_for_status()
             api_result = response.json()
             reply = api_result['candidates'][0]['content']['parts'][0]['text']
-            print(f">> Gemini 连接成功！回复: \"{reply.strip()}\"")
+            print(f">> Gemini ({MODEL_NAME}) 连接成功！回复: \"{reply.strip()}\"")
             return
         except requests.exceptions.RequestException as e:
             print(f">> 错误: 调用 Gemini API 失败。请检查网络或API密钥。")
             print(f">> 详细信息: {e}")
+            if 'response' in locals() and response is not None:
+                print(f">> 原始响应: {response.text}")
             if attempt == max_retries - 1:
                 break
         except (KeyError, IndexError) as e:
-            print(">> 错误: 从 Gemini 收到了意外的响应格式。")
+            print(f">> 错误: 从 Gemini 收到了意外的响应格式。")
             if 'response' in locals() and response is not None:
                 print(f">> 原始响应: {response.text}")
             break
@@ -220,7 +227,7 @@ async def analyze_image(request: ImageAnalysisRequest):
 
     if not api_key:
         print("警告: 未找到 GEMINI_API_KEY，将返回模拟数据。")
-        time.sleep(1) # 模拟处理时间
+        await asyncio.sleep(1) # 模拟处理时间
         return mock_analysis_data
 
     try:
@@ -250,10 +257,7 @@ def read_root():
 
 # --- 运行服务器 ---
 if __name__ == "__main__":
-    import asyncio
     test_gemini_connection()
     
-    print("启动 TagLens AI 后端服务于 http://localhost:8000")
+    print(f"启动 TagLens AI 后端服务于 http://localhost:8000 (模型: {MODEL_NAME})")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-    
