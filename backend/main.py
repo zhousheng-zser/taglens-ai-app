@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 import json
 import requests
 import base64
-import asyncio
 import time
 
 # 加载环境变量
@@ -96,7 +95,7 @@ API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{mod
 
 def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
     """调用Gemini Vision模型进行图片分析，包含重试逻辑"""
-    model = "gemini-3-pro-preview"
+    model = "gemini-1.5-flash-latest" # 使用免费额度更高的模型
     url = API_URL_TEMPLATE.format(model=model)
     headers = {
         'Content-Type': 'application/json',
@@ -167,7 +166,7 @@ def test_gemini_connection():
         print("-" * 50)
         return
 
-    model = "gemini-3-pro-preview"
+    model = "gemini-1.5-flash-latest" # 使用免费额度更高的模型
     url = API_URL_TEMPLATE.format(model=model)
     headers = {
         'Content-Type': 'application/json',
@@ -200,10 +199,7 @@ def test_gemini_connection():
                 print(f">> 原始响应: {response.text}")
             break
         finally:
-            if attempt == max_retries - 1:
-                print("-" * 50)
-
-    print("-" * 50)
+            print("-" * 50)
 
 
 def extract_image_part(data_uri: str):
@@ -224,12 +220,13 @@ async def analyze_image(request: ImageAnalysisRequest):
 
     if not api_key:
         print("警告: 未找到 GEMINI_API_KEY，将返回模拟数据。")
-        await asyncio.sleep(1) # 模拟处理时间
+        time.sleep(1) # 模拟处理时间
         return mock_analysis_data
 
     try:
         image_parts = extract_image_part(request.image)
         
+        # 使用 to_thread 避免阻塞事件循环
         analysis_result = await asyncio.to_thread(
             call_gemini_vision_api, 
             api_key, 
@@ -253,6 +250,7 @@ def read_root():
 
 # --- 运行服务器 ---
 if __name__ == "__main__":
+    import asyncio
     test_gemini_connection()
     
     print("启动 TagLens AI 后端服务于 http://localhost:8000")
