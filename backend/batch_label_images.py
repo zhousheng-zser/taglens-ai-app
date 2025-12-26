@@ -203,7 +203,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch process images with Alibaba Qwen (DashScope) API using OpenAI compatible mode.")
     parser.add_argument("input_path", help="Path to the image directory or a single image file")
     parser.add_argument("--key", required=False, help="Alibaba DashScope API Key. Can also be set via DASHSCOPE_API_KEY environment variable.")
-    parser.add_argument("--limit", type=int, help="Number of images to process")
+    parser.add_-argument("--limit", type=int, help="Number of images to process")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name. Default: {DEFAULT_MODEL}")
     parser.add_argument("--workers", type=int, default=4, help="Number of concurrent threads (default: 4)")
     
