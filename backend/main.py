@@ -3,6 +3,7 @@ import os
 import uvicorn
 import json
 import asyncio
+import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,7 +15,7 @@ load_dotenv()
 
 # --- 模型和API定义 ---
 # 使用通义千问视觉语言模型 (兼容OpenAI API)
-VISION_MODEL = "qwen-vl-flash"
+VISION_MODEL = "qwen-vl-max"
 TEXT_MODEL = "qwen-plus"
 # 北京地域的兼容Endpoint
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -125,7 +126,7 @@ def call_qwen_vision_api(api_key: str, data_uri: str):
         )
         content_text = completion.choices[0].message.content
         # 清理返回的文本，提取纯JSON
-        if "```json" in content_text:
+        if content_text and "```json" in content_text:
             content_text = content_text.split("```json")[1].split("```")[0]
         
         return json.loads(content_text.strip())

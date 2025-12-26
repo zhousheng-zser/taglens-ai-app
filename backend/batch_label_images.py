@@ -11,7 +11,7 @@ from datetime import datetime
 from openai import OpenAI
 
 # 默认配置
-DEFAULT_MODEL = "qwen-vl-flash"
+DEFAULT_MODEL = "qwen-vl-max"
 # 北京地域的兼容Endpoint
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
@@ -117,7 +117,7 @@ def process_single_image(img_path, api_key, model, idx, total):
             content_text = result.choices[0].message.content
             
             # 清理返回的文本，提取纯JSON
-            if "```json" in content_text:
+            if content_text and "```json" in content_text:
                 content_text = content_text.split("```json")[1].split("```")[0]
             
             parsed_json = json.loads(content_text.strip())
