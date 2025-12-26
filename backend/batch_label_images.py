@@ -11,7 +11,7 @@ from datetime import datetime
 from openai import OpenAI
 
 # 默认配置
-DEFAULT_MODEL = "qwen-vl-plus"
+DEFAULT_MODEL = "qwen-vl-flash"
 # 北京地域的兼容Endpoint
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
@@ -180,7 +180,7 @@ def process_images(input_path, api_key, limit=None, model=DEFAULT_MODEL, workers
         print("No image files found.")
         return
 
-    print(f"🚀 Starting concurrent processing with {workers} workers...")
+    print(f"🚀 Starting concurrent processing with {workers} workers using model: {model}...")
     
     success_count = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -211,8 +211,8 @@ if __name__ == "__main__":
     
     api_key = args.key or os.getenv("DASHSCOPE_API_KEY")
 
-    if not api_key:
-        print("Error: API key not provided. Use --key argument or set DASHSCOPE_API_KEY environment variable.")
+    if not api_key or api_key == "11111":
+        print("Error: API key not provided or is default. Use --key argument or set DASHSCOPE_API_KEY environment variable.")
     elif not os.path.exists(args.input_path):
         print(f"Error: Path '{args.input_path}' not found.")
     else:
@@ -227,3 +227,5 @@ if __name__ == "__main__":
             print("openai installed successfully.")
 
         process_images(args.input_path, api_key, args.limit, args.model, args.workers)
+
+    

@@ -14,7 +14,7 @@ load_dotenv()
 
 # --- 模型和API定义 ---
 # 使用通义千问视觉语言模型 (兼容OpenAI API)
-VISION_MODEL = "qwen-vl-plus"
+VISION_MODEL = "qwen-vl-flash"
 TEXT_MODEL = "qwen-plus"
 # 北京地域的兼容Endpoint
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -140,8 +140,8 @@ def test_qwen_connection():
     print("-" * 50)
     print("正在测试与通义千问 (DashScope) API 的连接...")
     api_key = os.getenv("DASHSCOPE_API_KEY")
-    if not api_key:
-        print(">> 警告: 未找到 DASHSCOPE_API_KEY 环境变量。")
+    if not api_key or api_key == "11111":
+        print(">> 警告: 未找到或未配置有效的 DASHSCOPE_API_KEY 环境变量。")
         print(">> 后端将只能返回模拟数据。")
         print("-" * 50)
         return
@@ -170,8 +170,8 @@ def test_qwen_connection():
 async def analyze_image(request: ImageAnalysisRequest):
     api_key = os.getenv("DASHSCOPE_API_KEY")
 
-    if not api_key:
-        print("警告: 未找到 DASHSCOPE_API_KEY，将返回模拟数据。")
+    if not api_key or api_key == "11111":
+        print("警告: 未找到有效的 DASHSCOPE_API_KEY，将返回模拟数据。")
         await asyncio.sleep(1) # 模拟处理时间
         return mock_analysis_data
 
@@ -203,3 +203,5 @@ if __name__ == "__main__":
     
     print(f"启动 TagLens AI 后端服务于 http://localhost:8000 (模型: {VISION_MODEL})")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    
