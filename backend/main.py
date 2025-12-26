@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 import os
 import uvicorn
+import json
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import json
-import requests
-import base64
-import time
-import asyncio
+from openai import OpenAI
 
 # 加载环境变量
 load_dotenv()
 
-# --- 模型定义 ---
-# 使用 gemini-pro-vision，这是一个稳定且免费的视觉模型，与 v1beta API 兼容
-MODEL_NAME = "gemini-pro-vision"
-API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+# --- 模型和API定义 ---
+# 使用通义千问视觉语言模型 (兼容OpenAI API)
+VISION_MODEL = "qwen-vl-plus"
+TEXT_MODEL = "qwen-plus"
+# 北京地域的兼容Endpoint
+BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # --- Pydantic 模型定义 ---
 class ImageAnalysisRequest(BaseModel):
@@ -35,7 +35,6 @@ class TrafficAnalysisOutput(BaseModel):
     semantic_search: SemanticSearch
     training_data: TrainingData
 
-# --- 示例数据 ---
 # 如果没有API密钥，将返回此示例数据
 mock_analysis_data = {
   "semantic_search": {
@@ -58,7 +57,6 @@ mock_analysis_data = {
   }
 }
 
-
 # --- FastAPI 应用设置 ---
 app = FastAPI()
 
@@ -73,172 +71,116 @@ app.add_middleware(
 
 # --- 提示词 ---
 PROMPT = """
-你是一个交通视频AI分析专家。请分析这张图片，并输出严格的 JSON 格式数据。
+你是一个交通视频AI分析专家。请仔细分析用户提供的图片，并严格按照我要求的JSON格式输出分析结果。JSON对象必须包含 semantic_search 和 training_data 两个键。
 
-请按照以下三个核心维度进行分析：
+**输出格式示例 (严格遵循此JSON结构):**
+```json
+{
+  "semantic_search": {
+    "description": "这是一张2025年12月24日07:03拍摄的S125北青线高架桥监控画面。天气为雨天，光线较暗，沥青路面潮湿且有明显的积水反光。道路为双向六车道，交通流量中等。画面特征包括：路面上印有巨大的白色'高架'和'闭'字样导向标记，道路中央安装了绿色的连续防眩板，两侧有灰色的声屏障。左上角OSD信息显示桩号为K21+900，方向为上行。一辆黑色轿车正在中间车道行驶，尾灯亮起。",
+    "keywords": ["雨天", "S125", "高架桥", "防眩板", "路面文字", "K21+900", "声屏障", "沥青路面", "黑色轿车"]
+  },
+  "training_data": {
+    "clip_captions": [
+      "一张雨天的高架桥道路监控图片",
+      "路面上印有巨大的白色文字标记",
+      "道路中央安装了绿色的防眩板",
+      "沥青路面潮湿并反射着车灯",
+      "高架桥两侧安装了声屏障",
+      "一辆黑色轿车在中间车道行驶"
+    ],
+    "yolo_objects": [
+      "黑色-轿车-中间车道",
+      "绿色-防眩板-中央",
+      "白色-文字标记-路面"
+    ]
+  }
+}
+```
 
-1. **semantic_search (语义检索核心)**:
-   - **description**: 生成一段**高密度、连贯、包含所有细节**的自然语言描述。
-     - 必须自然地融合以下信息：时间(从OSD读取)、地点(路名/桩号)、天气(雨/晴/阴)、光线、路面状态(潮湿/积水)、车道数、交通流量。
-     - 必须详细描述基础设施：高架桥、声屏障、防眩板(颜色)、龙门架、路面文字标记(OCR内容)。
-     - 必须包含OCR信息：将读取到的OSD信息和路面/路牌文字自然地写入句子中（例如"左上角OSD显示..."）。
-     - 目的：这段话将被向量化，用于检索任何细节（如搜"有裂缝的路面"或"S125路段"）。
-   - **keywords**: 提取 10-15 个核心关键词，覆盖场景、设施、天气、特定物体。
-
-2. **training_data (模型训练数据)**:
-   - **clip_captions**: 生成 5-6 条**精选的**、**独立的**视觉陈述句，用于 CLIP 模型微调。
-     - 每一句都应该是一个独立的视角（整体场景、局部细节、特殊特征、动态目标）。
-     - 必须是客观陈述，不要包含推测（如"可能..."）。
-     - 句式要多样化，不要重复。
-   - **yolo_objects**: 生成结构化的目标清单，格式为 "颜色-物体-状态/位置"。
-     - 例如: "黑色-轿车-中间车道", "绿色-防眩板-中央隔离带"。
-
-**请务必只输出 JSON 对象，不要包含任何其他文本或标记。**
+请根据以上规则分析图片并生成JSON。
 """
 
-# --- Gemini API 调用 ---
-def call_gemini_vision_api(api_key: str, image_b64: str, mime_type: str):
-    """调用Gemini Vision模型进行图片分析，包含重试逻辑"""
-    url = API_URL_TEMPLATE.format(model=MODEL_NAME)
-    headers = {
-        'Content-Type': 'application/json',
-        'X-goog-api-key': api_key
-    }
-    
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": PROMPT},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": image_b64
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-    
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            if response.status_code == 429:
-                print(f"Vision API 速率限制，将在5秒后重试... (尝试 {attempt + 1}/{max_retries})")
-                time.sleep(5)
-                continue
-            
-            response.raise_for_status()
-            
-            api_result = response.json()
-            
-            # 兼容处理，Gemini-pro-vision可能不返回 application/json
-            if 'candidates' not in api_result:
-                raise KeyError("API响应中缺少'candidates'字段")
+def get_qwen_client(api_key: str):
+    """获取通义千问OpenAI兼容客户端"""
+    return OpenAI(api_key=api_key, base_url=BASE_URL)
 
-            content_text = api_result['candidates'][0]['content']['parts'][0]['text']
-            if content_text.strip().startswith("```json"):
-                content_text = content_text.strip()[7:-3]
+# --- Qwen API 调用 ---
+def call_qwen_vision_api(api_key: str, data_uri: str):
+    """调用通义千问视觉模型进行图片分析"""
+    client = get_qwen_client(api_key)
+    try:
+        completion = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": PROMPT},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ],
+            top_p=0.8
+        )
+        content_text = completion.choices[0].message.content
+        # 清理返回的文本，提取纯JSON
+        if "```json" in content_text:
+            content_text = content_text.split("```json")[1].split("```")[0]
+        
+        return json.loads(content_text.strip())
 
-            return json.loads(content_text.strip())
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Error calling Vision API: {e}")
-            if 'response' in locals() and response is not None:
-                 print(f"Response content: {response.text}")
-            if attempt == max_retries - 1:
-                raise HTTPException(status_code=500, detail=f"调用Gemini Vision API时出错: {e}")
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
-            print(f"Error parsing Vision API response: {e}")
-            if 'content_text' in locals():
-                print(f"Raw response text: {content_text}")
-            raise HTTPException(status_code=500, detail="解析AI模型返回的数据时出错")
-    
-    raise HTTPException(status_code=500, detail="多次重试后，调用Gemini Vision API仍然失败")
+    except Exception as e:
+        print(f"Error calling Qwen Vision API: {e}")
+        raise HTTPException(status_code=500, detail=f"调用AI视觉模型时出错: {e}")
 
 
-def test_gemini_connection():
-    """在启动时测试与Gemini的连接"""
+def test_qwen_connection():
+    """在启动时测试与通义千问的连接"""
     print("-" * 50)
-    print("正在测试与 Gemini API 的连接...")
-    api_key = os.getenv("GEMINI_API_KEY")
+    print("正在测试与通义千问 (DashScope) API 的连接...")
+    api_key = os.getenv("DASHSCOPE_API_KEY")
     if not api_key:
-        print(">> 警告: 未找到 GEMINI_API_KEY 环境变量。")
+        print(">> 警告: 未找到 DASHSCOPE_API_KEY 环境变量。")
         print(">> 后端将只能返回模拟数据。")
         print("-" * 50)
         return
-
-    # 使用一个简单的文本模型进行测试
-    url = API_URL_TEMPLATE.format(model=MODEL_NAME)
-    headers = {
-        'Content-Type': 'application/json',
-        'X-goog-api-key': api_key
-    }
-    # gemini-pro-vision can handle text-only prompts
-    payload = {"contents": [{"parts": [{"text": "你好, 你能看见这段文字吗？"}]}]}
     
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=20)
-            if response.status_code == 429:
-                print(f"Test API 速率限制，将在5秒后重试... (尝试 {attempt + 1}/{max_retries})")
-                time.sleep(5)
-                continue
-                
-            response.raise_for_status()
-            api_result = response.json()
-            reply = api_result['candidates'][0]['content']['parts'][0]['text']
-            print(f">> Gemini ({MODEL_NAME}) 连接成功！回复: \"{reply.strip()}\"")
-            return
-        except requests.exceptions.RequestException as e:
-            print(f">> 错误: 调用 Gemini API 失败。请检查网络或API密钥。")
-            print(f">> 详细信息: {e}")
-            if 'response' in locals() and response is not None:
-                print(f">> 原始响应: {response.text}")
-            if attempt == max_retries - 1:
-                break
-        except (KeyError, IndexError) as e:
-            print(f">> 错误: 从 Gemini 收到了意外的响应格式。")
-            if 'response' in locals() and response is not None:
-                print(f">> 原始响应: {response.text}")
-            break
-        finally:
-            print("-" * 50)
-
-
-def extract_image_part(data_uri: str):
-    """从Data URI中分离出MIME类型和Base64数据"""
     try:
-        header, encoded = data_uri.split(",", 1)
-        mime_type = header.split(";", 1)[0].split(":", 1)[1]
-        return {"mime_type": mime_type, "data": encoded}
+        client = get_qwen_client(api_key)
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': '你好, 你能看见这段文字吗？'}
+            ]
+        )
+        reply = completion.choices[0].message.content
+        print(f">> 通义千问 ({TEXT_MODEL}) 连接成功！回复: \"{reply.strip()}\"")
+
     except Exception as e:
-        print(f"Error parsing data URI: {e}")
-        raise HTTPException(status_code=400, detail="无效的图像Data URI格式")
+        print(f">> 错误: 调用通义千问 API 失败。请检查网络或API密钥。")
+        print(f">> 详细信息: {e}")
+    finally:
+        print("-" * 50)
 
 
 # --- API 路由 ---
 @app.post("/analyze", response_model=TrafficAnalysisOutput)
 async def analyze_image(request: ImageAnalysisRequest):
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("DASHSCOPE_API_KEY")
 
     if not api_key:
-        print("警告: 未找到 GEMINI_API_KEY，将返回模拟数据。")
+        print("警告: 未找到 DASHSCOPE_API_KEY，将返回模拟数据。")
         await asyncio.sleep(1) # 模拟处理时间
         return mock_analysis_data
 
     try:
-        image_parts = extract_image_part(request.image)
-        
         # 使用 to_thread 避免阻塞事件循环
         analysis_result = await asyncio.to_thread(
-            call_gemini_vision_api, 
+            call_qwen_vision_api, 
             api_key, 
-            image_parts["data"], 
-            image_parts["mime_type"]
+            request.image
         )
 
         validated_result = TrafficAnalysisOutput(**analysis_result)
@@ -252,12 +194,12 @@ async def analyze_image(request: ImageAnalysisRequest):
 
 @app.get("/")
 def read_root():
-    return {"message": "欢迎使用 TagLens AI 后端服务"}
+    return {"message": "欢迎使用 TagLens AI 后端服务 (Qwen-Powered)"}
 
 
 # --- 运行服务器 ---
 if __name__ == "__main__":
-    test_gemini_connection()
+    test_qwen_connection()
     
-    print(f"启动 TagLens AI 后端服务于 http://localhost:8000 (模型: {MODEL_NAME})")
+    print(f"启动 TagLens AI 后端服务于 http://localhost:8000 (模型: {VISION_MODEL})")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

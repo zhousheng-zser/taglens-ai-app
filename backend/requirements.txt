@@ -2,5 +2,5 @@ fastapi
 uvicorn[standard]
 python-dotenv
 pydantic
-requests
-dashscope
+openai
+python-multipart

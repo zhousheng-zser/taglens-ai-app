@@ -4,22 +4,19 @@ import json
 import time
 import base64
 import argparse
-import requests
 import mimetypes
-from datetime import datetime
 import concurrent.futures
 from threading import Lock
+from datetime import datetime
+from openai import OpenAI
 
 # 默认配置
-DEFAULT_MODEL = "qwen-vl-plus"  # 使用通义千问视觉语言模型
-API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+DEFAULT_MODEL = "qwen-vl-plus"
+# 北京地域的兼容Endpoint
+BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-# V5.1 交通视频全景分析提示词 (适配通义千问)
-# 核心理念：
-# 1. 语义检索 (Semantic Search): 将所有结构化信息自然融合进长文本描述。
-# 2. CLIP微调 (CLIP Fine-tuning): 生成精选的、低噪音的、多视角的视觉陈述句。
-# 3. YOLO挖掘 (Object Mining): 保留结构化目标清单。
 
+# V5.1 交通视频全景分析提示词
 SYSTEM_PROMPT = """
 你是一个交通视频AI分析专家。请仔细分析用户提供的图片，并严格按照我要求的JSON格式输出分析结果。JSON对象必须包含 semantic_search 和 training_data 两个键。
 
@@ -55,6 +52,7 @@ SYSTEM_PROMPT = """
 print_lock = Lock()
 
 def get_image_files(directory):
+    """获取目录下的所有图片文件"""
     image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
     image_files = []
     for root, _, files in os.walk(directory):
@@ -63,78 +61,60 @@ def get_image_files(directory):
                 image_files.append(os.path.join(root, file))
     return image_files
 
-def call_qwen_api(api_key, image_path, model):
-    """调用通义千问多模态API"""
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json'
-    }
+def image_to_data_uri(image_path):
+    """将本地图片文件转换为Base64 Data URI"""
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if not mime_type or not mime_type.startswith('image'):
+        raise ValueError(f"无法确定文件类型或文件不是图片: {image_path}")
     
-    # 将本地图片文件转换为可通过HTTP访问的格式
-    # 注意：千问API需要图片能通过URL访问，这里我们使用file://协议路径
-    # 如果部署在无权访问本地文件系统的服务器上，需要先将图片上传到对象存储（如OSS）
-    image_url = f"file://{os.path.abspath(image_path)}"
+    with open(image_path, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+    
+    return f"data:{mime_type};base64,{encoded_string}"
 
-    payload = {
-        "model": model,
-        "input": {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": [
-                        {"text": SYSTEM_PROMPT}
-                    ]
-                },
+
+def call_qwen_api(api_key, image_path, model):
+    """调用通义千问多模态API (OpenAI兼容模式)"""
+    client = OpenAI(api_key=api_key, base_url=BASE_URL)
+    
+    try:
+        data_uri = image_to_data_uri(image_path)
+        
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"image": image_url},
-                        {"text": "请分析这张图片。"}
-                    ]
+                        {"type": "text", "text": SYSTEM_PROMPT},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
                 }
-            ]
-        },
-        "parameters": {
-            "result_format": "text"
-        }
-    }
-    
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling API for {image_path}: {e}")
-        if 'response' in locals() and response is not None:
-             print(f"Response content: {response.text}")
+            ],
+            top_p=0.8
+        )
+        return completion
+
+    except Exception as e:
+        with print_lock:
+            print(f"Error calling API for {image_path}: {e}")
         return None
 
 def process_single_image(img_path, api_key, model, idx, total):
+    """处理单个图片，包括API调用和结果保存"""
     file_name = os.path.basename(img_path)
     with print_lock:
         print(f"[{idx}/{total}] Starting analysis: {file_name}")
     
     start_time = time.time()
-    max_retries = 3
-    result = None
     
-    for attempt in range(max_retries):
-        result = call_qwen_api(api_key, img_path, model)
-        if result and 'output' in result:
-            break
-        elif result and 'code' in result and 'RateLimitExceeded' in result.get('code', ''):
-            wait_time = (attempt + 1) * 5
-            with print_lock:
-                print(f"  -> Rate limit hit for {file_name}, waiting {wait_time}s...")
-            time.sleep(wait_time)
-        else:
-            break
+    result = call_qwen_api(api_key, img_path, model)
 
     end_time = time.time()
     
-    if result and 'output' in result and result['output']['choices']:
+    if result and result.choices:
         try:
-            content_text = result['output']['choices'][0]['message']['content'][0]['text']
+            content_text = result.choices[0].message.content
             
             # 清理返回的文本，提取纯JSON
             if "```json" in content_text:
@@ -142,23 +122,23 @@ def process_single_image(img_path, api_key, model, idx, total):
             
             parsed_json = json.loads(content_text.strip())
             
-            usage_metadata = result.get('usage', {})
+            usage_metadata = result.usage
             
             final_output = {
                 "file_name": file_name,
                 "file_path": img_path,
                 "analysis_result": parsed_json,
                 "metadata": {
-                    "model": model,
-                    "api": "qwen-dashscope",
+                    "model": result.model,
+                    "api": "qwen-openai-compatible",
                     "created_at": datetime.now().isoformat(),
                     "processing_time_seconds": round(end_time - start_time, 2),
                     "token_usage": {
-                        "prompt_tokens": usage_metadata.get('input_tokens', 0),
-                        "response_tokens": usage_metadata.get('output_tokens', 0),
-                        "total_tokens": usage_metadata.get('total_tokens', 0)
+                        "prompt_tokens": usage_metadata.prompt_tokens if usage_metadata else 0,
+                        "response_tokens": usage_metadata.completion_tokens if usage_metadata else 0,
+                        "total_tokens": usage_metadata.total_tokens if usage_metadata else 0,
                     },
-                    "request_id": result.get('request_id', 'N/A')
+                    "request_id": result.id
                 }
             }
             
@@ -170,7 +150,7 @@ def process_single_image(img_path, api_key, model, idx, total):
                 print(f"  -> ✅ Saved: {os.path.basename(json_path)} ({round(end_time - start_time, 1)}s)")
             return True
             
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
+        except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
             with print_lock:
                 print(f"  -> ❌ JSON/Parsing Error for {file_name}: {e}")
                 if 'content_text' in locals():
@@ -184,6 +164,7 @@ def process_single_image(img_path, api_key, model, idx, total):
         return False
 
 def process_images(input_path, api_key, limit=None, model=DEFAULT_MODEL, workers=4):
+    """并发处理图片目录或单个文件"""
     if os.path.isfile(input_path):
         image_files = [input_path]
         print(f"Processing single file: {input_path}...")
@@ -194,6 +175,10 @@ def process_images(input_path, api_key, limit=None, model=DEFAULT_MODEL, workers
             print(f"Processing {limit} images from {input_path}...")
         else:
             print(f"Processing all {len(image_files)} images from {input_path}...")
+
+    if not image_files:
+        print("No image files found.")
+        return
 
     print(f"🚀 Starting concurrent processing with {workers} workers...")
     
@@ -215,34 +200,30 @@ def process_images(input_path, api_key, limit=None, model=DEFAULT_MODEL, workers
     print(f"\nDone! Successfully processed {success_count}/{len(image_files)} images.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Batch process images with Alibaba Qwen (DashScope) API for traffic analysis.")
+    parser = argparse.ArgumentParser(description="Batch process images with Alibaba Qwen (DashScope) API using OpenAI compatible mode.")
     parser.add_argument("input_path", help="Path to the image directory or a single image file")
-    parser.add_argument("--key", required=True, help="Alibaba DashScope API Key")
+    parser.add_argument("--key", required=False, help="Alibaba DashScope API Key. Can also be set via DASHSCOPE_API_KEY environment variable.")
     parser.add_argument("--limit", type=int, help="Number of images to process")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name. Default: {DEFAULT_MODEL}")
     parser.add_argument("--workers", type=int, default=4, help="Number of concurrent threads (default: 4)")
     
     args = parser.parse_args()
     
-    # 尝试从环境变量加载API密钥
-    if not args.key:
-        args.key = os.getenv("DASHSCOPE_API_KEY")
+    api_key = args.key or os.getenv("DASHSCOPE_API_KEY")
 
-    if not args.key:
+    if not api_key:
         print("Error: API key not provided. Use --key argument or set DASHSCOPE_API_KEY environment variable.")
     elif not os.path.exists(args.input_path):
         print(f"Error: Path '{args.input_path}' not found.")
     else:
-        # 安装 dashscope 库
+        # 自动安装依赖
         try:
-            import dashscope
+            import openai
         except ImportError:
-            print("dashscope library not found. Installing...")
+            print("openai library not found. Installing...")
             import subprocess
             import sys
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "dashscope"])
-            print("dashscope installed successfully.")
-            
-        process_images(args.input_path, args.key, args.limit, args.model, args.workers)
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "openai"])
+            print("openai installed successfully.")
 
-    
+        process_images(args.input_path, api_key, args.limit, args.model, args.workers)
