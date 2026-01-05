@@ -3,7 +3,7 @@
 import React, { useState, type ChangeEvent, useEffect } from 'react';
 import { ImageUploader } from '@/components/ImageUploader';
 import { ImageAnalysisDisplay } from '@/components/ImageAnalysisDisplay';
-import { handleImageAnalysis } from '@/app/actions';
+import { handleImageAnalysis, checkImageSimilarity } from '@/app/actions';
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Terminal, Upload, CheckCircle2 } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
+import { Slider } from '@/components/ui/slider';
 import type { TrafficAnalysisOutput } from '@/types/analysis';
 
 interface ProcessedImage {
@@ -42,6 +43,8 @@ interface ImageAnalysisItem {
   error: string | null;
   isSaved: boolean;
   selectedModel?: 'qwen' | 'gemini';  // 保存时选择的模型
+  similarImageData?: string | null;  // 最相似图片的base64数据（data URI格式）
+  similarityScore?: number;  // 相似度分数
 }
 
 export default function ImageTaggerPage() {
@@ -50,6 +53,7 @@ export default function ImageTaggerPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
   const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'both'>('qwen');
+  const [similarityThreshold, setSimilarityThreshold] = useState(0.65); // 默认65%
   const { toast } = useToast();
 
   // 当前显示的图片信息
@@ -85,6 +89,39 @@ export default function ImageTaggerPage() {
     });
     
     try {
+      // 先检查图片相似度
+      const similarityCheck = await checkImageSimilarity(dataUri, similarityThreshold);
+      
+      if (similarityCheck.is_similar) {
+        // 发现相似图片，不调用大模型API
+        // 获取最相似图片的数据
+        const mostSimilarImage = similarityCheck.similar_images[0];
+        setImageAnalyses(prev => {
+          const updated = [...prev];
+          if (updated[index]) {
+            updated[index] = {
+              ...updated[index],
+              analysis: null,
+              dualAnalysis: null,
+              error: `检测到相似图片（相似度: ${(similarityCheck.max_similarity * 100).toFixed(1)}%），跳过AI分析以避免重复`,
+              similarImageData: mostSimilarImage?.imageData || null,
+              similarityScore: similarityCheck.max_similarity,
+            };
+          }
+          return updated;
+        });
+        
+        toast({
+          variant: 'default',
+          title: '检测到相似图片',
+          description: similarityCheck.message,
+        });
+        
+        setIsLoading(false);
+        return;
+      }
+      
+      // 没有相似图片，继续调用大模型API
       const result = await handleImageAnalysis({ photoDataUri: dataUri, model: selectedModel });
       if (result.error) {
         setImageAnalyses(prev => {
@@ -328,6 +365,28 @@ export default function ImageTaggerPage() {
                 : `将使用 ${selectedModel === 'qwen' ? '通义千问' : 'Gemini'} 模型进行分析`}
             </p>
           </div>
+
+          {/* 相似度阈值调整 */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="similarity-threshold">相似度阈值</Label>
+              <span className="text-sm font-medium text-foreground">
+                {(similarityThreshold * 100).toFixed(0)}%
+              </span>
+            </div>
+            <Slider
+              id="similarity-threshold"
+              min={0}
+              max={1}
+              step={0.01}
+              value={[similarityThreshold]}
+              onValueChange={(values) => setSimilarityThreshold(values[0])}
+              className="w-full"
+            />
+            <p className="text-xs text-muted-foreground">
+              当上传图片与数据库中的图片相似度达到此阈值时，将跳过AI分析以避免重复
+            </p>
+          </div>
           
           <ImageUploader
             onImageUpload={handleImageUpload}
@@ -375,6 +434,8 @@ export default function ImageTaggerPage() {
                 });
               }}
               selectedModel={currentImage?.selectedModel || 'qwen'}
+              similarImageData={currentImage?.similarImageData || null}
+              similarityScore={currentImage?.similarityScore}
             />
             {currentImage?.error && !isLoading && (
               <Alert variant="destructive" className="mt-4">

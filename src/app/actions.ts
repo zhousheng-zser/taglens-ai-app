@@ -39,6 +39,65 @@ interface SaveImageResult {
   error?: string;
 }
 
+interface SimilarImageResult {
+  uuid: string;
+  filePath: string;
+  fileName?: string;
+  createdAt: string;
+  similarity: number;
+  methods: Record<string, any>;
+  imageData?: string;  // 图片的base64数据（data URI格式），用于前端显示
+}
+
+interface ImageSimilarityCheckResult {
+  is_similar: boolean;
+  max_similarity: number;
+  similar_images: SimilarImageResult[];
+  message: string;
+}
+
+// 检查图片相似度
+export async function checkImageSimilarity(
+  photoDataUri: string, 
+  threshold: number = 0.65
+): Promise<ImageSimilarityCheckResult> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  const checkUrl = `${backendUrl}/check-similarity`;
+
+  try {
+    const response = await fetch(checkUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        image: photoDataUri,
+        threshold: threshold,
+        max_results: 5,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('相似度检查错误:', errorBody);
+      throw new Error(`后端服务响应错误: ${response.status} ${response.statusText}`);
+    }
+
+    const result: ImageSimilarityCheckResult = await response.json();
+    return result;
+
+  } catch (error: any) {
+    console.error('检查图片相似度时出错:', error);
+    // 如果检查失败，返回不相似的结果，允许继续分析
+    return {
+      is_similar: false,
+      max_similarity: 0.0,
+      similar_images: [],
+      message: `相似度检查失败: ${error.message}，将继续进行分析`,
+    };
+  }
+}
+
 // This function now calls an external Python/C++ backend service.
 export async function handleImageAnalysis(input: AnalyzeImageInput): Promise<ActionResult> {
   const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000/analyze';

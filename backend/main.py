@@ -8,7 +8,7 @@ import base64
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,7 +18,8 @@ import requests
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel
-from database import init_database, save_image_to_db, search_images, get_all_images
+from database import init_database, save_image_to_db, search_images, get_all_images, get_db_connection, get_all_image_histograms
+from image_similarity import decode_base64_image, load_image_from_path, compare_images, extract_histogram_vector, compare_histogram_vectors
 
 # 加载环境变量
 load_dotenv()
@@ -28,10 +29,11 @@ BGE_MODEL_NAME = "BAAI/bge-base-zh-v1.5"
 BGE_MODEL_CACHE_DIR = Path(__file__).parent / "model"  # 模型存放路径: ./backend/model
 _bge_tokenizer = None
 _bge_model = None
+_bge_device = None  # 存储模型使用的设备
 
 def get_bge_model():
     """获取BGE模型（懒加载，优先使用本地缓存）"""
-    global _bge_tokenizer, _bge_model
+    global _bge_tokenizer, _bge_model, _bge_device
     if _bge_tokenizer is None or _bge_model is None:
         import time
         load_start = time.time()
@@ -87,11 +89,22 @@ def get_bge_model():
                     cache_dir=str(BGE_MODEL_CACHE_DIR),
                     local_files_only=model_exists  # 如果模型存在，强制离线模式
                 )
+                
+                # 自动检测并使用GPU（如果可用）
+                if torch.cuda.is_available():
+                    _bge_device = torch.device("cuda")
+                    _bge_model = _bge_model.to(_bge_device)
+                    print(f"  检测到GPU: {torch.cuda.get_device_name(0)}，将使用GPU加速")
+                else:
+                    _bge_device = torch.device("cpu")
+                    print(f"  未检测到GPU，将使用CPU")
+                
                 _bge_model.eval()  # 设置为评估模式
                 
                 load_time = time.time() - load_start
                 mode_str = "离线模式" if model_exists else "在线模式"
-                print(f"✓ BGE向量化模型加载完成（{mode_str}），耗时 {load_time:.2f}秒")
+                device_str = "GPU" if _bge_device.type == "cuda" else "CPU"
+                print(f"✓ BGE向量化模型加载完成（{mode_str}，{device_str}），耗时 {load_time:.2f}秒")
             except Exception as e:
                 if "not found" in str(e).lower() or "local_files_only" in str(e).lower():
                     print(f"  错误: 本地模型文件不存在，需要从网络下载")
@@ -109,7 +122,7 @@ def get_bge_model():
                 os.environ['http_proxy'] = original_http_proxy_lower
             if original_https_proxy_lower:
                 os.environ['https_proxy'] = original_https_proxy_lower
-    return _bge_tokenizer, _bge_model
+    return _bge_tokenizer, _bge_model, _bge_device
 
 def encode_text_to_vector(text: str) -> bytes:
     """
@@ -121,10 +134,13 @@ def encode_text_to_vector(text: str) -> bytes:
     返回:
         bytes: 768维float32向量的二进制表示
     """
-    tokenizer, model = get_bge_model()
+    tokenizer, model, device = get_bge_model()
     
     # 对文本进行编码
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    
+    # 将输入移动到模型所在的设备（GPU或CPU）
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     
     # 生成向量
     with torch.no_grad():
@@ -132,7 +148,7 @@ def encode_text_to_vector(text: str) -> bytes:
         embedding = output.last_hidden_state[:, 0]  # 使用CLS token
         embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)  # L2归一化
     
-    # 转换为numpy数组并确保是float32
+    # 转换为numpy数组并确保是float32（需要先移到CPU）
     embedding_np = embedding.cpu().numpy().astype(np.float32)
     
     # 转换为bytes
@@ -211,6 +227,26 @@ class SearchResponse(BaseModel):
     success: bool
     results: List[ImageSearchResult]
     total: int
+
+class ImageSimilarityCheckRequest(BaseModel):
+    image: str  # Base64 data URI
+    threshold: Optional[float] = 0.65  # 相似度阈值，默认0.65（65%）
+    max_results: Optional[int] = 5  # 最多返回几个相似图片
+
+class SimilarImageResult(BaseModel):
+    uuid: str
+    filePath: str
+    fileName: Optional[str]
+    createdAt: str
+    similarity: float  # 相似度分数 (0-1)
+    methods: Dict[str, Any]  # 各种算法的详细结果
+    imageData: Optional[str] = None  # 图片的base64数据（data URI格式），用于前端显示
+
+class ImageSimilarityCheckResponse(BaseModel):
+    is_similar: bool  # 是否找到相似图片
+    max_similarity: float  # 最高相似度
+    similar_images: List[SimilarImageResult]  # 相似图片列表
+    message: str  # 提示信息
 
 # 如果没有API密钥，将返回此示例数据
 mock_analysis_data = {
@@ -558,6 +594,164 @@ def test_qwen_connection():
 
 
 # --- API 路由 ---
+@app.post("/check-similarity", response_model=ImageSimilarityCheckResponse)
+async def check_image_similarity(request: ImageSimilarityCheckRequest):
+    """
+    检查上传的图片是否与数据库中的图片相似
+    如果相似度超过阈值，返回相似图片列表，建议不调用大模型API
+    """
+    try:
+        # 提取上传图片的直方图向量
+        uploaded_img = decode_base64_image(request.image)
+        uploaded_histogram_vector = extract_histogram_vector(uploaded_img)
+        
+        # 获取数据库中的所有图片的直方图向量
+        db_image_histograms = get_all_image_histograms()
+        
+        if not db_image_histograms:
+            return ImageSimilarityCheckResponse(
+                is_similar=False,
+                max_similarity=0.0,
+                similar_images=[],
+                message="数据库中暂无图片，可以进行分析"
+            )
+        
+        # 与数据库中的每张图片进行比较，找到第一个大于阈值的就停止
+        threshold = request.threshold or 0.65
+        
+        print(f"开始检查图片相似度，数据库中有 {len(db_image_histograms)} 张图片（使用预计算的直方图向量），阈值: {threshold}")
+        print(f"找到第一个相似度 >= {threshold} 的图片后将立即停止比较")
+        
+        first_similar_image = None
+        max_similarity = 0.0
+        
+        for db_img in db_image_histograms:
+            try:
+                # 使用保存的直方图向量进行比较
+                db_histogram_vector = db_img['histogram_vector']
+                
+                # 计算相似度（使用直方图向量）
+                print(f"\n正在比较图片: UUID={db_img['uuid']}, 文件={db_img['file_name']}")
+                histogram_result = compare_histogram_vectors(uploaded_histogram_vector, db_histogram_vector)
+                overall_similarity = histogram_result.get('average', 0.0)
+                
+                # 构建相似度结果字典（与之前的格式保持一致）
+                similarity_result = {
+                    'histogram': histogram_result,
+                    'overall_similarity': overall_similarity,
+                    'max_similarity': overall_similarity,
+                    'min_similarity': overall_similarity
+                }
+                
+                # 打印各算法的详细结果
+                print(f"  [结果汇总] UUID={db_img['uuid']}:")
+                if 'histogram' in similarity_result and 'average' in similarity_result['histogram']:
+                    hist_avg = similarity_result['histogram']['average']
+                    print(f"    直方图平均相似度: {hist_avg:.4f} ({hist_avg*100:.2f}%)")
+                print(f"    综合相似度: {overall_similarity:.4f} ({overall_similarity*100:.2f}%)")
+                
+                # 更新最大相似度（用于统计）
+                if overall_similarity > max_similarity:
+                    max_similarity = overall_similarity
+                
+                # 如果找到第一个大于阈值的图片，立即停止循环
+                if overall_similarity >= threshold:
+                    print(f"  ✓ 找到相似图片！相似度: {overall_similarity:.4f} ({overall_similarity*100:.2f}%) >= 阈值 {threshold:.4f}")
+                    print(f"  停止继续比较，直接返回该图片")
+                    
+                    # 读取该图片的base64数据
+                    image_data_uri = None
+                    try:
+                        img_path = db_img['relative_path']
+                        if img_path:
+                            project_root = Path(__file__).parent.parent
+                            full_path = project_root / img_path
+                            
+                            if os.path.exists(full_path):
+                                # 读取图片文件并转换为base64
+                                with open(full_path, 'rb') as f:
+                                    image_bytes = f.read()
+                                    # 根据文件扩展名确定MIME类型
+                                    ext = Path(full_path).suffix.lower()
+                                    mime_type = {
+                                        '.jpg': 'image/jpeg',
+                                        '.jpeg': 'image/jpeg',
+                                        '.png': 'image/png',
+                                        '.gif': 'image/gif',
+                                        '.webp': 'image/webp',
+                                        '.bmp': 'image/bmp'
+                                    }.get(ext, 'image/jpeg')
+                                    
+                                    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                                    image_data_uri = f"data:{mime_type};base64,{image_base64}"
+                                    print(f"  已读取图片数据，大小: {len(image_bytes)} 字节")
+                    except Exception as e:
+                        print(f"读取相似图片 {db_img['uuid']} 时出错: {e}")
+                        image_data_uri = None
+                    
+                    first_similar_image = {
+                        'uuid': db_img['uuid'],
+                        'filePath': db_img['relative_path'],
+                        'fileName': db_img['file_name'],
+                        'createdAt': db_img['created_at'],
+                        'similarity': overall_similarity,
+                        'methods': similarity_result,
+                        'imageData': image_data_uri
+                    }
+                    break  # 找到第一个大于阈值的图片，立即停止循环
+                    
+            except Exception as e:
+                print(f"比较图片 {db_img['uuid']} 时出错: {e}")
+                continue
+        
+        # 判断是否找到相似图片
+        is_similar = first_similar_image is not None
+        if is_similar:
+            max_similarity = first_similar_image['similarity']
+        
+        # 转换为响应格式
+        similar_images = []
+        if first_similar_image:
+            similar_images.append(
+                SimilarImageResult(
+                    uuid=first_similar_image['uuid'],
+                    filePath=first_similar_image['filePath'],
+                    fileName=first_similar_image['fileName'],
+                    createdAt=first_similar_image['createdAt'],
+                    similarity=first_similar_image['similarity'],
+                    methods=first_similar_image['methods'],
+                    imageData=first_similar_image['imageData']
+                )
+            )
+        
+        if is_similar:
+            message = f"检测到相似图片（相似度: {max_similarity:.2%}），建议不调用大模型API以避免重复分析"
+        else:
+            message = f"未发现相似图片（最高相似度: {max_similarity:.2%}），可以进行分析"
+        
+        print(f"\n{'='*80}")
+        print(f"相似度检查完成")
+        print(f"  找到相似图片: {'是' if is_similar else '否'}")
+        if is_similar:
+            print(f"  相似图片UUID: {first_similar_image['uuid']}")
+        print(f"  相似度: {max_similarity:.4f} ({max_similarity*100:.2f}%)")
+        print(f"  阈值: {threshold:.4f} ({threshold*100:.2f}%)")
+        print(f"{'='*80}\n")
+        
+        return ImageSimilarityCheckResponse(
+            is_similar=is_similar,
+            max_similarity=max_similarity,
+            similar_images=similar_images,
+            message=message
+        )
+        
+    except Exception as e:
+        print(f"检查图片相似度时出错: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"检查图片相似度失败: {str(e)}")
+
+
 @app.post("/analyze")
 async def analyze_image(request: ImageAnalysisRequest):
     """分析图片，支持选择 Qwen、Gemini 或两者"""
@@ -758,6 +952,22 @@ async def save_image(request: SaveImageRequest):
             vectorization_time = time.time() - vectorization_start
             print(f"✓ 总共生成了 {len(keyword_embeddings)} 个keyword向量，耗时 {vectorization_time:.2f}秒")
         
+        # 计算并保存直方图向量
+        histogram_vector = None
+        try:
+            import time
+            hist_start = time.time()
+            print("开始计算图片直方图向量...")
+            uploaded_img = decode_base64_image(request.image)
+            histogram_vector = extract_histogram_vector(uploaded_img)
+            hist_time = time.time() - hist_start
+            print(f"✓ 直方图向量计算完成，耗时 {hist_time:.2f}秒")
+        except Exception as e:
+            print(f"计算直方图向量时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            # 即使直方图向量计算失败，也继续保存图片
+        
         # 保存到数据库
         # tags 参数用于存储所有标签（用于搜索），但实际保存时会区分 keywords 和 yolo_objects
         all_tags = list(set(request.tags + request.keywords + request.yoloObjects))
@@ -773,7 +983,8 @@ async def save_image(request: SaveImageRequest):
             clip_captions=request.clipCaptions,
             qwen_captions=request.qwenCaptions,
             yolo_objects=request.yoloObjects,
-            keyword_embeddings=keyword_embeddings if keyword_embeddings else None
+            keyword_embeddings=keyword_embeddings if keyword_embeddings else None,
+            histogram_vector=histogram_vector
         )
         
         print(f"图片已保存: {file_path} (数据库 ID: {image_id})")

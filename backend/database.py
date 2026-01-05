@@ -96,6 +96,17 @@ def init_database():
             )
         """)
         
+        # 创建图片直方图表（存储每张图片的直方图向量）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS image_histograms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_id INTEGER NOT NULL UNIQUE,
+                histogram_vector BLOB NOT NULL,  -- 归一化后的直方图向量（50*60*60=180000维float32向量）
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            )
+        """)
+        
         # 如果表已存在但没有某些字段，则添加该字段
         try:
             cursor.execute("ALTER TABLE analysis_results ADD COLUMN qwen_captions_json TEXT DEFAULT '[]'")
@@ -130,6 +141,11 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_keyword_embeddings_keyword ON keyword_embeddings(keyword)
         """)
         
+        # 创建索引
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_image_histograms_image_id ON image_histograms(image_id)
+        """)
+        
         print(f"数据库初始化完成: {db_path}")
 
 
@@ -144,7 +160,8 @@ def save_image_to_db(
     clip_captions: List[str],
     qwen_captions: List[str],
     yolo_objects: List[str],
-    keyword_embeddings: Optional[List[tuple[str, bytes]]] = None  # List of (keyword, embedding_bytes) tuples
+    keyword_embeddings: Optional[List[tuple[str, bytes]]] = None,  # List of (keyword, embedding_bytes) tuples
+    histogram_vector: Optional[bytes] = None  # 直方图向量（BLOB格式）
 ) -> int:
     """
     保存图片信息到数据库
@@ -218,6 +235,21 @@ def save_image_to_db(
                         SET embedding = ?, created_at = ?
                         WHERE image_id = ? AND keyword = ?
                     """, (embedding_bytes, now, image_id, keyword))
+        
+        # 插入直方图向量
+        if histogram_vector:
+            try:
+                cursor.execute("""
+                    INSERT INTO image_histograms (image_id, histogram_vector, created_at)
+                    VALUES (?, ?, ?)
+                """, (image_id, histogram_vector, now))
+            except sqlite3.IntegrityError:
+                # 如果直方图向量已存在，更新它
+                cursor.execute("""
+                    UPDATE image_histograms 
+                    SET histogram_vector = ?, created_at = ?
+                    WHERE image_id = ?
+                """, (histogram_vector, now, image_id))
         
         return image_id
 
@@ -444,6 +476,30 @@ def search_images(
                 })
         
         return results
+
+
+def get_all_image_histograms() -> List[Dict[str, Any]]:
+    """
+    获取所有图片的直方图向量
+    
+    返回:
+        List[Dict[str, Any]]: 包含image_id, uuid, histogram_vector的列表
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                ih.image_id,
+                i.uuid,
+                i.relative_path,
+                i.file_name,
+                i.created_at,
+                ih.histogram_vector
+            FROM image_histograms ih
+            JOIN images i ON ih.image_id = i.id
+            ORDER BY i.created_at DESC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
 
 
 def get_all_images(limit: int = 100) -> List[Dict[str, Any]]:

@@ -30,7 +30,7 @@ else
 fi
 
 echo "正在启动后端服务..."
-python main.py > /tmp/taglens-backend.log 2>&1 &
+python main.py > ./taglens-backend.log 2>&1 &
 BACKEND_PID=$!
 
 echo "后端服务启动中 (PID: $BACKEND_PID)..."
@@ -45,7 +45,7 @@ for i in {1..30}; do
 done
 
 if ! curl -s http://localhost:8000/ > /dev/null 2>&1; then
-    echo "⚠ 警告: 后端服务可能启动失败，请检查日志: /tmp/taglens-backend.log"
+    echo "⚠ 警告: 后端服务可能启动失败，请检查日志: ./backend/taglens-backend.log"
 fi
 
 cd /opt/Traffic-LLM/zser/taglens-ai-app

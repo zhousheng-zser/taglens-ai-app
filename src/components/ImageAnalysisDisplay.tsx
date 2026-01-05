@@ -33,6 +33,8 @@ interface ImageAnalysisDisplayProps {
   onNext?: () => void; // 下一张
   onSelectModel?: (model: 'qwen' | 'gemini') => void; // 选择要保存的模型
   selectedModel?: 'qwen' | 'gemini'; // 当前选择的模型
+  similarImageData?: string | null;  // 最相似图片的base64数据（data URI格式）
+  similarityScore?: number;  // 相似度分数
 }
 
 const Section: React.FC<{ icon: React.ElementType; title: string; children: React.ReactNode }> = ({ icon: Icon, title, children }) => (
@@ -59,7 +61,9 @@ export function ImageAnalysisDisplay({
   onPrevious,
   onNext,
   onSelectModel,
-  selectedModel
+  selectedModel,
+  similarImageData,
+  similarityScore
 }: ImageAnalysisDisplayProps) {
   const { toast } = useToast();
   const [isSaving, setIsSaving] = useState(false);
@@ -375,6 +379,32 @@ export function ImageAnalysisDisplay({
               <code>{JSON.stringify(analysis, null, 2)}</code>
             </pre>
           </Section>
+        </div>
+      );
+    }
+    
+    // 如果有相似图片，显示相似图片
+    if (similarImageData && similarityScore !== undefined) {
+      return (
+        <div className="flex flex-col items-center justify-center text-center p-8 space-y-4 min-h-[400px]">
+          <Alert variant="default" className="mb-4 w-full">
+            <AlertDescription>
+              检测到相似图片（相似度: {(similarityScore * 100).toFixed(1)}%），跳过AI分析以避免重复
+            </AlertDescription>
+          </Alert>
+          <div className="w-full max-w-2xl">
+            <h3 className="text-lg font-semibold mb-4">找到相似图片:</h3>
+            <div className="relative rounded-lg overflow-hidden border-2 border-primary/50 shadow-lg">
+              <img 
+                src={similarImageData} 
+                alt="相似图片" 
+                className="w-full h-auto object-contain max-h-[600px]"
+              />
+            </div>
+            <p className="text-sm text-muted-foreground mt-2">
+              相似度: {(similarityScore * 100).toFixed(1)}%
+            </p>
+          </div>
         </div>
       );
     }

@@ -51,5 +51,6 @@ __pycache__/
 /backend/venv/
 backend/.env
 /backend/model
+/backend/*.log
 /data/*
 .cursorrules

@@ -9,3 +9,5 @@ google-genai
 numpy
 torch
 transformers
+opencv-python
+Pillow
