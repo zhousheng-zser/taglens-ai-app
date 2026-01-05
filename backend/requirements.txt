@@ -4,3 +4,8 @@ python-dotenv
 pydantic
 openai
 python-multipart
+aiosqlite
+google-genai
+numpy
+torch
+transformers

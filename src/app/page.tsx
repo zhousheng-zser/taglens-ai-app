@@ -4,11 +4,13 @@ import React from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
-import { ArrowRight, Image as ImageIcon, Info } from 'lucide-react';
+import { ArrowRight, Image as ImageIcon, Search } from 'lucide-react';
+import { ParticleBackground } from '@/components/ParticleBackground';
 
 export default function Home() {
   return (
-    <div className="animate-in fade-in-50 duration-500">
+    <div className="animate-in fade-in-50 duration-500 relative">
+      <ParticleBackground />
       <div className="text-center mb-12">
         <h1 className="text-5xl font-extrabold tracking-tight text-foreground font-headline mb-4">
           欢迎使用 TagLens AI
@@ -40,17 +42,17 @@ export default function Home() {
         <Card className="shadow-lg hover:shadow-primary/20 transition-all duration-300 hover:scale-105">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Info className="text-primary" />
-              关于我们
+              <Search className="text-primary" />
+              标签搜索
             </CardTitle>
             <CardDescription>
-              了解更多关于 TagLens AI 项目的愿景、技术栈以及其背后的开发理念。
+              通过标签、关键词或描述快速搜索已保存的图片，轻松找到您需要的内容。
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Link href="/about" passHref>
+            <Link href="/search" passHref>
               <Button className="w-full" variant="outline">
-                了解更多 <ArrowRight className="ml-2 h-4 w-4" />
+                开始搜索 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             </Link>
           </CardContent>

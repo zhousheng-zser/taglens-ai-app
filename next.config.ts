@@ -30,6 +30,11 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '20mb', // 增加 Server Actions 的请求体大小限制到 20MB
+    },
+  },
 };
 
 export default nextConfig;

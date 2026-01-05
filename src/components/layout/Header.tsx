@@ -1,4 +1,4 @@
-import { Tags, Home, Image as ImageIcon, Info } from 'lucide-react';
+import { Tags, Home, Image as ImageIcon, Info, Search } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 
@@ -19,6 +19,11 @@ export function Header() {
           <Link href="/image-tagger" passHref>
             <Button variant="ghost" className="flex items-center gap-2">
               <ImageIcon className="h-4 w-4" /> 图片标签
+            </Button>
+          </Link>
+          <Link href="/search" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Search className="h-4 w-4" /> 标签搜索
             </Button>
           </Link>
           <Link href="/about" passHref>
