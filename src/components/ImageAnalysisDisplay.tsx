@@ -35,6 +35,7 @@ interface ImageAnalysisDisplayProps {
   selectedModel?: 'qwen' | 'gemini'; // 当前选择的模型
   similarImageData?: string | null;  // 最相似图片的base64数据（data URI格式）
   similarityScore?: number;  // 相似度分数
+  isSaved?: boolean;  // 图片是否已保存（由父组件维护）
 }
 
 const Section: React.FC<{ icon: React.ElementType; title: string; children: React.ReactNode }> = ({ icon: Icon, title, children }) => (
@@ -63,7 +64,8 @@ export function ImageAnalysisDisplay({
   onSelectModel,
   selectedModel,
   similarImageData,
-  similarityScore
+  similarityScore,
+  isSaved: isSavedProp = false  // 从父组件接收已保存状态
 }: ImageAnalysisDisplayProps) {
   const { toast } = useToast();
   const [isSaving, setIsSaving] = useState(false);
@@ -138,7 +140,7 @@ export function ImageAnalysisDisplay({
         description: `图片已保存到: ${saveResult.relative_path}`,
       });
 
-      // 调用保存成功回调，传递文件路径
+      // 调用保存成功回调，传递文件路径（父组件会更新 isSaved 状态）
       if (onSaveSuccess) {
         onSaveSuccess(saveResult.relative_path);
       }
@@ -456,10 +458,10 @@ export function ImageAnalysisDisplay({
               onClick={handleSave} 
               size="sm" 
               variant="outline"
-              disabled={isSaving}
+              disabled={isSaving || isSavedProp}
             >
               <Save className="mr-2 h-4 w-4" />
-              {isSaving ? '保存中...' : '保存图片'}
+              {isSaving ? '保存中...' : isSavedProp ? '已保存' : '保存图片'}
             </Button>
           )}
         </div>

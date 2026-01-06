@@ -436,6 +436,7 @@ export default function ImageTaggerPage() {
               selectedModel={currentImage?.selectedModel || 'qwen'}
               similarImageData={currentImage?.similarImageData || null}
               similarityScore={currentImage?.similarityScore}
+              isSaved={currentImage?.isSaved || false}
             />
             {currentImage?.error && !isLoading && (
               <Alert variant="destructive" className="mt-4">
