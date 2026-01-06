@@ -27,8 +27,14 @@ interface ImageSearchResult {
   similarity?: number;  // 相似度分数（0-1之间）
 }
 
+interface TagWithWeight {
+  tag: string;
+  weight: number;
+}
+
 export default function SearchPage() {
-  const [searchQuery, setSearchQuery] = useState('');
+  const [tagInput, setTagInput] = useState('');  // 当前输入的标签
+  const [selectedTags, setSelectedTags] = useState<TagWithWeight[]>([]);  // 已选择的标签列表（带权重）
   const [searchResults, setSearchResults] = useState<ImageSearchResult[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [selectedImage, setSelectedImage] = useState<ImageSearchResult | null>(null);
@@ -69,16 +75,129 @@ export default function SearchPage() {
     }
   };
 
+  // 计算权重总和
+  const calculateTotalWeight = (tags: TagWithWeight[]) => {
+    return tags.reduce((sum, item) => sum + item.weight, 0);
+  };
+
+  // 自动分配权重（平均分配）
+  const autoDistributeWeights = (tags: TagWithWeight[]) => {
+    if (tags.length === 0) return tags;
+    const weightPerTag = 1.0 / tags.length;
+    return tags.map(item => ({ ...item, weight: weightPerTag }));
+  };
+
+  // 添加标签
+  const handleAddTag = () => {
+    const tag = tagInput.trim();
+    if (!tag) return;
+    
+    // 检查标签是否已存在
+    if (selectedTags.some(item => item.tag === tag)) {
+      toast({
+        variant: 'default',
+        title: '标签已存在',
+        description: `标签 "${tag}" 已经添加过了`,
+      });
+      return;
+    }
+
+    // 添加新标签，初始权重为0，然后重新分配权重
+    const newTags = [...selectedTags, { tag, weight: 0 }];
+    const redistributedTags = autoDistributeWeights(newTags);
+    setSelectedTags(redistributedTags);
+    setTagInput('');
+  };
+
+  // 删除标签
+  const handleRemoveTag = (tagToRemove: string) => {
+    const newTags = selectedTags.filter(item => item.tag !== tagToRemove);
+    // 重新分配权重
+    const redistributedTags = autoDistributeWeights(newTags);
+    setSelectedTags(redistributedTags);
+  };
+
+  // 更新标签权重（自动调整最后一个标签使总和为1）
+  const handleWeightChange = (tag: string, newWeight: number, index: number) => {
+    // 限制权重范围在0-1之间
+    const clampedWeight = Math.max(0, Math.min(1, newWeight));
+    
+    // 如果只有一个标签，权重固定为1
+    if (selectedTags.length === 1) {
+      if (clampedWeight !== 1.0) {
+        toast({
+          variant: 'destructive',
+          title: '设置失败',
+          description: '单个标签的权重必须为1.0',
+        });
+        return;
+      }
+      setSelectedTags([{ tag: selectedTags[0].tag, weight: 1.0 }]);
+      return;
+    }
+    
+    // 确定要调整的标签索引
+    // 如果修改的是最后一个标签，则调整倒数第二个标签
+    // 否则调整最后一个标签
+    const isLastTag = index === selectedTags.length - 1;
+    const adjustIndex = isLastTag ? selectedTags.length - 2 : selectedTags.length - 1;
+    
+    // 计算其他标签（不包括当前标签和要调整的标签）的权重总和
+    const otherTagsWeight = selectedTags
+      .filter((_, idx) => idx !== index && idx !== adjustIndex)
+      .reduce((sum, item) => sum + item.weight, 0);
+    
+    // 计算要调整的标签应该的权重（使总和为1）
+    const adjustedWeight = 1.0 - clampedWeight - otherTagsWeight;
+    
+    // 检查调整后的权重是否合法（必须在0-1范围内）
+    if (adjustedWeight < 0 || adjustedWeight > 1) {
+      toast({
+        variant: 'destructive',
+        title: '设置失败',
+        description: `设置此权重会导致总权重小于0或大于1，请调整后重试`,
+      });
+      return;
+    }
+    
+    // 更新当前标签的权重
+    const updatedTags = selectedTags.map((item, idx) => 
+      idx === index ? { ...item, weight: clampedWeight } : item
+    );
+    
+    // 更新要调整的标签的权重
+    updatedTags[adjustIndex] = { ...updatedTags[adjustIndex], weight: adjustedWeight };
+    
+    setSelectedTags(updatedTags);
+  };
+
   // 执行搜索
   const handleSearch = async () => {
-    if (!searchQuery.trim()) {
+    if (selectedTags.length === 0) {
       setSearchResults([]);
+      toast({
+        variant: 'default',
+        title: '请添加标签',
+        description: '请至少添加一个标签后再搜索',
+      });
+      return;
+    }
+
+    // 验证权重之和是否为1
+    const totalWeight = calculateTotalWeight(selectedTags);
+    if (Math.abs(totalWeight - 1.0) > 0.001) {  // 允许0.001的误差
+      toast({
+        variant: 'destructive',
+        title: '权重错误',
+        description: `所有标签的权重之和必须等于1，当前为 ${totalWeight.toFixed(3)}。请调整权重后重试。`,
+      });
       return;
     }
 
     setIsLoading(true);
     console.log('开始搜索，参数:', {
-      query: searchQuery.trim(),
+      tags: selectedTags,
+      totalWeight: totalWeight,
       threshold: similarityThreshold[0],
       limit: 100
     });
@@ -86,7 +205,7 @@ export default function SearchPage() {
     try {
       // 使用 Next.js API 路由代理后端请求
       const requestBody = {
-        query: searchQuery.trim(),
+        tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),  // 发送标签和权重
         limit: 100,
         similarityThreshold: similarityThreshold[0],
       };
@@ -122,7 +241,7 @@ export default function SearchPage() {
         if (data.results.length === 0) {
           toast({
             title: '未找到结果',
-            description: `没有找到包含 "${searchQuery}" 的图片（阈值: ${similarityThreshold[0]}）`,
+            description: `没有找到匹配的图片（阈值: ${similarityThreshold[0]}）`,
           });
         } else {
           // 显示找到的结果数量
@@ -149,16 +268,18 @@ export default function SearchPage() {
     }
   };
 
-  // 回车搜索
+  // 回车添加标签
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      handleSearch();
+      e.preventDefault();
+      handleAddTag();
     }
   };
 
-  // 清除搜索
+  // 清除所有标签
   const handleClear = () => {
-    setSearchQuery('');
+    setSelectedTags([]);
+    setTagInput('');
     setSearchResults([]);
     setSelectedImage(null);
   };
@@ -191,33 +312,129 @@ export default function SearchPage() {
           {/* 搜索框 */}
           <Card className="mb-8 shadow-lg">
             <CardContent className="p-6 space-y-4">
+              {/* 标签输入区域 */}
               <div className="flex gap-4">
                 <div className="flex-1 relative">
                   <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5" />
                   <Input
                     type="text"
-                    placeholder="输入标签、关键词或描述进行搜索..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="输入标签后按回车或点击确定添加..."
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
                     onKeyPress={handleKeyPress}
-                    className="pl-10 pr-10 h-12 text-lg"
+                    className="pl-10 pr-24 h-12 text-lg"
                   />
-                  {searchQuery && (
+                  {tagInput && (
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={handleClear}
-                      className="absolute right-2 top-1/2 transform -translate-y-1/2 h-8 w-8 p-0"
+                      onClick={() => setTagInput('')}
+                      className="absolute right-16 top-1/2 transform -translate-y-1/2 h-8 w-8 p-0"
                     >
                       <X className="h-4 w-4" />
                     </Button>
                   )}
+                  <Button
+                    onClick={handleAddTag}
+                    size="sm"
+                    disabled={!tagInput.trim()}
+                    className="absolute right-2 top-1/2 transform -translate-y-1/2 h-8"
+                  >
+                    确定
+                  </Button>
                 </div>
-                <Button onClick={handleSearch} size="lg" className="px-8">
+                <Button 
+                  onClick={handleSearch} 
+                  size="lg" 
+                  className="px-8" 
+                  disabled={selectedTags.length === 0 || Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001}
+                >
                   <Search className="mr-2 h-5 w-5" />
                   搜索
                 </Button>
               </div>
+              
+              {/* 已选择标签列表（带权重） */}
+              {selectedTags.length > 0 && (
+                <div className="space-y-3 pt-2 border-t">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm font-medium">已选择标签 ({selectedTags.length}):</Label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">
+                        权重总和: {calculateTotalWeight(selectedTags).toFixed(3)}
+                      </span>
+                      {Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001 && (
+                        <span className="text-xs text-destructive">
+                          (必须等于1.000)
+                        </span>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const redistributed = autoDistributeWeights(selectedTags);
+                          setSelectedTags(redistributed);
+                        }}
+                        className="text-xs"
+                      >
+                        平均分配
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleClear}
+                        className="text-xs text-muted-foreground hover:text-destructive"
+                      >
+                        清除所有
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {selectedTags.map((item, index) => (
+                      <div
+                        key={index}
+                        className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg border"
+                      >
+                        <Badge
+                          variant="secondary"
+                          className="text-sm py-1.5 px-3 flex-shrink-0"
+                        >
+                          {item.tag}
+                        </Badge>
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <Label htmlFor={`weight-${index}`} className="text-xs text-muted-foreground whitespace-nowrap">
+                            权重:
+                          </Label>
+                          <Input
+                            id={`weight-${index}`}
+                            type="number"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={item.weight.toFixed(2)}
+                            onChange={(e) => {
+                              const newWeight = parseFloat(e.target.value) || 0;
+                              handleWeightChange(item.tag, newWeight, index);
+                            }}
+                            className="w-20 h-8 text-sm"
+                          />
+                          <span className="text-xs text-muted-foreground whitespace-nowrap flex-shrink-0">
+                            ({(item.weight * 100).toFixed(1)}%)
+                          </span>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveTag(item.tag)}
+                          className="h-8 w-8 p-0 text-destructive hover:text-destructive flex-shrink-0"
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* 相似度阈值滑块 */}
               <div className="space-y-2 pt-2 border-t">
                 <div className="flex items-center justify-between">
@@ -257,7 +474,7 @@ export default function SearchPage() {
           )}
 
           {/* 搜索结果 */}
-          {searchQuery && searchResults.length === 0 && (
+          {selectedTags.length > 0 && searchResults.length === 0 && (
             <Card className="p-12 text-center">
               <ImageIcon className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg text-muted-foreground">
@@ -269,7 +486,7 @@ export default function SearchPage() {
             </Card>
           )}
 
-          {!searchQuery && totalCount === 0 && !isLoading && (
+          {selectedTags.length === 0 && totalCount === 0 && !isLoading && (
             <Card className="p-12 text-center">
               <ImageIcon className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg text-muted-foreground">

@@ -202,8 +202,14 @@ class SaveImageResponse(BaseModel):
     relative_path: str
     message: str
 
+class TagWithWeight(BaseModel):
+    tag: str
+    weight: float  # 权重，范围0-1
+
 class SearchRequest(BaseModel):
-    query: str
+    query: Optional[str] = None  # 单个查询（向后兼容）
+    queries: Optional[List[str]] = None  # 多个查询标签列表（向后兼容）
+    tags: Optional[List[TagWithWeight]] = None  # 标签和权重列表
     limit: Optional[int] = 100
     startDate: Optional[str] = None  # ISO 格式日期时间
     endDate: Optional[str] = None    # ISO 格式日期时间
@@ -1007,18 +1013,45 @@ async def save_image(request: SaveImageRequest):
 # --- 搜索 API ---
 @app.post("/search", response_model=SearchResponse)
 async def search_images_api(request: SearchRequest):
-    """从数据库搜索图片（使用向量相似度搜索）"""
+    """从数据库搜索图片（使用向量相似度搜索，支持多标签和权重）"""
     print("=" * 60)
     print("收到搜索请求!")
-    print(f"请求内容: query='{request.query}', threshold={request.similarityThreshold}, limit={request.limit}")
+    
+    # 确定查询列表和权重（优先使用tags，否则使用queries，最后使用query）
+    tags_with_weights = []
+    if request.tags and len(request.tags) > 0:
+        # 使用新的tags格式（带权重）
+        tags_with_weights = [(tag.tag.strip(), tag.weight) for tag in request.tags if tag.tag.strip()]
+        # 验证权重之和是否为1
+        total_weight = sum(weight for _, weight in tags_with_weights)
+        if abs(total_weight - 1.0) > 0.001:
+            raise HTTPException(
+                status_code=400,
+                detail=f"所有标签的权重之和必须等于1，当前为 {total_weight:.3f}"
+            )
+    elif request.queries and len(request.queries) > 0:
+        # 向后兼容：使用queries，平均分配权重
+        queries = [q.strip() for q in request.queries if q.strip()]
+        weight_per_tag = 1.0 / len(queries) if queries else 0
+        tags_with_weights = [(q, weight_per_tag) for q in queries]
+    elif request.query and request.query.strip():
+        # 向后兼容：使用单个query，权重为1
+        tags_with_weights = [(request.query.strip(), 1.0)]
+    
+    queries = [tag for tag, _ in tags_with_weights]
+    weights = [weight for _, weight in tags_with_weights]
+    
+    print(f"请求内容: tags={tags_with_weights}, threshold={request.similarityThreshold}, limit={request.limit}")
     print("=" * 60)
     try:
-        # 对查询文本进行向量化
-        query_embedding = None
-        if request.query and request.query.strip():
+        # 对每个查询标签进行向量化
+        query_embeddings = []
+        if queries:
             try:
-                query_embedding = encode_text_to_vector(request.query.strip())
-                print(f"已生成查询向量，维度: {len(query_embedding) // 4}, 查询文本: {request.query[:50]}...")
+                for query in queries:
+                    embedding = encode_text_to_vector(query)
+                    query_embeddings.append(embedding)
+                    print(f"已生成查询向量: '{query}' (维度: {len(embedding) // 4})")
             except Exception as e:
                 print(f"向量化查询文本时出错: {e}")
                 import traceback
@@ -1033,14 +1066,15 @@ async def search_images_api(request: SearchRequest):
         if not 0 <= similarity_threshold <= 1:
             similarity_threshold = 0.3
         
-        print(f"搜索参数: query='{request.query}', threshold={similarity_threshold}, limit={request.limit or 100}")
+        print(f"搜索参数: tags={tags_with_weights}, threshold={similarity_threshold}, limit={request.limit or 100}")
         
         results = search_images(
-            request.query or '', 
-            request.limit or 100,
-            request.startDate,
-            request.endDate,
-            query_embedding=query_embedding,
+            query=queries[0] if queries else '',  # 向后兼容，传递第一个查询
+            limit=request.limit or 100,
+            start_date=request.startDate,
+            end_date=request.endDate,
+            query_embeddings=query_embeddings if query_embeddings else None,  # 传递多个向量
+            query_weights=weights if weights else None,  # 传递权重列表
             similarity_threshold=similarity_threshold
         )
         

@@ -259,7 +259,9 @@ def search_images(
     limit: int = 100,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    query_embedding: Optional[bytes] = None,  # 查询文本的向量化结果
+    query_embedding: Optional[bytes] = None,  # 单个查询文本的向量化结果（向后兼容）
+    query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
+    query_weights: Optional[List[float]] = None,  # 每个查询标签的权重列表
     similarity_threshold: float = 0.3  # 相似度阈值
 ) -> List[Dict[str, Any]]:
     """
@@ -317,10 +319,32 @@ def search_images(
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         
+        # 确定使用的查询向量列表（优先使用query_embeddings，否则使用query_embedding）
+        query_embeddings_list = []
+        if query_embeddings is not None and len(query_embeddings) > 0:
+            query_embeddings_list = query_embeddings
+        elif query_embedding is not None:
+            query_embeddings_list = [query_embedding]
+        
+        # 确定权重列表
+        weights_list = []
+        if query_weights is not None and len(query_weights) > 0:
+            weights_list = query_weights
+        elif query_embeddings_list:
+            # 如果没有提供权重，平均分配
+            weights_list = [1.0 / len(query_embeddings_list)] * len(query_embeddings_list)
+        
         # 如果使用向量搜索，计算相似度并过滤
-        if query_embedding is not None:
-            query_vec = np.frombuffer(query_embedding, dtype=np.float32)
-            query_vec = query_vec / np.linalg.norm(query_vec)  # 归一化
+        if query_embeddings_list:
+            # 归一化所有查询向量
+            query_vecs = []
+            for emb in query_embeddings_list:
+                vec = np.frombuffer(emb, dtype=np.float32)
+                vec = vec / np.linalg.norm(vec)  # 归一化
+                query_vecs.append(vec)
+            
+            num_queries = len(query_vecs)
+            print(f"多标签搜索: 共 {num_queries} 个查询标签，权重: {weights_list}")
             
             results_with_similarity = []
             rows_with_keywords = 0
@@ -343,38 +367,50 @@ def search_images(
                 rows_with_keywords += 1
                 
                 try:
-                    # 计算与每个keyword向量的相似度，取最大值
-                    max_similarity = -1.0
-                    best_keyword = None
+                    # 对每个查询标签，计算与该图片所有keyword的最大相似度
+                    query_similarities = []  # 存储每个查询标签的最大相似度
                     
-                    for kw_row in keyword_vectors:
-                        keyword = kw_row['keyword']
-                        embedding_bytes = kw_row['embedding']
+                    for query_vec in query_vecs:
+                        # 计算与每个keyword向量的相似度，取最大值
+                        max_similarity_for_query = -1.0
                         
-                        if embedding_bytes is None:
-                            continue
+                        for kw_row in keyword_vectors:
+                            keyword = kw_row['keyword']
+                            embedding_bytes = kw_row['embedding']
+                            
+                            if embedding_bytes is None:
+                                continue
+                            
+                            # 从BLOB读取向量
+                            kw_vec = np.frombuffer(embedding_bytes, dtype=np.float32)
+                            
+                            # 检查向量维度是否正确（应该是768维）
+                            if len(kw_vec) != 768:
+                                print(f"警告: 图片ID {row['id']} 的keyword '{keyword}' 向量维度不正确: {len(kw_vec)}, 期望768")
+                                continue
+                            
+                            kw_vec = kw_vec / np.linalg.norm(kw_vec)  # 归一化
+                            
+                            # 计算余弦相似度
+                            similarity = float(np.dot(query_vec, kw_vec))
+                            
+                            # 更新最大相似度
+                            if similarity > max_similarity_for_query:
+                                max_similarity_for_query = similarity
                         
-                        # 从BLOB读取向量
-                        kw_vec = np.frombuffer(embedding_bytes, dtype=np.float32)
-                        
-                        # 检查向量维度是否正确（应该是768维）
-                        if len(kw_vec) != 768:
-                            print(f"警告: 图片ID {row['id']} 的keyword '{keyword}' 向量维度不正确: {len(kw_vec)}, 期望768")
-                            continue
-                        
-                        kw_vec = kw_vec / np.linalg.norm(kw_vec)  # 归一化
-                        
-                        # 计算余弦相似度
-                        similarity = float(np.dot(query_vec, kw_vec))
-                        
-                        # 更新最大相似度
-                        if similarity > max_similarity:
-                            max_similarity = similarity
-                            best_keyword = keyword
+                        # 如果该查询标签的最大相似度有效，添加到列表
+                        if max_similarity_for_query >= 0:
+                            query_similarities.append(max_similarity_for_query)
                     
-                    # 如果最大相似度达到阈值，添加到结果
-                    if max_similarity >= similarity_threshold:
-                        results_with_similarity.append((max_similarity, row, best_keyword))
+                    # 计算加权平均相似度 = 标签1相似度*标签1权重 + 标签2相似度*标签2权重 + ...
+                    if query_similarities and len(query_similarities) == len(weights_list):
+                        weighted_similarity = sum(
+                            sim * weight for sim, weight in zip(query_similarities, weights_list)
+                        )
+                        
+                        # 如果加权相似度达到阈值，添加到结果
+                        if weighted_similarity >= similarity_threshold:
+                            results_with_similarity.append((weighted_similarity, row, query_similarities))
                 except Exception as e:
                     print(f"处理图片ID {row['id']} 的keyword向量时出错: {e}")
                     continue
@@ -392,7 +428,7 @@ def search_images(
             
             # 构建结果列表
             results = []
-            for similarity, row, best_keyword in results_with_similarity:
+            for similarity, row, query_similarities in results_with_similarity:
                 # 获取该图片的所有标签
                 cursor.execute("""
                     SELECT tag, tag_type FROM tags WHERE image_id = ?
