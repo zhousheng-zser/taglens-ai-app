@@ -29,7 +29,7 @@ export default function AboutPage() {
               通过大模型的深度语义理解能力，系统不仅能进行细粒度的视觉识别，更能捕捉图像的语义关联与抽象概念。结合向量相似度搜索与可配置的多标签权重匹配，我们实现了从自然语言查询到精准图像定位的端到端智能化流程，将传统需要数小时的人工标注工作压缩至毫秒级响应。
             </p>
             <p className="mt-4">
-              TagLens AI 同时定位为高质量训练数据基础设施的提供者。我们为每张图像生成多维度、多粒度的标注数据（CLIP captions、Qwen captions、YOLO标注等），这些结构化数据不仅服务于检索场景，更构成了模型微调、半监督学习等前沿训练范式的核心数据资产，显著降低模型训练的数据获取成本，加速AI模型的迭代与性能突破。
+              TagLens AI 同时定位为高质量训练数据基础设施的提供者。我们为每张图像生成多维度、多粒度的标注数据（Qwen/Gemini 结构化描述、YOLO对象检测等），这些结构化数据不仅服务于检索场景，更构成了模型微调、半监督学习等前沿训练范式的核心数据资产，显著降低模型训练的数据获取成本，加速AI模型的迭代与性能突破。
             </p>
             <p className="mt-4">
               我们坚信，当多模态大模型与语义标注技术深度耦合，将催生全新的知识管理范式：个人与组织能够以接近零成本管理海量视觉资产，同时这些资产又成为推动下一代AI模型进化的数据燃料，形成推动整个AI生态系统持续演进的正向循环。
@@ -58,9 +58,9 @@ export default function AboutPage() {
                 <Cpu className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <h3 className="font-semibold text-lg text-foreground">后端与 AI</h3>
+                <h3 className="font-semibold text-lg text-foreground">后端与 AI架构</h3>
                 <p className="text-muted-foreground">
-                  后端服务采用灵活且高效的 Python 构建。核心的 AI 功能，如图像分析和标签生成，我们借助 Google 的 Genkit 框架和强大的 Gemini 模型，保证了分析结果的精准与高效。
+                  后端采用 Python (FastAPI) 构建，深度集成了 Qwen-VL 与 Gemini 多模态大模型进行语义理解。检索层结合了 Faiss 高维向量索引与 SQLite 结构化查询，通过 BGE-M3 模型实现精准的图文检索。存储层采用 MinIO 对象存储，确保了海量非结构化数据的高效管理。
                 </p>
               </div>
             </div>

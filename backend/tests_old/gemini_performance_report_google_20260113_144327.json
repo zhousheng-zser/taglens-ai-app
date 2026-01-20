@@ -1,0 +1,710 @@
+{
+  "info":"
+  总运行时间（墙钟时间）: 74.94 秒 (1.25 分钟)
+
+================================================================================
+性能测试统计报告（Google 官方 API）
+================================================================================
+测试配置:
+  - API类型: Google 官方 API（通过代理访问）
+  - 并发数量: 19
+  - 测试目录: /opt/Traffic-LLM/zser/taglens-ai-app/data/local/11111
+  - 总图片数: 64
+  - 成功数量: 64
+  - 失败数量: 0
+  - 成功率: 100.00%
+
+单请求时间统计（不考虑并发）:
+  - 累加总耗时: 1169.85 秒 (19.50 分钟)
+  - 平均耗时: 18.28 秒
+  - 最短耗时: 13.23 秒
+  - 最长耗时: 28.03 秒
+
+并发执行时间统计（考虑并发分摊）:
+  - 实际运行时间（墙钟时间）: 74.94 秒 (1.25 分钟)
+  - 并发加速比: 15.61x
+  - 理论加速比（理想）: 19.0x
+  - 并发效率: 82.2%
+
+Token 统计:
+  - 总输入 Tokens: 197,864
+  - 总输出 Tokens: 46,932
+  - 总 Tokens: 358,287
+  - 平均输入 Tokens/图片: 3092
+  - 平均输出 Tokens/图片: 733
+  - 平均总 Tokens/图片: 5598
+
+吞吐量统计（基于累加时间，不考虑并发）:
+  - 每秒处理: 0.05 张图片
+  - 每分钟处理: 3.28 张图片
+  - 每小时处理: 196.95 张图片
+
+真实吞吐量统计（基于墙钟时间，考虑并发分摊）:
+  - 每秒处理: 0.85 张图片
+  - 每分钟处理: 51.24 张图片
+  - 每小时处理: 3074.42 张图片 ⭐
+
+  💡 这是考虑并发后的实际处理能力，即把所有并发线程看做一个线程的统计结果
+================================================================================
+
+详细报告已保存到: gemini_performance_report_google_20260113_144327.json
+  ",
+  "test_config": {
+    "api_type": "Google Official API",
+    "concurrent_requests": 19,
+    "test_directory": "/opt/Traffic-LLM/zser/taglens-ai-app/data/local/11111",
+    "gemini_model": "gemini-3-flash-preview",
+    "timestamp": "20260113_144327"
+  },
+  "statistics": {
+    "total_requests": 64,
+    "successful_requests": 64,
+    "failed_requests": 0,
+    "total_time": 1169.84791970253,
+    "total_tokens": 358287,
+    "total_prompt_tokens": 197864,
+    "total_completion_tokens": 46932
+  },
+  "detailed_results": [
+    {
+      "success": true,
+      "image_name": "2003639379803561985_big.jpg",
+      "elapsed_time": 16.421701192855835,
+      "prompt_tokens": 3091,
+      "completion_tokens": 678,
+      "total_tokens": 5100,
+      "response_length": 1121,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639332386955269_big.jpg",
+      "elapsed_time": 17.08762764930725,
+      "prompt_tokens": 3091,
+      "completion_tokens": 643,
+      "total_tokens": 5224,
+      "response_length": 1073,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639332386955281_big.jpg",
+      "elapsed_time": 17.85905957221985,
+      "prompt_tokens": 3095,
+      "completion_tokens": 814,
+      "total_tokens": 5485,
+      "response_length": 1312,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639332382760962_big.jpg",
+      "elapsed_time": 18.574438095092773,
+      "prompt_tokens": 3091,
+      "completion_tokens": 783,
+      "total_tokens": 5465,
+      "response_length": 1290,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639259225710597_big.jpg",
+      "elapsed_time": 18.62210440635681,
+      "prompt_tokens": 3091,
+      "completion_tokens": 742,
+      "total_tokens": 5297,
+      "response_length": 1207,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639367065460738_big.jpg",
+      "elapsed_time": 19.119141101837158,
+      "prompt_tokens": 3091,
+      "completion_tokens": 480,
+      "total_tokens": 5623,
+      "response_length": 824,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639268281212935_big.jpg",
+      "elapsed_time": 19.793251037597656,
+      "prompt_tokens": 3091,
+      "completion_tokens": 672,
+      "total_tokens": 5462,
+      "response_length": 1090,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639281182892038_big.jpg",
+      "elapsed_time": 19.987447023391724,
+      "prompt_tokens": 3091,
+      "completion_tokens": 805,
+      "total_tokens": 5465,
+      "response_length": 1299,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639332386955275_big.jpg",
+      "elapsed_time": 20.222267150878906,
+      "prompt_tokens": 3091,
+      "completion_tokens": 633,
+      "total_tokens": 5777,
+      "response_length": 1060,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639396740161538_big.jpg",
+      "elapsed_time": 20.55467963218689,
+      "prompt_tokens": 3091,
+      "completion_tokens": 766,
+      "total_tokens": 5247,
+      "response_length": 1202,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639350078529539_big.jpg",
+      "elapsed_time": 20.57693648338318,
+      "prompt_tokens": 3091,
+      "completion_tokens": 728,
+      "total_tokens": 5283,
+      "response_length": 1198,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639263566815234_big.jpg",
+      "elapsed_time": 20.83462691307068,
+      "prompt_tokens": 3091,
+      "completion_tokens": 674,
+      "total_tokens": 5574,
+      "response_length": 1050,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639350078529537_big.jpg",
+      "elapsed_time": 21.19212055206299,
+      "prompt_tokens": 3091,
+      "completion_tokens": 734,
+      "total_tokens": 5610,
+      "response_length": 1193,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639332386955279_big.jpg",
+      "elapsed_time": 22.360622882843018,
+      "prompt_tokens": 3091,
+      "completion_tokens": 848,
+      "total_tokens": 5953,
+      "response_length": 1325,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639401110626307_big.jpg",
+      "elapsed_time": 22.419760942459106,
+      "prompt_tokens": 3091,
+      "completion_tokens": 875,
+      "total_tokens": 5519,
+      "response_length": 1452,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639358567800834_big.jpg",
+      "elapsed_time": 22.955673456192017,
+      "prompt_tokens": 3095,
+      "completion_tokens": 682,
+      "total_tokens": 5839,
+      "response_length": 1144,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639281182892036_big.jpg",
+      "elapsed_time": 23.889528274536133,
+      "prompt_tokens": 3091,
+      "completion_tokens": 631,
+      "total_tokens": 6744,
+      "response_length": 1067,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639375554732033_big.jpg",
+      "elapsed_time": 27.238070011138916,
+      "prompt_tokens": 3091,
+      "completion_tokens": 732,
+      "total_tokens": 6306,
+      "response_length": 1193,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639414133940225_big.jpg",
+      "elapsed_time": 28.030784845352173,
+      "prompt_tokens": 3091,
+      "completion_tokens": 714,
+      "total_tokens": 7082,
+      "response_length": 1142,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639457108779010_big.jpg",
+      "elapsed_time": 13.421913862228394,
+      "prompt_tokens": 3091,
+      "completion_tokens": 736,
+      "total_tokens": 5036,
+      "response_length": 1177,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639422728069121_big.jpg",
+      "elapsed_time": 16.632511138916016,
+      "prompt_tokens": 3095,
+      "completion_tokens": 778,
+      "total_tokens": 5411,
+      "response_length": 1246,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639414133940227_big.jpg",
+      "elapsed_time": 17.345377206802368,
+      "prompt_tokens": 3091,
+      "completion_tokens": 793,
+      "total_tokens": 5681,
+      "response_length": 1275,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639431255089158_big.jpg",
+      "elapsed_time": 16.336432456970215,
+      "prompt_tokens": 3091,
+      "completion_tokens": 760,
+      "total_tokens": 5356,
+      "response_length": 1206,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639448506261507_big.jpg",
+      "elapsed_time": 15.133991003036499,
+      "prompt_tokens": 3091,
+      "completion_tokens": 745,
+      "total_tokens": 5202,
+      "response_length": 1215,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639435654914050_big.jpg",
+      "elapsed_time": 17.383531093597412,
+      "prompt_tokens": 3091,
+      "completion_tokens": 726,
+      "total_tokens": 5655,
+      "response_length": 1293,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639448506261505_big.jpg",
+      "elapsed_time": 17.21275043487549,
+      "prompt_tokens": 3091,
+      "completion_tokens": 677,
+      "total_tokens": 5662,
+      "response_length": 1161,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639427002064897_big.jpg",
+      "elapsed_time": 19.338461875915527,
+      "prompt_tokens": 3091,
+      "completion_tokens": 765,
+      "total_tokens": 5825,
+      "response_length": 1262,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639491653066753_big.jpg",
+      "elapsed_time": 17.003166913986206,
+      "prompt_tokens": 3101,
+      "completion_tokens": 729,
+      "total_tokens": 5370,
+      "response_length": 1190,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639525551431682_big.jpg",
+      "elapsed_time": 16.023362159729004,
+      "prompt_tokens": 3091,
+      "completion_tokens": 736,
+      "total_tokens": 5291,
+      "response_length": 1171,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639474569666570_big.jpg",
+      "elapsed_time": 18.82031798362732,
+      "prompt_tokens": 3091,
+      "completion_tokens": 696,
+      "total_tokens": 5447,
+      "response_length": 1123,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639525551431686_big.jpg",
+      "elapsed_time": 16.902122735977173,
+      "prompt_tokens": 3091,
+      "completion_tokens": 838,
+      "total_tokens": 5667,
+      "response_length": 1321,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639546837524484_big.jpg",
+      "elapsed_time": 16.780641555786133,
+      "prompt_tokens": 3091,
+      "completion_tokens": 693,
+      "total_tokens": 5658,
+      "response_length": 1100,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639474569666568_big.jpg",
+      "elapsed_time": 21.160436153411865,
+      "prompt_tokens": 3091,
+      "completion_tokens": 759,
+      "total_tokens": 5765,
+      "response_length": 1232,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639474569666566_big.jpg",
+      "elapsed_time": 21.82524561882019,
+      "prompt_tokens": 3091,
+      "completion_tokens": 680,
+      "total_tokens": 6388,
+      "response_length": 1123,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639491653066757_big.jpg",
+      "elapsed_time": 21.786668062210083,
+      "prompt_tokens": 3091,
+      "completion_tokens": 625,
+      "total_tokens": 5849,
+      "response_length": 1036,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639508648386561_big.jpg",
+      "elapsed_time": 21.260276317596436,
+      "prompt_tokens": 3091,
+      "completion_tokens": 769,
+      "total_tokens": 5581,
+      "response_length": 1241,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639576864546818_big.jpg",
+      "elapsed_time": 15.864436149597168,
+      "prompt_tokens": 3101,
+      "completion_tokens": 661,
+      "total_tokens": 5416,
+      "response_length": 1118,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639564004810756_big.jpg",
+      "elapsed_time": 17.01612949371338,
+      "prompt_tokens": 3091,
+      "completion_tokens": 787,
+      "total_tokens": 5606,
+      "response_length": 1286,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639666958196739_big.jpg",
+      "elapsed_time": 14.586241006851196,
+      "prompt_tokens": 3091,
+      "completion_tokens": 687,
+      "total_tokens": 5182,
+      "response_length": 1116,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639649803493378_big.jpg",
+      "elapsed_time": 15.39992070198059,
+      "prompt_tokens": 3091,
+      "completion_tokens": 708,
+      "total_tokens": 5344,
+      "response_length": 1181,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639692614754305_big.jpg",
+      "elapsed_time": 13.228646516799927,
+      "prompt_tokens": 3091,
+      "completion_tokens": 644,
+      "total_tokens": 5049,
+      "response_length": 1112,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639692610560001_big.jpg",
+      "elapsed_time": 14.626497507095337,
+      "prompt_tokens": 3091,
+      "completion_tokens": 740,
+      "total_tokens": 5202,
+      "response_length": 1195,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639688298815491_big.jpg",
+      "elapsed_time": 15.560802459716797,
+      "prompt_tokens": 3091,
+      "completion_tokens": 739,
+      "total_tokens": 5364,
+      "response_length": 1193,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639658242433026_big.jpg",
+      "elapsed_time": 18.04289174079895,
+      "prompt_tokens": 3091,
+      "completion_tokens": 833,
+      "total_tokens": 5543,
+      "response_length": 1322,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639671265746948_big.jpg",
+      "elapsed_time": 17.698312520980835,
+      "prompt_tokens": 3095,
+      "completion_tokens": 885,
+      "total_tokens": 5700,
+      "response_length": 1387,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639675594268674_big.jpg",
+      "elapsed_time": 17.963390350341797,
+      "prompt_tokens": 3091,
+      "completion_tokens": 672,
+      "total_tokens": 5745,
+      "response_length": 1073,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639709626851329_big.jpg",
+      "elapsed_time": 16.272804498672485,
+      "prompt_tokens": 3091,
+      "completion_tokens": 767,
+      "total_tokens": 5365,
+      "response_length": 1261,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639701137580034_big.jpg",
+      "elapsed_time": 17.326571226119995,
+      "prompt_tokens": 3091,
+      "completion_tokens": 568,
+      "total_tokens": 5665,
+      "response_length": 946,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639713879875590_big.jpg",
+      "elapsed_time": 16.53967785835266,
+      "prompt_tokens": 3095,
+      "completion_tokens": 823,
+      "total_tokens": 5626,
+      "response_length": 1323,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639718225174530_big.jpg",
+      "elapsed_time": 16.199440240859985,
+      "prompt_tokens": 3091,
+      "completion_tokens": 679,
+      "total_tokens": 5422,
+      "response_length": 1141,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639739611930627_big.jpg",
+      "elapsed_time": 15.271546363830566,
+      "prompt_tokens": 3091,
+      "completion_tokens": 811,
+      "total_tokens": 5324,
+      "response_length": 1307,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639739611930625_big.jpg",
+      "elapsed_time": 17.07993483543396,
+      "prompt_tokens": 3091,
+      "completion_tokens": 823,
+      "total_tokens": 5674,
+      "response_length": 1323,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639744015949827_big.jpg",
+      "elapsed_time": 16.33084988594055,
+      "prompt_tokens": 3091,
+      "completion_tokens": 714,
+      "total_tokens": 5426,
+      "response_length": 1149,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639752572329986_big.jpg",
+      "elapsed_time": 16.126733541488647,
+      "prompt_tokens": 3091,
+      "completion_tokens": 710,
+      "total_tokens": 5437,
+      "response_length": 1207,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639756951183361_big.jpg",
+      "elapsed_time": 15.266048431396484,
+      "prompt_tokens": 3091,
+      "completion_tokens": 652,
+      "total_tokens": 5292,
+      "response_length": 1079,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639761216790529_big.jpg",
+      "elapsed_time": 15.577004194259644,
+      "prompt_tokens": 3091,
+      "completion_tokens": 801,
+      "total_tokens": 5398,
+      "response_length": 1288,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639774340767751_big.jpg",
+      "elapsed_time": 15.122780561447144,
+      "prompt_tokens": 3091,
+      "completion_tokens": 840,
+      "total_tokens": 5170,
+      "response_length": 1301,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639804334235650_big.jpg",
+      "elapsed_time": 13.857144832611084,
+      "prompt_tokens": 3091,
+      "completion_tokens": 693,
+      "total_tokens": 4994,
+      "response_length": 1135,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639774340767753_big.jpg",
+      "elapsed_time": 15.1634840965271,
+      "prompt_tokens": 3091,
+      "completion_tokens": 748,
+      "total_tokens": 5253,
+      "response_length": 1219,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639769848668163_big.jpg",
+      "elapsed_time": 17.752590894699097,
+      "prompt_tokens": 3091,
+      "completion_tokens": 734,
+      "total_tokens": 5737,
+      "response_length": 1200,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639787145977859_big.jpg",
+      "elapsed_time": 15.698040008544922,
+      "prompt_tokens": 3091,
+      "completion_tokens": 764,
+      "total_tokens": 5491,
+      "response_length": 1218,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639752572329990_big.jpg",
+      "elapsed_time": 24.6150324344635,
+      "prompt_tokens": 3091,
+      "completion_tokens": 783,
+      "total_tokens": 7145,
+      "response_length": 1247,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639804334235652_big.jpg",
+      "elapsed_time": 21.253849983215332,
+      "prompt_tokens": 3091,
+      "completion_tokens": 736,
+      "total_tokens": 6353,
+      "response_length": 1202,
+      "error": null
+    },
+    {
+      "success": true,
+      "image_name": "2003639812857061377_big.jpg",
+      "elapsed_time": 22.300069570541382,
+      "prompt_tokens": 3091,
+      "completion_tokens": 791,
+      "total_tokens": 6465,
+      "response_length": 1323,
+      "error": null
+    }
+  ]
+}

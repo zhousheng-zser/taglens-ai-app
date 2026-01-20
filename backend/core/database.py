@@ -1,20 +1,135 @@
 # -*- coding: utf-8 -*-
 """
 数据库模块 - 使用 SQLite 存储图片标签和元数据
+支持从 MinIO 同步数据
 """
 import sqlite3
 import json
+import time
+import os
+import atexit
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
+from core.minio_storage_client import get_storage_client
 
 # 数据库文件路径
-DB_PATH = Path(__file__).parent.parent / "data" / "taglens.db"
+DB_PATH = Path(__file__).parent.parent.parent / "data" / "taglens.db"
+
+# MinIO 配置
+MINIO_DB_PATH = "tag_database/taglens.db"
+
+# 全局状态
+_db_modified = False
+_last_upload_time = 0
+_upload_interval = 180  # 3分钟（秒）
+_storage_client = None
+
+
+def _init_minio_sync():
+    """初始化 MinIO 同步功能"""
+    global _storage_client, _last_upload_time
+    
+    if _storage_client is None:
+        try:
+            _storage_client = get_storage_client(skip_bucket_check=True)
+            print("MinIO 客户端初始化成功")
+        except Exception as e:
+            print(f"MinIO 客户端初始化失败: {e}")
+            return
+    
+    # 修改：不再盲目删除本地文件
+    # 尝试从 MinIO 下载数据库文件 (如果存在)
+    try:
+        if _storage_client.file_exists(MINIO_DB_PATH):
+            print(f"发现云端数据库: {MINIO_DB_PATH}，准备同步...")
+            # 下载到临时文件
+            temp_path = str(DB_PATH) + ".tmp"
+            _storage_client.download_file(MINIO_DB_PATH, temp_path)
+            
+            # 只有下载成功才覆盖
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                if DB_PATH.exists():
+                    try:
+                        os.unlink(DB_PATH)
+                    except: 
+                        pass
+                os.rename(temp_path, str(DB_PATH))
+                print("数据库云端同步成功 (覆盖本地)")
+            else:
+                print("云端数据库文件为空或下载失败，保留本地副本")
+        else:
+            print("云端未找到数据库文件，将使用本地副本")
+            
+    except Exception as e:
+        print(f"从 MinIO 同步数据库失败 (保留本地副本): {e}")
+        temp_path = str(DB_PATH) + ".tmp"
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+    
+    # 注册退出时上传（作为保底）
+    atexit.register(_upload_to_minio_on_exit)
+    
+    _last_upload_time = time.time()
+
+
+def force_sync_to_minio():
+    """强制上传数据库到 MinIO (Public)"""
+    global _db_modified, _last_upload_time, _storage_client
+    
+    if _storage_client is None:
+        # 尝试重新初始化
+        try:
+            _storage_client = get_storage_client(skip_bucket_check=True)
+        except:
+            return
+            
+    try:
+        if DB_PATH.exists():
+            # print(f"正在上传数据库到 MinIO...") # 减少日志噪音
+            _storage_client.upload_file(str(DB_PATH), MINIO_DB_PATH)
+            _last_upload_time = time.time()
+            _db_modified = False
+            print(f"数据库已同步到 MinIO [{datetime.now().strftime('%H:%M:%S')}]")
+    except Exception as e:
+        print(f"数据库上传 MinIO 失败: {e}")
+
+def _upload_to_minio():
+    # 内部定时调用使用
+    force_sync_to_minio()
+
+
+def _upload_to_minio_on_exit():
+    """程序退出时上传到 MinIO"""
+    global _db_modified
+    if _db_modified:
+        _upload_to_minio()
+
+
+def _mark_modified():
+    """标记数据库已修改"""
+    global _db_modified, _last_upload_time, _upload_interval
+    
+    _db_modified = True
+    
+    # 检查是否需要上传（如果已修改且超过3分钟）
+    current_time = time.time()
+    if current_time - _last_upload_time >= _upload_interval:
+        _upload_to_minio()
 
 
 def get_db_path() -> Path:
     """获取数据库文件路径，确保目录存在"""
+    global _storage_client
+    
+    # 首次调用时初始化 MinIO 同步
+    if _storage_client is None:
+        _init_minio_sync()
+    
     db_path = DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return db_path
@@ -24,11 +139,14 @@ def get_db_path() -> Path:
 def get_db_connection():
     """获取数据库连接的上下文管理器"""
     db_path = get_db_path()
-    conn = sqlite3.connect(str(db_path))
+    # 增加超时时间到60秒，以减少并发写入时的 "database is locked" 错误
+    conn = sqlite3.connect(str(db_path), timeout=60.0)
     conn.row_factory = sqlite3.Row  # 使结果可以通过列名访问
     try:
         yield conn
         conn.commit()
+        # 提交后标记为已修改
+        _mark_modified()
     except Exception:
         conn.rollback()
         raise
@@ -75,7 +193,6 @@ def init_database():
                 image_id INTEGER NOT NULL UNIQUE,
                 description TEXT NOT NULL,
                 keywords_json TEXT NOT NULL,  -- JSON 格式的关键词数组
-                clip_captions_json TEXT NOT NULL,  -- JSON 格式的 CLIP 描述数组
                 qwen_captions_json TEXT NOT NULL,  -- JSON 格式的 Qwen 描述数组
                 yolo_objects_json TEXT NOT NULL,  -- JSON 格式的 YOLO 对象数组
                 created_at TEXT NOT NULL,
@@ -96,17 +213,6 @@ def init_database():
             )
         """)
         
-        # 创建图片直方图表（存储每张图片的直方图向量）
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS image_histograms (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id INTEGER NOT NULL UNIQUE,
-                histogram_vector BLOB NOT NULL,  -- 归一化后的直方图向量（50*60*60=180000维float32向量）
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
-            )
-        """)
-        
         # 如果表已存在但没有某些字段，则添加该字段
         try:
             cursor.execute("ALTER TABLE analysis_results ADD COLUMN qwen_captions_json TEXT DEFAULT '[]'")
@@ -123,10 +229,49 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at)
         """)
         cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_images_relative_path ON images(relative_path)
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_tags_image_id ON tags(image_id)
         """)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag)
+        """)
+        
+        # 尝试添加 ai_model 字段到 projects 表 (Schema Migration)
+        try:
+            cursor.execute("ALTER TABLE projects ADD COLUMN ai_model TEXT DEFAULT 'gemini'")
+            print("已添加 ai_model 字段到 projects 表")
+        except Exception:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE projects ADD COLUMN api_probability REAL DEFAULT 1.0")
+            print("已添加 api_probability 字段到 projects 表")
+        except Exception:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE projects ADD COLUMN last_stopped_at TEXT")
+            print("已添加 last_stopped_at 字段到 projects 表")
+        except Exception:
+            pass
+
+        # 创建项目同步表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                script_path TEXT NOT NULL,
+                schedule_enabled INTEGER DEFAULT 0,
+                schedule_interval INTEGER DEFAULT 1,
+                last_run TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT DEFAULT 'idle',
+                ai_model TEXT DEFAULT 'gemini',
+                api_probability REAL DEFAULT 1.0,
+                last_stopped_at TEXT
+            )
         """)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_tags_type ON tags(tag_type)
@@ -141,12 +286,8 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_keyword_embeddings_keyword ON keyword_embeddings(keyword)
         """)
         
-        # 创建索引
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_image_histograms_image_id ON image_histograms(image_id)
-        """)
-        
-        print(f"数据库初始化完成: {db_path}")
+        # 初始化后标记为已修改（因为创建了新表）
+        _mark_modified()
 
 
 def save_image_to_db(
@@ -157,11 +298,9 @@ def save_image_to_db(
     tags: List[str],
     keywords: List[str],
     description: str,
-    clip_captions: List[str],
     qwen_captions: List[str],
     yolo_objects: List[str],
-    keyword_embeddings: Optional[List[tuple[str, bytes]]] = None,  # List of (keyword, embedding_bytes) tuples
-    histogram_vector: Optional[bytes] = None  # 直方图向量（BLOB格式）
+    keyword_embeddings: Optional[List[tuple[str, bytes]]] = None  # List of (keyword, embedding_bytes) tuples
 ) -> int:
     """
     保存图片信息到数据库
@@ -207,14 +346,13 @@ def save_image_to_db(
         cursor.execute("""
             INSERT INTO analysis_results (
                 image_id, description, keywords_json, 
-                clip_captions_json, qwen_captions_json, yolo_objects_json, created_at
+                qwen_captions_json, yolo_objects_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             image_id,
             description,
             json.dumps(keywords, ensure_ascii=False),
-            json.dumps(clip_captions, ensure_ascii=False),
             json.dumps(qwen_captions, ensure_ascii=False),
             json.dumps(yolo_objects, ensure_ascii=False),
             now
@@ -236,21 +374,6 @@ def save_image_to_db(
                         WHERE image_id = ? AND keyword = ?
                     """, (embedding_bytes, now, image_id, keyword))
         
-        # 插入直方图向量
-        if histogram_vector:
-            try:
-                cursor.execute("""
-                    INSERT INTO image_histograms (image_id, histogram_vector, created_at)
-                    VALUES (?, ?, ?)
-                """, (image_id, histogram_vector, now))
-            except sqlite3.IntegrityError:
-                # 如果直方图向量已存在，更新它
-                cursor.execute("""
-                    UPDATE image_histograms 
-                    SET histogram_vector = ?, created_at = ?
-                    WHERE image_id = ?
-                """, (histogram_vector, now, image_id))
-        
         return image_id
 
 
@@ -262,8 +385,10 @@ def search_images(
     query_embedding: Optional[bytes] = None,  # 单个查询文本的向量化结果（向后兼容）
     query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
     query_weights: Optional[List[float]] = None,  # 每个查询标签的权重列表
-    similarity_threshold: float = 0.3  # 相似度阈值
-) -> List[Dict[str, Any]]:
+    similarity_threshold: float = 0.3,  # 相似度阈值
+    page: Optional[int] = None,  # 分页：页码（从1开始）
+    page_size: Optional[int] = None  # 分页：每页数量
+) -> tuple[List[Dict[str, Any]], int]:
     """
     从数据库搜索图片（使用向量相似度搜索）
     
@@ -308,7 +433,6 @@ def search_images(
                 i.created_at,
                 ar.description,
                 ar.keywords_json,
-                ar.clip_captions_json,
                 ar.qwen_captions_json,
                 ar.yolo_objects_json
             FROM images i
@@ -449,7 +573,6 @@ def search_images(
                 
                 # 解析 JSON 字段
                 keywords_json = json.loads(row['keywords_json'] or '[]')
-                clip_captions = json.loads(row['clip_captions_json'] or '[]')
                 qwen_captions = json.loads(row['qwen_captions_json'] or '[]')
                 yolo_objects_json = json.loads(row['yolo_objects_json'] or '[]')
                 
@@ -462,7 +585,6 @@ def search_images(
                     'description': row['description'],
                     'keywords': keywords_json,
                     'tags': tags,
-                    'clipCaptions': clip_captions,
                     'qwenCaptions': qwen_captions,
                     'yoloObjects': yolo_objects_json,
                     'similarity': similarity,  # 添加相似度字段
@@ -493,7 +615,6 @@ def search_images(
                 
                 # 解析 JSON 字段
                 keywords_json = json.loads(row['keywords_json'] or '[]')
-                clip_captions = json.loads(row['clip_captions_json'] or '[]')
                 qwen_captions = json.loads(row['qwen_captions_json'] or '[]')
                 yolo_objects_json = json.loads(row['yolo_objects_json'] or '[]')
                 
@@ -506,41 +627,27 @@ def search_images(
                     'description': row['description'],
                     'keywords': keywords_json,
                     'tags': tags,
-                    'clipCaptions': clip_captions,
                     'qwenCaptions': qwen_captions,
                     'yoloObjects': yolo_objects_json,
                 })
         
-        return results
-
-
-def get_all_image_histograms() -> List[Dict[str, Any]]:
-    """
-    获取所有图片的直方图向量
-    
-    返回:
-        List[Dict[str, Any]]: 包含image_id, uuid, histogram_vector的列表
-    """
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 
-                ih.image_id,
-                i.uuid,
-                i.relative_path,
-                i.file_name,
-                i.created_at,
-                ih.histogram_vector
-            FROM image_histograms ih
-            JOIN images i ON ih.image_id = i.id
-            ORDER BY i.created_at DESC
-        """)
-        return [dict(row) for row in cursor.fetchall()]
+        # 计算总数（分页前的结果数）
+        total_count = len(results)
+        
+        # 如果需要分页，进行分页处理
+        if page is not None and page_size is not None:
+            # 页码从1开始，转换为索引从0开始
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            results = results[start_idx:end_idx]
+        
+        return results, total_count
 
 
 def get_all_images(limit: int = 100) -> List[Dict[str, Any]]:
     """获取所有图片"""
-    return search_images('', limit)
+    results, _ = search_images('', limit)
+    return results
 
 
 def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
@@ -558,7 +665,6 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
                 i.created_at,
                 ar.description,
                 ar.keywords_json,
-                ar.clip_captions_json,
                 ar.qwen_captions_json,
                 ar.yolo_objects_json
             FROM images i
@@ -589,20 +695,121 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
                 yolo_objects.append(tag)
         
         keywords_json = json.loads(row['keywords_json'] or '[]')
-        clip_captions = json.loads(row['clip_captions_json'] or '[]')
         qwen_captions = json.loads(row['qwen_captions_json'] or '[]')
         yolo_objects_json = json.loads(row['yolo_objects_json'] or '[]')
-        
         return {
-            'id': row['id'],
-            'uuid': row['uuid'],
-            'filePath': row['relative_path'],
-            'fileName': row['file_name'],
-            'createdAt': row['created_at'],
-            'description': row['description'],
-            'keywords': keywords_json,
-            'tags': tags,
-            'clipCaptions': clip_captions,
-            'qwenCaptions': qwen_captions,
-            'yoloObjects': yolo_objects_json,
+            "uuid": row['uuid'],
+            "file_path": row['file_path'],
+            "file_name": row['file_name'],
+            "created_at": row['created_at'],
+            "description": row['description'],
+            "tags": tags,
+            "keywords": keywords, # 从 tags 表聚合
+            "qwen_captions": qwen_captions,
+            "yolo_objects": yolo_objects,   # 从 tags 表聚合
+            "raw_keywords": keywords_json,
+            "raw_yolo_objects": yolo_objects_json
         }
+
+
+# --- 项目管理 ---
+
+def get_all_projects_db() -> List[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projects ORDER BY created_at DESC")
+        return [dict(row) for row in cursor.fetchall()]
+
+def add_project_db(project_id: str, name: str, script_path: str):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        created_at = datetime.now().isoformat()
+        cursor.execute(
+            "INSERT INTO projects (id, name, script_path, created_at, status, ai_model) VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, name, script_path, created_at, 'idle', 'gemini')
+        )
+
+def update_project_model_db(project_id: str, model: str):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE projects SET ai_model = ? WHERE id = ?", (model, project_id))
+        
+def update_project_probability_db(project_id: str, prob: float):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE projects SET api_probability = ? WHERE id = ?", (prob, project_id))
+
+def update_project_stop_time_db(project_name_or_script: str):
+    """Update last_stopped_at for a project based on script path match"""
+    # Note: frontend passes script_path to stop api, so we might need to find project by script_path
+    # Or simplified: pass script_path, find project, update.
+    script_name = os.path.basename(project_name_or_script)
+    now_str = datetime.now().isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Like operator to match partial path if needed, but safer to match basename if stored as full path
+        # Assuming script_path column changes. 
+        # Actually simplest is to fuzzy match script_path.
+        cursor.execute("UPDATE projects SET last_stopped_at = ? WHERE script_path LIKE ?", (now_str, f"%{script_name}"))
+
+def delete_project_db(project_id: str):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+def update_project_db(project_id: str, updates: Dict[str, Any]):
+    # columns: name, schedule_enabled, schedule_interval, last_run, status, script_path
+    allowed_cols = {'name', 'schedule_enabled', 'schedule_interval', 'last_run', 'status', 'script_path'}
+    
+    set_clauses = []
+    values = []
+    for col, val in updates.items():
+        if col in allowed_cols:
+            set_clauses.append(f"{col} = ?")
+            values.append(int(val) if isinstance(val, bool) else val)
+            
+    if not set_clauses:
+        return
+        
+    values.append(project_id)
+    sql = f"UPDATE projects SET {', '.join(set_clauses)} WHERE id = ?"
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, values)
+
+def delete_image_by_uuid(image_uuid: str) -> bool:
+    """根据 UUID 删除图片记录"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM images WHERE uuid = ?", (image_uuid,))
+        return cursor.rowcount > 0
+
+def get_images_by_path_prefix(prefix: str) -> List[Dict[str, Any]]:
+    """获取指定路径前缀的所有图片"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # 注意：这里的 relative_path 可能不包含 prefix 的全部（比如 prefix 是 'foo/', relative_path 是 'foo/bar.jpg'）
+        # 但我们通常根据 relative_path 来匹配
+        cursor.execute("""
+            SELECT id, uuid, relative_path, file_name, created_at, file_path
+            FROM images 
+            WHERE relative_path LIKE ?
+        """, (f"{prefix}%",))
+        
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_all_image_uuids() -> List[str]:
+    """获取所有图片的 UUID"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT uuid FROM images")
+        return [row['uuid'] for row in cursor.fetchall()]
+
+def check_keyword_vector_exists(image_id: int) -> bool:
+    """检查图片是否存在 keyword 向量 (DB中)"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM keyword_embeddings WHERE image_id = ?", (image_id,))
+        count = cursor.fetchone()[0]
+        return count > 0

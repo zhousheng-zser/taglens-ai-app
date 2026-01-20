@@ -1,4 +1,4 @@
-import { Tags, Home, Image as ImageIcon, Info, Search } from 'lucide-react';
+import { Tags, Home, Image as ImageIcon, Info, Search, Upload, Cloud, Database } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 
@@ -24,6 +24,21 @@ export function Header() {
           <Link href="/search" passHref>
             <Button variant="ghost" className="flex items-center gap-2">
               <Search className="h-4 w-4" /> 标签搜索
+            </Button>
+          </Link>
+          <Link href="/bulk-import" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Upload className="h-4 w-4" /> 批量导入
+            </Button>
+          </Link>
+          <Link href="/project-sync" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Cloud className="h-4 w-4" /> 项目同步
+            </Button>
+          </Link>
+          <Link href="/data-management" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Database className="h-4 w-4" /> 数据管理
             </Button>
           </Link>
           <Link href="/about" passHref>

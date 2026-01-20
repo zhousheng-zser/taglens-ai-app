@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile } from 'fs/promises';
-import { join } from 'path';
+
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
 
 export async function GET(
   request: NextRequest,
@@ -9,31 +9,30 @@ export async function GET(
   try {
     // 等待 params Promise
     const { path } = await params;
-    // 构建文件路径
-    const filePath = path.join('/');
-    const fullPath = join(process.cwd(), filePath);
+    // 构建 MinIO 对象路径（路径数组用 / 连接）
+    const objectPath = path.join('/');
+    
+    // 通过后端 MinIO 接口下载图片
+    const url = `${BACKEND_URL}/api/minio/download/image?object_name=${encodeURIComponent(objectPath)}`;
+    
+    const response = await fetch(url, {
+      method: 'GET',
+    });
 
-    // 安全检查：确保路径在项目目录内
-    const projectRoot = process.cwd();
-    if (!fullPath.startsWith(projectRoot)) {
-      return NextResponse.json({ error: '无效的路径' }, { status: 403 });
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: '图片不存在或无法读取' },
+        { status: response.status }
+      );
     }
 
-    // 读取文件
-    const fileBuffer = await readFile(fullPath);
+    // 获取图片数据
+    const imageBuffer = await response.arrayBuffer();
+    
+    // 获取 Content-Type（从后端响应头获取）
+    const contentType = response.headers.get('Content-Type') || 'image/jpeg';
 
-    // 根据文件扩展名设置 Content-Type
-    const ext = filePath.split('.').pop()?.toLowerCase();
-    const contentType = {
-      jpg: 'image/jpeg',
-      jpeg: 'image/jpeg',
-      png: 'image/png',
-      gif: 'image/gif',
-      webp: 'image/webp',
-      bmp: 'image/bmp',
-    }[ext || ''] || 'application/octet-stream';
-
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(imageBuffer, {
       headers: {
         'Content-Type': contentType,
         'Cache-Control': 'public, max-age=31536000, immutable',

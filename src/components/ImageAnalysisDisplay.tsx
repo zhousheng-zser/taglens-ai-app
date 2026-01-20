@@ -48,14 +48,64 @@ const Section: React.FC<{ icon: React.ElementType; title: string; children: Reac
   </div>
 );
 
+const RecursiveRenderer: React.FC<{ data: any; depth?: number }> = ({ data, depth = 0 }) => {
+  if (Array.isArray(data)) {
+    return (
+      <ul className={`list-disc list-inside space-y-1 ${depth > 0 ? 'ml-4' : ''}`}>
+        {data.map((item, index) => (
+          <li key={index} className="text-foreground">
+            {typeof item === 'object' && item !== null ? (
+              <RecursiveRenderer data={item} depth={depth + 1} />
+            ) : (
+              String(item)
+            )}
+          </li>
+        ))}
+      </ul>
+    );
+  }
 
-export function ImageAnalysisDisplay({ 
-  analysis, 
+  if (typeof data === 'object' && data !== null) {
+    return (
+      <div className={`space-y-1 ${depth > 0 ? 'ml-2 border-l-2 border-primary/20 pl-2 mt-1' : ''}`}>
+        {Object.entries(data).map(([key, value]) => (
+          <div key={key}>
+            <div className="flex items-start">
+              <span className={`font-semibold text-primary mr-2 ${depth === 0 ? 'text-sm mb-1 block' : 'text-xs mt-0.5 min-w-fit'}`}>
+                {key}{depth > 0 ? ':' : ''}
+              </span>
+              {/* 如果不是对象，或者(是对象但不是第一层)，将值显示在旁边；如果是第一层对象，标题独占一行 */}
+              {(depth > 0 || typeof value !== 'object' || value === null) && (
+                <div className="flex-1">
+                  {typeof value === 'object' && value !== null ? (
+                    <RecursiveRenderer data={value} depth={depth + 1} />
+                  ) : (
+                    <span className="text-sm text-foreground">{String(value)}</span>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* 第一层的对象值，换行缩进显示 */}
+            {depth === 0 && typeof value === 'object' && value !== null && (
+              <RecursiveRenderer data={value} depth={depth + 1} />
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return <span className="text-sm text-foreground">{String(data)}</span>;
+};
+
+
+export function ImageAnalysisDisplay({
+  analysis,
   dualAnalysis,
-  isLoading, 
-  hasImage, 
-  imageData, 
-  fileName, 
+  isLoading,
+  hasImage,
+  imageData,
+  fileName,
   onSaveSuccess,
   currentIndex = 0,
   totalCount = 0,
@@ -79,7 +129,7 @@ export function ImageAnalysisDisplay({
   }, [selectedModel]);
 
   // 确定要使用的分析结果
-  const currentAnalysis = dualAnalysis 
+  const currentAnalysis = dualAnalysis
     ? (localSelectedModel === 'qwen' ? dualAnalysis.qwen : dualAnalysis.gemini)
     : analysis;
 
@@ -116,7 +166,7 @@ export function ImageAnalysisDisplay({
         keywords: analysisToSave.semantic_search.keywords,
         description: analysisToSave.semantic_search.description,
         fileName: fileName || undefined,
-        clipCaptions: analysisToSave.training_data.clip_captions,
+
         qwenCaptions: analysisToSave.training_data.qwen_captions,
         yoloObjects: analysisToSave.training_data.yolo_objects,
       });
@@ -162,7 +212,7 @@ export function ImageAnalysisDisplay({
           <div className="space-y-3">
             <Skeleton className="h-6 w-1/3" />
             <Skeleton className="h-16 w-full" />
-             <div className="flex flex-wrap gap-2 pt-2">
+            <div className="flex flex-wrap gap-2 pt-2">
               {[...Array(6)].map((_, i) => (
                 <Skeleton key={i} className="h-8 rounded-full" style={{ width: `${Math.floor(Math.random() * 40) + 70}px` }} />
               ))}
@@ -181,21 +231,62 @@ export function ImageAnalysisDisplay({
         </div>
       );
     }
-    
+
     if (!hasImage) {
-        return (
-            <div className="flex flex-col items-center justify-center text-center text-muted-foreground p-8 space-y-4 min-h-[400px]">
-                <BrainCircuit className="w-16 h-16"/>
-                <p className="text-lg">上传图片以查看AI分析结果。</p>
+      return (
+        <div className="flex flex-col items-center justify-center text-center text-muted-foreground p-8 space-y-4 min-h-[400px]">
+          <BrainCircuit className="w-16 h-16" />
+          <p className="text-lg">上传图片以查看AI分析结果。</p>
+        </div>
+      )
+    }
+
+    // 优先显示相似图片（如果有相似度分数，即使图片数据缺失也显示）
+    if (similarityScore !== undefined && similarityScore > 0) {
+      return (
+        <div className="flex flex-col items-center justify-center text-center p-8 space-y-4 min-h-[400px]">
+          <Alert variant="default" className="mb-4 w-full">
+            <AlertDescription>
+              检测到相似图片（相似度: {(similarityScore * 100).toFixed(1)}%），跳过AI分析以避免重复
+            </AlertDescription>
+          </Alert>
+          {similarImageData ? (
+            <div className="w-full max-w-2xl">
+              <h3 className="text-lg font-semibold mb-4">找到相似图片:</h3>
+              <div className="relative rounded-lg overflow-hidden border-2 border-primary/50 shadow-lg">
+                <img
+                  src={similarImageData}
+                  alt="相似图片"
+                  className="w-full h-auto object-contain max-h-[600px]"
+                  onError={(e) => {
+                    console.error('相似图片加载失败:', e);
+                    e.currentTarget.style.display = 'none';
+                  }}
+                />
+              </div>
+              <p className="text-sm text-muted-foreground mt-2">
+                相似度: {(similarityScore * 100).toFixed(1)}%
+              </p>
             </div>
-        )
+          ) : (
+            <Alert className="w-full max-w-2xl border-yellow-500 bg-yellow-50/10">
+              <AlertDescription>
+                <p className="font-semibold mb-2">已检测到相似图片（相似度: {(similarityScore * 100).toFixed(1)}%）</p>
+                <p className="text-sm text-muted-foreground">
+                  相似图片数据未能从存储中加载，但系统已检测到相似度超过阈值，已跳过AI分析以避免重复。
+                </p>
+              </AlertDescription>
+            </Alert>
+          )}
+        </div>
+      );
     }
 
     // 处理双模型结果 - 同时展示两个模型的结果
     if (dualAnalysis) {
       const qwenAnalysis = dualAnalysis.qwen;
       const geminiAnalysis = dualAnalysis.gemini;
-      
+
       // 渲染单个模型的分析结果
       const renderAnalysisCard = (analysis: TrafficAnalysisOutput | null, modelName: string, modelKey: 'qwen' | 'gemini') => {
         if (!analysis) {
@@ -203,7 +294,7 @@ export function ImageAnalysisDisplay({
             <Card className="bg-muted/30 border-dashed">
               <CardHeader>
                 <CardTitle className="flex items-center gap-3 text-xl text-muted-foreground">
-                  <Bot className="text-muted-foreground"/> 
+                  <Bot className="text-muted-foreground" />
                   {modelName} - 未返回结果
                 </CardTitle>
               </CardHeader>
@@ -220,7 +311,7 @@ export function ImageAnalysisDisplay({
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardTitle className="flex items-center gap-3 text-xl">
-                    <Bot className="text-primary"/> 
+                    <Bot className="text-primary" />
                     {modelName} - 语义检索核心 (Semantic Search)
                   </CardTitle>
                   <Button
@@ -234,57 +325,49 @@ export function ImageAnalysisDisplay({
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                  <Section icon={ScanText} title="高密度描述">
-                     <p className="text-base text-foreground bg-background/50 p-3 rounded-md border">
-                      {analysis.semantic_search.description}
-                    </p>
-                  </Section>
-                  <Section icon={Tags} title="核心关键词">
-                     <div className="flex flex-wrap gap-2">
-                      {analysis.semantic_search.keywords.map(tag => (
-                        <Badge key={tag} variant="secondary" className="text-base py-1 px-3 cursor-pointer hover:bg-primary/80">
-                          {tag}
-                        </Badge>
-                      ))}
-                    </div>
-                  </Section>
+                <Section icon={ScanText} title="高密度描述">
+                  <p className="text-base text-foreground bg-background/50 p-3 rounded-md border">
+                    {analysis.semantic_search.description}
+                  </p>
+                </Section>
+                <Section icon={Tags} title="核心关键词">
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.semantic_search.keywords.map(tag => (
+                      <Badge key={tag} variant="secondary" className="text-base py-1 px-3 cursor-pointer hover:bg-primary/80">
+                        {tag}
+                      </Badge>
+                    ))}
+                  </div>
+                </Section>
               </CardContent>
             </Card>
 
             <Card className="bg-muted/30">
               <CardHeader>
-                <CardTitle className="flex items-center gap-3 text-xl"><TestTube2 className="text-primary"/> {modelName} - 模型训练数据 (Training Data)</CardTitle>
+                <CardTitle className="flex items-center gap-3 text-xl"><TestTube2 className="text-primary" /> {modelName} - 模型训练数据 (Training Data)</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                  <Section icon={ScanText} title="CLIP视觉陈述句">
-                     <ul className="list-disc list-inside space-y-2 bg-background/50 p-3 rounded-md border">
-                        {analysis.training_data.clip_captions.map((caption, index) => (
-                          <li key={index} className="text-foreground">{caption}</li>
-                        ))}
-                      </ul>
-                  </Section>
-                  <Section icon={ScanText} title="Qwen描述">
-                     <ul className="list-disc list-inside space-y-2 bg-background/50 p-3 rounded-md border">
-                        {analysis.training_data.qwen_captions.map((caption, index) => (
-                          <li key={index} className="text-foreground">{caption}</li>
-                        ))}
-                      </ul>
-                  </Section>
-                  <Section icon={ListTree} title="YOLO目标清单">
-                     <div className="flex flex-wrap gap-2">
-                      {analysis.training_data.yolo_objects.map(obj => (
-                         <Badge key={obj} variant="outline" className="text-sm py-1 px-3 font-mono">
-                          {obj}
-                        </Badge>
-                      ))}
-                    </div>
-                  </Section>
+
+                <Section icon={ScanText} title="Qwen描述">
+                  <div className="bg-background/50 p-3 rounded-md border space-y-3">
+                    <RecursiveRenderer data={analysis.training_data.qwen_captions} />
+                  </div>
+                </Section>
+                <Section icon={ListTree} title="YOLO目标清单">
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.training_data.yolo_objects.map(obj => (
+                      <Badge key={obj} variant="outline" className="text-sm py-1 px-3 font-mono">
+                        {obj}
+                      </Badge>
+                    ))}
+                  </div>
+                </Section>
               </CardContent>
             </Card>
           </div>
         );
       };
-      
+
       return (
         <div className="space-y-6 animate-in fade-in-50 p-1">
           {dualAnalysis.error && (
@@ -323,59 +406,51 @@ export function ImageAnalysisDisplay({
         <div className="space-y-6 animate-in fade-in-50 p-1">
           <Card className="bg-muted/30">
             <CardHeader>
-              <CardTitle className="flex items-center gap-3 text-xl"><Bot className="text-primary"/> 语义检索核心 (Semantic Search)</CardTitle>
+              <CardTitle className="flex items-center gap-3 text-xl"><Bot className="text-primary" /> 语义检索核心 (Semantic Search)</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-                <Section icon={ScanText} title="高密度描述">
-                   <p className="text-base text-foreground bg-background/50 p-3 rounded-md border">
-                    {analysis.semantic_search.description}
-                  </p>
-                </Section>
-                <Section icon={Tags} title="核心关键词">
-                   <div className="flex flex-wrap gap-2">
-                    {analysis.semantic_search.keywords.map(tag => (
-                      <Badge key={tag} variant="secondary" className="text-base py-1 px-3 cursor-pointer hover:bg-primary/80">
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                </Section>
+              <Section icon={ScanText} title="高密度描述">
+                <p className="text-base text-foreground bg-background/50 p-3 rounded-md border">
+                  {analysis.semantic_search.description}
+                </p>
+              </Section>
+              <Section icon={Tags} title="核心关键词">
+                <div className="flex flex-wrap gap-2">
+                  {analysis.semantic_search.keywords.map(tag => (
+                    <Badge key={tag} variant="secondary" className="text-base py-1 px-3 cursor-pointer hover:bg-primary/80">
+                      {tag}
+                    </Badge>
+                  ))}
+                </div>
+              </Section>
             </CardContent>
           </Card>
 
           <Card className="bg-muted/30">
             <CardHeader>
-              <CardTitle className="flex items-center gap-3 text-xl"><TestTube2 className="text-primary"/> 模型训练数据 (Training Data)</CardTitle>
+              <CardTitle className="flex items-center gap-3 text-xl"><TestTube2 className="text-primary" /> 模型训练数据 (Training Data)</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-                <Section icon={ScanText} title="CLIP视觉陈述句">
-                   <ul className="list-disc list-inside space-y-2 bg-background/50 p-3 rounded-md border">
-                      {analysis.training_data.clip_captions.map((caption, index) => (
-                        <li key={index} className="text-foreground">{caption}</li>
-                      ))}
-                    </ul>
-                </Section>
-                <Section icon={ScanText} title="Qwen描述">
-                   <ul className="list-disc list-inside space-y-2 bg-background/50 p-3 rounded-md border">
-                      {analysis.training_data.qwen_captions.map((caption, index) => (
-                        <li key={index} className="text-foreground">{caption}</li>
-                      ))}
-                    </ul>
-                </Section>
-                <Section icon={ListTree} title="YOLO目标清单">
-                   <div className="flex flex-wrap gap-2">
-                    {analysis.training_data.yolo_objects.map(obj => (
-                       <Badge key={obj} variant="outline" className="text-sm py-1 px-3 font-mono">
-                        {obj}
-                      </Badge>
-                    ))}
-                  </div>
-                </Section>
+
+              <Section icon={ScanText} title="Qwen描述">
+                <div className="bg-background/50 p-3 rounded-md border space-y-3">
+                  <RecursiveRenderer data={analysis.training_data.qwen_captions} />
+                </div>
+              </Section>
+              <Section icon={ListTree} title="YOLO目标清单">
+                <div className="flex flex-wrap gap-2">
+                  {analysis.training_data.yolo_objects.map(obj => (
+                    <Badge key={obj} variant="outline" className="text-sm py-1 px-3 font-mono">
+                      {obj}
+                    </Badge>
+                  ))}
+                </div>
+              </Section>
             </CardContent>
           </Card>
-          
+
           <Separator />
-          
+
           <Section icon={FileJson} title="原始数据 (Raw JSON)">
             <pre className="bg-muted/50 text-foreground p-4 rounded-md text-xs overflow-x-auto border">
               <code>{JSON.stringify(analysis, null, 2)}</code>
@@ -384,39 +459,13 @@ export function ImageAnalysisDisplay({
         </div>
       );
     }
-    
-    // 如果有相似图片，显示相似图片
-    if (similarImageData && similarityScore !== undefined) {
-      return (
-        <div className="flex flex-col items-center justify-center text-center p-8 space-y-4 min-h-[400px]">
-          <Alert variant="default" className="mb-4 w-full">
-            <AlertDescription>
-              检测到相似图片（相似度: {(similarityScore * 100).toFixed(1)}%），跳过AI分析以避免重复
-            </AlertDescription>
-          </Alert>
-          <div className="w-full max-w-2xl">
-            <h3 className="text-lg font-semibold mb-4">找到相似图片:</h3>
-            <div className="relative rounded-lg overflow-hidden border-2 border-primary/50 shadow-lg">
-              <img 
-                src={similarImageData} 
-                alt="相似图片" 
-                className="w-full h-auto object-contain max-h-[600px]"
-              />
-            </div>
-            <p className="text-sm text-muted-foreground mt-2">
-              相似度: {(similarityScore * 100).toFixed(1)}%
-            </p>
-          </div>
-        </div>
-      );
-    }
-    
+
     return (
-         <div className="flex flex-col items-center justify-center text-center text-muted-foreground p-8 space-y-4 min-h-[400px]">
-            <BrainCircuit className="w-16 h-16"/>
-            <p className="text-lg">后端未能返回分析结果。</p>
-            <p>请检查后端服务是否正常运行，或尝试重新上传图片。</p>
-        </div>
+      <div className="flex flex-col items-center justify-center text-center text-muted-foreground p-8 space-y-4 min-h-[400px]">
+        <BrainCircuit className="w-16 h-16" />
+        <p className="text-lg">后端未能返回分析结果。</p>
+        <p>请检查后端服务是否正常运行，或尝试重新上传图片。</p>
+      </div>
     )
   };
 
@@ -454,9 +503,9 @@ export function ImageAnalysisDisplay({
             )}
           </div>
           {(analysis || (dualAnalysis && currentAnalysis)) && imageData && !isLoading && (
-            <Button 
-              onClick={handleSave} 
-              size="sm" 
+            <Button
+              onClick={handleSave}
+              size="sm"
               variant="outline"
               disabled={isSaving || isSavedProp}
             >

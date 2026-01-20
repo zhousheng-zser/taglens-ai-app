@@ -11,3 +11,6 @@ torch
 transformers
 opencv-python
 Pillow
+minio
+pymysql<1.0
+sshtunnel

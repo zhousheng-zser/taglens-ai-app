@@ -17,6 +17,8 @@ export async function GET(
       headers: {
         'Content-Type': 'application/json',
       },
+      // 增加超时时间到10分钟（600秒）
+      signal: AbortSignal.timeout(600000),
     });
 
     if (!response.ok) {

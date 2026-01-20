@@ -53,7 +53,7 @@ export default function ImageTaggerPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
   const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'both'>('qwen');
-  const [similarityThreshold, setSimilarityThreshold] = useState(0.65); // 默认65%
+  const [similarityThreshold, setSimilarityThreshold] = useState(0.74); // 默认74%
   const { toast } = useToast();
 
   // 当前显示的图片信息
@@ -74,7 +74,7 @@ export default function ImageTaggerPage() {
   // 处理单个图片
   const processImage = async (file: File, previewUrl: string, dataUri: string, index: number) => {
     setIsLoading(true);
-    
+
     // 更新对应索引的图片状态为加载中
     setImageAnalyses(prev => {
       const updated = [...prev];
@@ -87,11 +87,11 @@ export default function ImageTaggerPage() {
       }
       return updated;
     });
-    
+
     try {
       // 先检查图片相似度
       const similarityCheck = await checkImageSimilarity(dataUri, similarityThreshold);
-      
+
       if (similarityCheck.is_similar) {
         // 发现相似图片，不调用大模型API
         // 获取最相似图片的数据
@@ -110,17 +110,17 @@ export default function ImageTaggerPage() {
           }
           return updated;
         });
-        
+
         toast({
           variant: 'default',
           title: '检测到相似图片',
           description: similarityCheck.message,
         });
-        
+
         setIsLoading(false);
         return;
       }
-      
+
       // 没有相似图片，继续调用大模型API
       const result = await handleImageAnalysis({ photoDataUri: dataUri, model: selectedModel });
       if (result.error) {
@@ -189,7 +189,7 @@ export default function ImageTaggerPage() {
   // 处理多文件选择
   const handleMultipleFiles = async (files: File[]) => {
     const validFiles = files.filter(file => file.type.startsWith('image/'));
-    
+
     if (validFiles.length === 0) {
       toast({
         variant: 'destructive',
@@ -210,13 +210,14 @@ export default function ImageTaggerPage() {
         };
         reader.readAsDataURL(file);
       });
-      
+
       newAnalyses.push({
         file,
         preview: previewUrl,
         dataUri,
         fileName: file.name,
         analysis: null,
+        dualAnalysis: null,
         error: null,
         isSaved: false,
       });
@@ -250,10 +251,10 @@ export default function ImageTaggerPage() {
     imageAnalyses.forEach(item => {
       URL.revokeObjectURL(item.preview);
     });
-    
+
     setImageAnalyses([]);
     setCurrentIndex(0);
-    
+
     // 重置文件输入
     const fileInput = document.getElementById('file-upload') as HTMLInputElement;
     if (fileInput) {
@@ -275,7 +276,7 @@ export default function ImageTaggerPage() {
         }
         return updated;
       });
-      
+
       // 将当前图片添加到已处理列表
       setProcessedImages((prev) => [
         {
@@ -345,7 +346,7 @@ export default function ImageTaggerPage() {
           <h2 className="text-3xl font-bold tracking-tight text-foreground font-headline">
             1. 上传交通监控图片
           </h2>
-          
+
           {/* 模型选择 */}
           <div className="space-y-2">
             <Label htmlFor="model-select">选择AI模型</Label>
@@ -360,7 +361,7 @@ export default function ImageTaggerPage() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              {selectedModel === 'both' 
+              {selectedModel === 'both'
                 ? '将同时调用两个模型，可以对比结果后选择保存其中一个'
                 : `将使用 ${selectedModel === 'qwen' ? '通义千问' : 'Gemini'} 模型进行分析`}
             </p>
@@ -387,7 +388,7 @@ export default function ImageTaggerPage() {
               当上传图片与数据库中的图片相似度达到此阈值时，将跳过AI分析以避免重复
             </p>
           </div>
-          
+
           <ImageUploader
             onImageUpload={handleImageUpload}
             onFilesSelected={handleMultipleFiles}
