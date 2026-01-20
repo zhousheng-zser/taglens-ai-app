@@ -29,7 +29,7 @@ interface ImageSearchResult {
   keywords: string[];
   tags: string[];
 
-  qwenCaptions: string[];
+  qwenCaptions: any;  // 可以是字符串数组或嵌套对象
   yoloObjects: string[];
   similarity?: number;  // 相似度分数（0-1之间）
 }
@@ -38,6 +38,116 @@ interface TagWithWeight {
   tag: string;
   weight: number;
 }
+
+// 递归渲染组件，用于展示嵌套的 JSON 数据
+// 递归渲染组件，用于展示嵌套的 JSON 数据
+// 高级配色方案配置
+// 定义一组高级的语义颜色方案 (Color Palette)
+const ColorPalette = [
+  // 蓝色系 ()
+  { bg: 'bg-blue-50/50 dark:bg-blue-900/10', border: 'border-blue-200 dark:border-blue-800/30', title: 'text-blue-700 dark:text-blue-400', indicator: 'bg-blue-500' },
+  // 绿色系 ()
+  { bg: 'bg-emerald-50/50 dark:bg-emerald-900/10', border: 'border-emerald-200 dark:border-emerald-800/30', title: 'text-emerald-700 dark:text-emerald-400', indicator: 'bg-emerald-500' },
+  // 紫色系 ()
+  { bg: 'bg-violet-50/50 dark:bg-violet-900/10', border: 'border-violet-200 dark:border-violet-800/30', title: 'text-violet-700 dark:text-violet-400', indicator: 'bg-violet-500' },
+  // 橙色系 ()
+  { bg: 'bg-orange-50/50 dark:bg-orange-900/10', border: 'border-orange-200 dark:border-orange-800/30', title: 'text-orange-700 dark:text-orange-400', indicator: 'bg-orange-500' },
+  // 玫瑰红系 ()
+  { bg: 'bg-rose-50/50 dark:bg-rose-900/10', border: 'border-rose-200 dark:border-rose-800/30', title: 'text-rose-700 dark:text-rose-400', indicator: 'bg-rose-500' },
+  // 青色系 ()
+  { bg: 'bg-cyan-50/50 dark:bg-cyan-900/10', border: 'border-cyan-200 dark:border-cyan-800/30', title: 'text-cyan-700 dark:text-cyan-400', indicator: 'bg-cyan-500' },
+  // 琥珀色系 ()
+  { bg: 'bg-amber-50/50 dark:bg-amber-900/10', border: 'border-amber-200 dark:border-amber-800/30', title: 'text-amber-700 dark:text-amber-400', indicator: 'bg-amber-500' },
+];
+
+// 根据字符串生成固定的索引
+const getColorStyle = (key: string) => {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = key.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % ColorPalette.length;
+  return ColorPalette[index];
+};
+
+const RecursiveRenderer: React.FC<{ data: any; depth?: number }> = ({ data, depth = 0 }) => {
+  if (data === null || data === undefined) return null;
+
+  // Handle arrays
+  if (Array.isArray(data)) {
+    if (data.length === 0) return <span className="text-muted-foreground italic text-xs">无内容</span>;
+    return (
+      <ul className={`space-y-1.5 ${depth > 0 ? 'ml-1' : ''}`}>
+        {data.map((item, index) => (
+          <li key={index} className="flex items-start text-sm group">
+            <span className="text-muted-foreground/60 mr-2 mt-1.5 h-1.5 w-1.5 rounded-full bg-current shrink-0 group-hover:text-primary transition-colors" />
+            <div className="text-foreground/90 leading-relaxed">
+              {typeof item === 'object' ? (
+                <RecursiveRenderer data={item} depth={depth + 1} />
+              ) : (
+                String(item)
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  // Handle objects
+  if (typeof data === 'object') {
+    const entries = Object.entries(data);
+    if (entries.length === 0) return null;
+
+    // Top-level rendering as cards (Category View)
+    if (depth === 0) {
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {entries.map(([key, value]) => {
+            // 使用动态颜色分配
+            const style = getColorStyle(key);
+            return (
+              <div
+                key={key}
+                className={`rounded-lg border ${style.border} ${style.bg} p-3.5 transition-all hover:shadow-sm`}
+              >
+                <h4 className={`mb-3 text-sm font-semibold flex items-center gap-2 ${style.title}`}>
+                  <span className={`h-3 w-1.5 rounded-full ${style.indicator}`} />
+                  {key}
+                </h4>
+                <div className="pl-1">
+                  <RecursiveRenderer data={value} depth={depth + 1} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // Nested level rendering as compact list
+    return (
+      <div className="space-y-2">
+        {entries.map(([key, value]) => (
+          <div key={key} className="flex flex-col sm:flex-row sm:gap-2 text-sm border-l-2 border-border/30 pl-2.5 ml-0.5">
+            <span className="text-muted-foreground font-medium shrink-0 min-w-[70px] text-xs uppercase tracking-wider mt-0.5">
+              {key}
+            </span>
+            <div className="flex-1">
+              {typeof value === 'object' ? (
+                <RecursiveRenderer data={value} depth={depth + 1} />
+              ) : (
+                <span className="text-foreground/90">{String(value)}</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return <span className="text-sm text-foreground/90">{String(data)}</span>;
+};
 
 export default function SearchPage() {
   const [tagInput, setTagInput] = useState('');  // 当前输入的标签
@@ -967,86 +1077,124 @@ export default function SearchPage() {
                   </Button>
                 </div>
                 <div className="p-6">
-                  <div className="mb-6">
+                  {/* Image Preview */}
+                  <div className="mb-6 relative group">
+                    <div className="absolute inset-0 bg-gradient-to-t from-background/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none rounded-lg" />
                     <img
                       src={getImageUrl(selectedImage.filePath)}
                       alt={selectedImage.fileName || '预览图片'}
-                      className="w-full rounded-lg shadow-lg"
+                      className="w-full rounded-lg shadow-2xl border border-border/50"
                       onError={(e) => {
-                        // 如果图片加载失败，显示占位符
                         (e.target as HTMLImageElement).src = '/placeholder-image.png';
                       }}
                     />
                   </div>
-                  <div className="space-y-4">
+
+                  <div className="space-y-6">
+                    {/* 关键词 - 更加精致的标签 */}
                     <div>
-                      <h3 className="font-semibold mb-2">关键词</h3>
+                      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-primary/80 uppercase tracking-wider">
+                        <span className="w-1 h-4 bg-primary rounded-full"></span>
+                        关键词
+                      </h3>
                       <div className="flex flex-wrap gap-2">
                         {selectedImage.keywords.map((keyword, idx) => (
-                          <Badge key={idx} variant="secondary">
+                          <Badge
+                            key={idx}
+                            variant="secondary"
+                            className="bg-secondary/40 hover:bg-primary/10 hover:text-primary transition-colors border border-border/50 px-3 py-1 shadow-sm font-normal text-foreground/80"
+                          >
                             {keyword}
                           </Badge>
                         ))}
                       </div>
                     </div>
 
-                    {selectedImage.qwenCaptions && selectedImage.qwenCaptions.length > 0 && (
+                    {/* Qwen Description - 保持原样 (已是高级设计) */}
+                    {selectedImage.qwenCaptions && (
                       <div>
-                        <h3 className="font-semibold mb-2">qwen_captions</h3>
-                        <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-                          {selectedImage.qwenCaptions.map((caption, idx) => (
-                            <li key={idx}>{caption}</li>
-                          ))}
-                        </ul>
+                        {/* 标题样式微调以保持一致性 */}
+                        <div className="mb-2">
+                          <h3 className="text-sm font-semibold flex items-center gap-2 text-indigo-500/90 uppercase tracking-wider">
+                            <span className="w-1 h-4 bg-indigo-500 rounded-full"></span>
+                            Qwen Description
+                          </h3>
+                        </div>
+                        <div className="text-muted-foreground">
+                          <RecursiveRenderer data={selectedImage.qwenCaptions} />
+                        </div>
                       </div>
                     )}
+
+                    {/* YOLO 对象 - 使用与 Qwen 类似的卡片风格，但有独特色彩 */}
                     {selectedImage.yoloObjects.length > 0 && (
-                      <div>
-                        <h3 className="font-semibold mb-2">YOLO 对象</h3>
+                      <div className="rounded-lg border border-orange-200 dark:border-orange-900/30 bg-orange-50/30 dark:bg-orange-900/5 p-4 transition-all hover:shadow-sm">
+                        <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-orange-700 dark:text-orange-400 uppercase tracking-wider">
+                          <span className="w-1 h-4 bg-orange-500 rounded-full"></span>
+                          YOLO 检测对象
+                        </h3>
                         <div className="flex flex-wrap gap-2">
                           {selectedImage.yoloObjects.map((obj, idx) => (
-                            <Badge key={idx} variant="secondary">
+                            <Badge
+                              key={idx}
+                              className="bg-background/80 dark:bg-black/20 border border-orange-200 dark:border-orange-800/30 text-foreground/80 hover:bg-orange-100 dark:hover:bg-orange-900/30 transition-colors shadow-sm font-normal px-2.5 py-1"
+                            >
+                              <div className="w-1.5 h-1.5 rounded-full bg-orange-400 mr-2 opacity-80"></div>
                               {obj}
                             </Badge>
                           ))}
                         </div>
                       </div>
                     )}
-                    <div>
-                      <h3 className="font-semibold mb-2">描述</h3>
-                      <p className="text-muted-foreground">
-                        {selectedImage.description}
+
+                    {/* 描述 - 引用块风格 */}
+                    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/20 p-5 relative overflow-hidden group">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-slate-300 dark:bg-slate-700 group-hover:bg-primary/60 transition-colors"></div>
+                      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-slate-600 dark:text-slate-400 uppercase tracking-wider">
+                        综合描述
+                      </h3>
+                      <p className="text-muted-foreground leading-relaxed text-sm text-justify">
+                        {selectedImage.description || <span className="italic opacity-50">暂无描述</span>}
                       </p>
                     </div>
-                    {selectedImage.similarity !== undefined && (
-                      <div>
-                        <h3 className="font-semibold mb-2">相似度</h3>
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 bg-secondary rounded-full h-2">
-                            <div
-                              className="bg-primary h-2 rounded-full transition-all"
-                              style={{ width: `${selectedImage.similarity * 100}%` }}
-                            />
+
+                    {/* 元数据 - 网格布局 */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                      {/* 相似度 */}
+                      {selectedImage.similarity !== undefined && (
+                        <div className="rounded-lg border border-border/60 bg-card/40 p-3">
+                          <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-2">语义相似度</h3>
+                          <div className="flex items-center gap-3">
+                            <div className="flex-1 bg-secondary rounded-full h-1.5 overflow-hidden">
+                              <div
+                                className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full rounded-full shadow-lg transition-all duration-1000"
+                                style={{ width: `${selectedImage.similarity * 100}%` }}
+                              />
+                            </div>
+                            <span className="text-lg font-bold text-foreground tabular-nums tracking-tight">
+                              {(selectedImage.similarity * 100).toFixed(1)}<span className="text-xs font-normal text-muted-foreground ml-0.5">%</span>
+                            </span>
                           </div>
-                          <span className="text-sm font-medium text-muted-foreground">
-                            {(selectedImage.similarity * 100).toFixed(2)}%
-                          </span>
+                        </div>
+                      )}
+
+                      {/* 文件信息 */}
+                      <div className="rounded-lg border border-border/60 bg-card/40 p-3 md:col-span-2">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-1">文件名</h3>
+                            <p className="text-xs font-mono text-foreground/80 break-all select-all hover:text-primary transition-colors cursor-text">
+                              {selectedImage.fileName || <span className="italic">未命名</span>}
+                            </p>
+                          </div>
+                          <div>
+                            <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-1">保存时间</h3>
+                            <p className="text-xs font-mono text-foreground/80">
+                              {selectedImage.createdAt ? new Date(selectedImage.createdAt).toLocaleString('zh-CN', { hour12: false }) : '-'}
+                            </p>
+                          </div>
                         </div>
                       </div>
-                    )}
-                    {selectedImage.fileName && (
-                      <div>
-                        <h3 className="font-semibold mb-2">文件名</h3>
-                        <p className="text-muted-foreground text-sm">
-                          {selectedImage.fileName}
-                        </p>
-                      </div>
-                    )}
-                    <div>
-                      <h3 className="font-semibold mb-2">保存时间</h3>
-                      <p className="text-muted-foreground text-sm">
-                        {new Date(selectedImage.createdAt).toLocaleString('zh-CN')}
-                      </p>
                     </div>
                   </div>
                 </div>

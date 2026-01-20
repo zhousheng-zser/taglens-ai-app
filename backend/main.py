@@ -1737,7 +1737,6 @@ async def get_all_images_api(limit: int = Query(100, ge=1, le=1000)):
                 description=r['description'],
                 keywords=r['keywords'],
                 tags=r['tags'],
-                clipCaptions=r['clipCaptions'],
                 qwenCaptions=r['qwenCaptions'],
                 yoloObjects=r['yoloObjects']
             )
@@ -1942,7 +1941,7 @@ async def process_uploaded_image_api(
             
             keywords = semantic.get("keywords", [])
             description = semantic.get("description", "")
-            qwen_captions = semantic.get("qwen_captions", [])
+            qwen_captions = training.get("qwen_captions", [])
             yolo_objects = training.get("yolo_objects", [])
             
             # 提取 Keyword 向量
