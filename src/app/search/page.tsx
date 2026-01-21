@@ -1110,6 +1110,18 @@ export default function SearchPage() {
                       </div>
                     </div>
 
+                    {/* 综合描述 - 升级为 Hero 风格卡片 */}
+                    <div className="rounded-lg border border-cyan-200 dark:border-cyan-900/30 bg-cyan-50/40 dark:bg-cyan-900/10 p-4 relative overflow-hidden group transition-all hover:shadow-sm">
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-cyan-100/50 to-transparent dark:from-cyan-900/20 rounded-bl-full pointer-events-none"></div>
+                      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-cyan-700 dark:text-cyan-400 uppercase tracking-wider relative z-10">
+                        <span className="w-1 h-4 bg-cyan-500 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.6)]"></span>
+                        综合描述
+                      </h3>
+                      <p className="text-foreground/90 leading-7 text-[15px] font-medium tracking-tight text-justify relative z-10">
+                        {selectedImage.description || <span className="italic opacity-50 text-muted-foreground">暂无描述</span>}
+                      </p>
+                    </div>
+
                     {/* Qwen Description - 保持原样 (已是高级设计) */}
                     {selectedImage.qwenCaptions && (
                       <div>
@@ -1146,17 +1158,6 @@ export default function SearchPage() {
                         </div>
                       </div>
                     )}
-
-                    {/* 描述 - 引用块风格 */}
-                    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/20 p-5 relative overflow-hidden group">
-                      <div className="absolute top-0 left-0 w-1 h-full bg-slate-300 dark:bg-slate-700 group-hover:bg-primary/60 transition-colors"></div>
-                      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-slate-600 dark:text-slate-400 uppercase tracking-wider">
-                        综合描述
-                      </h3>
-                      <p className="text-muted-foreground leading-relaxed text-sm text-justify">
-                        {selectedImage.description || <span className="italic opacity-50">暂无描述</span>}
-                      </p>
-                    </div>
 
                     {/* 元数据 - 网格布局 */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">

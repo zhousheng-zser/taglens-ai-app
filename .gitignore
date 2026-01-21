@@ -60,3 +60,4 @@ backend/.env
 .cursorrules
 tmp*
 *.log
+*.tar.gz
