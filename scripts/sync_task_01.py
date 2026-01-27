@@ -593,10 +593,12 @@ def main():
             )
             
             # 列出远程文件
-            files = list_remote_files(target_client, TARGET_DIR)
+            all_files = list_remote_files(target_client, TARGET_DIR)
+            # 过滤掉正在写入的 .ing 文件
+            files = [f for f in all_files if not f.endswith('.ing')]
             
-            if len(files) < 2:
-                print("文件数量不足，跳过本次循环")
+            if len(files) < 1:
+                print("未发现可下载文件（跳过 .ing 文件），本轮结束")
                 target_client.close()
                 continue
             

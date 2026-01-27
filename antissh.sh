@@ -21,7 +21,7 @@ INSTALL_LOG="${INSTALL_ROOT}/install.log"
 PLATFORM=""
 PM=""          # 包管理器
 SUDO=""        # sudo 命令
-PROXY_URL=""   # 代理地址（不含协议前缀，如 127.0.0.1:10808）
+PROXY_URL=""   # 代理地址（不含协议前缀，如 127.0.0.1:7788）
 PROXY_TYPE=""  # socks5 或 http
 GRAFTCP_DIR="${GRAFTCP_DIR:-}" # 保留用户通过环境变量传入的值，空则后续设为 ${REPO_DIR}
 TARGET_BIN=""  # language_server_* 路径
@@ -321,8 +321,8 @@ echo " 2. Clash / Surge 等 TUN 模式"
 echo "    - 开启 TUN 模式后可全局透明代理"
 echo ""
 echo " 3. 环境变量，不推荐，Agent 服务无法走代理"
-echo "    export ALL_PROXY=socks5://127.0.0.1:10808"
-echo "    export HTTPS_PROXY=http://127.0.0.1:10809"
+echo "    export ALL_PROXY=socks5://127.0.0.1:7788"
+echo "    export HTTPS_PROXY=http://127.0.0.1:7788"
 echo ""
 echo "============================================="
 echo ""
@@ -582,8 +582,8 @@ fi
 # 没有检测到环境代理，或者用户拒绝使用环境代理 → 自定义输入
 echo
 echo "请输入代理地址，格式示例："
-echo "  SOCKS5: socks5://127.0.0.1:10808"
-echo "  HTTP:   http://127.0.0.1:10809"
+echo "  SOCKS5: socks5://127.0.0.1:7788"
+echo "  HTTP:   http://127.0.0.1:7788"
 echo ""
 echo "直接回车 = 不设置代理，退出脚本"
 
