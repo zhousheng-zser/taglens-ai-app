@@ -518,43 +518,37 @@ def remote():
     print("=" * 80)
     
     target_client = None
-   
-    while True:
-        print("-----------000000000000--------------------")
-        try:
-            # 1. 建立 SSH 连接
-            target_client = create_ssh_connection()
-        
-            # 2. 创建目录
-            create_directories(target_client)
-        
-            # 3. 上传脚本
-            remote_script_path = upload_script(target_client, REMOTE_SH)
-        
-            if not remote_script_path:
-                print("❌ 上传失败，终止执行")
-                continue
-        
-            # 4. 执行脚本
-            exit_status = execute_remote_script(target_client, remote_script_path)
-
-            print("\n" + "=" * 80)
-            print("🎉 所有操作完成！")
-        
-            continue
     
-        except Exception as e:
-            print(f"\n❌ 发生错误: {e}")
-            import traceback
-            traceback.print_exc()
+    try:
+        # 1. 建立 SSH 连接
+        target_client = create_ssh_connection()
     
-        finally:
-            # 关闭连接
-            if target_client:
-                target_client.close()
-                print("🔌 已关闭目标服务器连接")
+        # 2. 创建目录
+        create_directories(target_client)
+    
+        # 3. 上传脚本
+        remote_script_path = upload_script(target_client, REMOTE_SH)
+    
+        if not remote_script_path:
+            print("❌ 上传失败，终止执行")
+            return
+    
+        # 4. 执行脚本
+        exit_status = execute_remote_script(target_client, remote_script_path)
 
-        time.sleep(600)
+        print("\n" + "=" * 80)
+        print("🎉 所有操作完成！")
+    
+    except Exception as e:
+        print(f"\n❌ 发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # 关闭连接
+        if target_client:
+            target_client.close()
+            print("🔌 已关闭目标服务器连接")
 
 
 def delete_tar_gz_in_cwd():
@@ -580,21 +574,31 @@ def main():
     thread = threading.Thread(target=remote)
     thread.start()
 
-    print("🚀 启动数据采集和处理服务...")
-    
+    failed_attempts = {}
+    total_handled_count = 0
+
     while True:
         try:
-            time.sleep(100)
-            print("one loop -----------")
+            # 检查是否已完成10个包的任务
+            if total_handled_count >= 10:
+                print(f"🎊 任务已完成：共处理/清理了 {total_handled_count} 个大包。退出死循环。")
+                break
+
+            time.sleep(10)
             
-            # 直接连接目标服务器
+            # 检查当前时间是否在凌晨1点到8点之间
+            current_hour = datetime.now().hour
+            if current_hour < 1 or current_hour >= 8:
+                continue
+            
+            print("one loop -----------")
+            print(f"⏰ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (在下载时间段 01:00-08:00)")
+            
             target_client = create_ssh_client(
                 MID_SSH_HOST, MID_SSH_PORT, TARGET_SSH_USER, TARGET_SSH_PASSWORD
             )
             
-            # 列出远程文件
             all_files = list_remote_files(target_client, TARGET_DIR)
-            # 过滤掉正在写入的 .ing 文件
             files = [f for f in all_files if not f.endswith('.ing')]
             
             if len(files) < 1:
@@ -602,46 +606,50 @@ def main():
                 target_client.close()
                 continue
             
-            # 找到字典序最小的文件
             min_file = sorted(files)[0]
             print(f"min line (lexicographic): {min_file}")
             
-            # 下载文件
             remote_path = f"{TARGET_DIR}/{min_file}"
             local_path = f"./{min_file}"
             
-            print(f"\n📥 准备下载文件:")
-            print(f"   远程路径: {remote_path}")
-            print(f"   本地路径: {local_path}")
+            print(f"📥 准备下载文件: {min_file}")
             
             try:
                 download_file(target_client, remote_path, local_path)
-                print("✅ 下载成功")
-            except Exception as e:
-                print(f"❌ 下载失败: {e}")
+                print(f"✅ 下载成功: {min_file}")
+                if min_file in failed_attempts: del failed_attempts[min_file]
+                
+                delete_remote_file(target_client, remote_path)
                 target_client.close()
+                process_archive(local_path)
+                total_handled_count += 1
+                print(f"📊 当前进度: {total_handled_count}/10")
+                
+            except Exception as e:
+                failed_attempts[min_file] = failed_attempts.get(min_file, 0) + 1
+                current_fails = failed_attempts[min_file]
+                print(f"❌ 下载失败 ({current_fails}/2): {e}")
+                
+                if current_fails >= 2:
+                    print(f"⚠️  文件 {min_file} 下载连续失败2次，强制删除远程文件以防阻塞。")
+                    delete_remote_file(target_client, remote_path)
+                    if min_file in failed_attempts: del failed_attempts[min_file]
+                    total_handled_count += 1
+                    print(f"📊 当前进度 (含失败记录): {total_handled_count}/10")
+                
+                if target_client: target_client.close()
+                time.sleep(5)
                 continue
-            
-            # 删除远程文件
-            delete_remote_file(target_client, remote_path)
-            
-            # 关闭连接
-            target_client.close()
-            
-            # 处理下载的文件
-            process_archive(local_path)
-            
+
         except Exception as e:
             print(f"❌ 发生错误: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(10)
 
-        delete_tar_gz_in_cwd()     # 删除当前目录下的 tar.gz 文件
-        delete_directory(TMP_DIR)  # 删除 ./tmp
+        delete_tar_gz_in_cwd()
+        delete_directory(TMP_DIR)
         delete_directory(TMP_SECOND)
-        
-
     thread.join() 
 
 if __name__ == "__main__":
