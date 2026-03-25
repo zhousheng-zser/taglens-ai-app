@@ -5,6 +5,8 @@ TARGET_IP=$2
 TARGET_DB_PORT=$3
 
 
+LOG_FILE="./quality_execution.log"
+GROUP_CONCAT_MAX_LEN=1048576
 sqlSelectFunc() {
     local beginTime=$1
     local endTime=$2
@@ -13,7 +15,8 @@ sqlSelectFunc() {
     db="web-op"
     tbl="tbl_vqd_event_info"
 
-    cols=$(mysql -h ${TARGET_IP} -P ${TARGET_DB_PORT} -u webadmin -p3edcVFR$ web-op -B -N -e "$(cat <<SQL
+    cols=$(mysql -h ${TARGET_IP} -P ${TARGET_DB_PORT} -u admin -p3edcVFR$ web-op -B -N -e "$(cat <<SQL
+SET SESSION group_concat_max_len=${GROUP_CONCAT_MAX_LEN};
 SELECT GROUP_CONCAT(
   CONCAT(
     'NULLIF(TRIM($alias.\`', COLUMN_NAME, '\`), '''') AS ${alias}_', COLUMN_NAME
@@ -26,8 +29,9 @@ SQL
 )"
 )
 
-    mysql -h ${TARGET_IP} -P ${TARGET_DB_PORT} -u webadmin -p3edcVFR$ -B -e "
+    mysql -h ${TARGET_IP} -P ${TARGET_DB_PORT} -u admin -p3edcVFR$ -B -e "
 USE web-op;
+SET SESSION group_concat_max_len=${GROUP_CONCAT_MAX_LEN};
 SELECT 
     sci.sz_name,
     ${cols}
@@ -46,8 +50,8 @@ WHERE ${alias}.ubi_detect_time BETWEEN ${beginTime} AND ${endTime};
 # ==========================================
 
 yesterday_str=$(date -d "yesterday" +%F)
-start_ts=$(date -d "${yesterday_str} 00:00:00" +%s)
-end_ts=$(date -d "${yesterday_str} 23:59:59" +%s)
+start_ts=$(date -d "${yesterday_str} 00:00:00 -16 hour" +%s)
+end_ts=$(date -d "${yesterday_str} 23:59:59 -16 hour" +%s)
 start_ts="${start_ts}000"
 end_ts="${end_ts}000"
 
@@ -64,7 +68,8 @@ temp_filtered_data=$(mktemp)
 temp_final_data=$(mktemp)
 
 echo "📥 正在查询数据到临时文件..." >&2
-sqlSelectFunc ${start_ts} ${end_ts} > "$temp_all_data" 2>&1
+# 修复：移除 2>&1，避免 mysql 密码警告写入数据文件
+sqlSelectFunc ${start_ts} ${end_ts} > "$temp_all_data" 2>/dev/null
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo "❌ 数据查询失败" >&2
     rm -f "$temp_all_data" "$temp_filtered_data" "$temp_final_data"
@@ -88,7 +93,9 @@ done
 # 写入表头到过滤文件
 (IFS="$TAB"; echo "${headers[*]}") > "$temp_filtered_data"
 
-echo "🔍 正在过滤数据..." >&2
+echo "📝 当前表头内容: ${headers[*]}" >&2
+
+echo " 正在过滤数据..." >&2
 filtered_count=0
 processed_count=0
 
@@ -112,7 +119,7 @@ while IFS="$TAB" read -r -a values; do
             "vei_ubi_vqd_event_id") event_id="${values[$i]}" ;;
             "vei_ui_sub_type3") c_val="${values[$i]}" ;;
             "vei_ui_sub_type9") s_val="${values[$i]}" ;;
-            "vei_ubi_vqd_event_info_vei_ubi_vqd_event_id") # 兼容别名
+            "vei_ubi_img_id") # 真实图片ID列名
                  img_id="${values[$i]}" ;;
         esac
     done
@@ -121,7 +128,7 @@ while IFS="$TAB" read -r -a values; do
     # 重新核对 SQL，vei_ubi_vqd_event_id 是第二个字段（索引1）
     # 但图片下载用的是 values[17]？根据原脚本逻辑保持一致，但确保是用 TAB 分割
     
-    img_id="${values[17]}"
+    # img_id="${values[17]}" # 修复: 注释掉硬编码索引
     
     if [ -z "$img_id" ] || [ "$img_id" == "0" ] || [ "$img_id" == "[0]" ]; then
         skip_record=true
@@ -154,34 +161,49 @@ rm -f "$temp_all_data" "$temp_filtered_data"
 mkdir -p ./tmp
 success_count=0
 
+# 动态获取 event_id 和 img_id 的索引
+event_id_idx=-1
+img_id_idx=-1
+for ((i=0; i<${#headers[@]}; i++)); do
+    case "${headers[$i]}" in
+        "vei_ubi_vqd_event_id") event_id_idx=$i ;;
+        "vei_ubi_img_id") img_id_idx=$i ;;
+    esac
+done
+
 while IFS="$TAB" read -r -a values; do
     if [ ${#values[@]} -lt 2 ]; then continue; fi
     
     # 此时 values[1] 必定是 event_id，因为强制了 TAB 分割
-    event_id="${values[1]}"
-    img_id="${values[17]}"
-    
+    # event_id="${values[1]}" # 修复: 注释掉硬编码索引
+    # img_id="${values[17]}"  # 修复: 注释掉硬编码索引
+    event_id=""
+    if [ "$event_id_idx" -ge 0 ]; then event_id="${values[$event_id_idx]}"; fi
+    img_id=""
+    if [ "$img_id_idx" -ge 0 ]; then img_id="${values[$img_id_idx]}"; fi
+
     # 生成 JSON
     json="{"
     jsonTwo="{"
-    for ((i=0; i<${#headers[@]}; i++)); do
-        key="${headers[$i]}"
-        val="${values[$i]}"
-        
-        # 简单转义
-        val=$(echo "$val" | sed 's/"/\\"/g')
-        
-        json+="\"$key\":\"$val\""
-        if [ $i -lt $((${#headers[@]} - 1)) ]; then json+=","; fi
-        
-        # jsonTwo 逻辑简化（保持原样）
-        case "$key" in
-            "sz_name") jsonTwo+="\"相机名称\":\"$val\", " ;;
-            "vei_ubi_short_id") jsonTwo+="\"相机短编号\":\"$val\", " ;;
-            "vei_ubi_detect_time") jsonTwo+="\"检测时间\":\"$val\", " ;;
-            # ... 其他 case 保持原脚本逻辑 ...
-        esac
-    done
+    key="${headers[$i]}"
+    val="${values[$i]}"
+
+    # 仅对相机名称做 GBK -> UTF-8
+    if [ "$key" = "sz_name" ]; then
+    val="$(printf '%s' "$val" | iconv -f gbk -t utf-8 2>/dev/null || printf '%s' "$val")"
+    fi
+
+    # 再做转义（转码后再转义）
+    val="$(printf '%s' "$val" | sed 's/"/\\"/g')"
+
+    json+="\"$key\":\"$val\""
+    if [ $i -lt $((${#headers[@]} - 1)) ]; then json+=","; fi
+
+    case "$key" in
+    "sz_name") jsonTwo+="\"相机名称\":\"$val\", " ;;
+    "vei_ubi_short_id") jsonTwo+="\"相机短编号\":\"$val\", " ;;
+    "vei_ubi_detect_time") jsonTwo+="\"检测时间\":\"$val\", " ;;
+    esac
     # (此处省略 jsonTwo 的 case 转换以节省空间，逻辑同原脚本)
     # ...
     

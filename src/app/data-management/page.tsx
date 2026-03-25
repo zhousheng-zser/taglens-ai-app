@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
     Trash2, FileDiff, Database, Activity, Loader2, AlertTriangle, CheckCircle2, ShieldAlert,
-    Terminal, X, Check, AlertCircle, Info, Lock, ChevronRight
+    Terminal, X, Check, AlertCircle, Info, Lock, ChevronRight, Sparkles
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -27,6 +27,7 @@ export default function DataManagementPage() {
     const [deletePath, setDeletePath] = useState('');
     const [checkPairPath, setCheckPairPath] = useState('');
     const [checkDbPath, setCheckDbPath] = useState('');
+    const [reextractLimit, setReextractLimit] = useState('2000');
 
     // Log Modal States
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -34,7 +35,9 @@ export default function DataManagementPage() {
     const [currentTaskName, setCurrentTaskName] = useState('');
     const [isTaskDone, setIsTaskDone] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
+    const [isReextractRunning, setIsReextractRunning] = useState(false);
     const logEndRef = useRef<HTMLDivElement>(null);
+    const abortControllerRef = useRef<AbortController | null>(null);
 
     // Auto-scroll logic
     useEffect(() => {
@@ -64,12 +67,16 @@ export default function DataManagementPage() {
                 ? `${process.env.NEXT_PUBLIC_API_URL}${url}`
                 : `http://localhost:8000${url}`;
 
+            const controller = new AbortController();
+            abortControllerRef.current = controller;
+
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(body),
+                signal: controller.signal,
             });
 
             if (!response.ok) {
@@ -103,18 +110,115 @@ export default function DataManagementPage() {
                         }
                     } catch (e) {
                         console.warn("Log parse error", line);
-                        // Optional: show raw line if parse fails?
-                        // addLog(line, 'info'); 
                     }
                 }
             }
         } catch (error: any) {
-            addLog(`Execution Error: ${error.message}`, 'error');
-            setIsTaskDone(true); // Allow closing even on error
+            if (error?.name === 'AbortError') {
+                addLog('任务已被用户手动结束。', 'warning');
+            } else {
+                addLog(`Execution Error: ${error.message}`, 'error');
+            }
+            setIsTaskDone(true); // 允许关闭
         } finally {
             setIsProcessing(false);
+            abortControllerRef.current = null;
         }
     };
+
+    // 仅用于重新连接缺失标签补齐任务的日志，不会重新启动任务
+    const openReextractLogStream = async () => {
+        setShowLogModal(true);
+        setCurrentTaskName('缺失标签补齐 (进行中)');
+        setLogs([]);
+        addLog('Re-attaching to 缺失标签补齐 日志流...', 'system');
+        setIsTaskDone(false);
+        setIsProcessing(true);
+
+        try {
+            const endpoint = process.env.NEXT_PUBLIC_API_URL
+                ? `${process.env.NEXT_PUBLIC_API_URL}/api/management/reextract-tags/log-stream`
+                : `http://localhost:8000/api/management/reextract-tags/log-stream`;
+
+            const controller = new AbortController();
+            abortControllerRef.current = controller;
+
+            const response = await fetch(endpoint, {
+                method: 'GET',
+                signal: controller.signal,
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`Server returned ${response.status}: ${errText}`);
+            }
+
+            if (!response.body) throw new Error("No response body received");
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const data = JSON.parse(line);
+                        addLog(data.message, data.type || 'info');
+                        if (data.type === 'done') {
+                            setIsTaskDone(true);
+                            setIsReextractRunning(false);
+                        }
+                    } catch (e) {
+                        console.warn("Log parse error", line);
+                    }
+                }
+            }
+        } catch (error: any) {
+            if (error?.name === 'AbortError') {
+                addLog('日志查看已被用户中断。', 'warning');
+            } else {
+                addLog(`Execution Error: ${error.message}`, 'error');
+            }
+            setIsTaskDone(true);
+        } finally {
+            setIsProcessing(false);
+            abortControllerRef.current = null;
+        }
+    };
+
+    const handleStopTask = () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+        }
+    };
+
+    // 页面加载时探测一次当前缺失标签补齐任务状态
+    useEffect(() => {
+        const checkReextractStatus = async () => {
+            try {
+                const endpoint = process.env.NEXT_PUBLIC_API_URL
+                    ? `${process.env.NEXT_PUBLIC_API_URL}/api/management/reextract-tags/status`
+                    : `http://localhost:8000/api/management/reextract-tags/status`;
+
+                const res = await fetch(endpoint);
+                if (!res.ok) return;
+                const data = await res.json();
+                setIsReextractRunning(!!data.running);
+            } catch {
+                // 忽略状态查询错误，不影响其他功能
+            }
+        };
+
+        checkReextractStatus();
+    }, []);
 
     const getLogColor = (type: LogType) => {
         switch (type) {
@@ -297,7 +401,91 @@ export default function DataManagementPage() {
                         </div>
                     </div>
 
-                    {/* Card 4: Feature Integrity */}
+                    {/* Card 4: Re-extract Missing Tags */}
+                    <div className="group relative rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-950/20 to-transparent p-[1px] shadow-lg transition-all duration-300 hover:border-cyan-500/40 hover:shadow-cyan-900/10 flex flex-col">
+                        <div className="relative h-full bg-black/40 backdrop-blur-xl rounded-[15px] p-6 flex flex-col gap-5 transition-colors group-hover:bg-slate-900/40">
+                            <div className="flex items-center gap-4">
+                                <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-300">
+                                    <Sparkles className="w-6 h-6" />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-white leading-tight">缺失标签补齐</h3>
+                                    <p className="text-xs uppercase tracking-wider text-cyan-300/70 font-semibold mt-0.5">AI Re-Tagging</p>
+                                </div>
+                            </div>
+
+                            <p className="text-sm text-slate-400 leading-relaxed font-light min-h-[3em]">
+                                对 <span className="text-cyan-200 font-mono">analysis_results.keywords_json = []</span> 的最新图片重新调用大模型提取标签，并写回 DB（不重算向量）。
+                            </p>
+
+                            <div className="mt-auto space-y-4">
+                                <div className="space-y-2">
+                                    <Label htmlFor="reextract-limit" className="text-xs text-slate-500 uppercase tracking-wider font-bold">Scope (最新N张)</Label>
+                                    <Input
+                                        id="reextract-limit"
+                                        placeholder="2000"
+                                        value={reextractLimit}
+                                        onChange={(e) => setReextractLimit(e.target.value.replace(/[^\d]/g, ''))}
+                                        className="bg-slate-950/50 border-white/10 focus:border-cyan-500/50 text-cyan-100 placeholder:text-white/10 text-sm h-10 rounded-lg px-3 font-mono"
+                                    />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    {isReextractRunning ? (
+                                        <>
+                                            <Button
+                                                className="col-span-2 w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-cyan-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
+                                                onClick={openReextractLogStream}
+                                            >
+                                                <Loader2 className="h-4 w-4 animate-spin" />
+                                                正在补齐中，点击查看进度
+                                            </Button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Button
+                                                className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                                disabled={!reextractLimit.trim() || (isProcessing && showLogModal)}
+                                                onClick={() => {
+                                                    setIsReextractRunning(true);
+                                                    runStreamTask(
+                                                        '/api/management/reextract-tags',
+                                                        { model: 'gemini', limit: parseInt(reextractLimit || '2000', 10) || 2000 },
+                                                        '缺失标签补齐 (Gemini)'
+                                                    ).finally(() => {
+                                                        // 若任务正常结束，后端日志会更新 status，这里作为兜底
+                                                        setIsReextractRunning(false);
+                                                    });
+                                                }}
+                                            >
+                                                <Sparkles className="h-4 w-4 mr-2" />
+                                                Gemini 补齐
+                                            </Button>
+                                            <Button
+                                                className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                                disabled={!reextractLimit.trim() || (isProcessing && showLogModal)}
+                                                onClick={() => {
+                                                    setIsReextractRunning(true);
+                                                    runStreamTask(
+                                                        '/api/management/reextract-tags',
+                                                        { model: 'qwen', limit: parseInt(reextractLimit || '2000', 10) || 2000 },
+                                                        '缺失标签补齐 (千问)'
+                                                    ).finally(() => {
+                                                        setIsReextractRunning(false);
+                                                    });
+                                                }}
+                                            >
+                                                <Sparkles className="h-4 w-4 mr-2" />
+                                                千问 补齐
+                                            </Button>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Card 5: Feature Integrity */}
                     <div className="group relative rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-950/20 to-transparent p-[1px] shadow-lg transition-all duration-300 hover:border-emerald-500/40 hover:shadow-emerald-900/10 flex flex-col">
                         <div className="relative h-full bg-black/40 backdrop-blur-xl rounded-[15px] p-6 flex flex-col gap-5 transition-colors group-hover:bg-slate-900/40">
                             <div className="flex items-center gap-4">
@@ -349,6 +537,16 @@ export default function DataManagementPage() {
                                 </div>
                                 <div className="flex items-center gap-3">
                                     {isProcessing && <Loader2 className="w-4 h-4 animate-spin text-slate-500" />}
+                                    {!isTaskDone && (
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            className="h-8 px-3 text-xs border-red-500/40 text-red-400 hover:bg-red-500/10"
+                                            onClick={handleStopTask}
+                                        >
+                                            结束任务
+                                        </Button>
+                                    )}
                                     <button
                                         onClick={() => setShowLogModal(false)}
                                         className={cn(
@@ -356,6 +554,7 @@ export default function DataManagementPage() {
                                             !isTaskDone && "opacity-50 cursor-not-allowed hidden"
                                         )}
                                         disabled={!isTaskDone}
+                                        aria-label="返回"
                                     >
                                         <X className="w-5 h-5" />
                                     </button>

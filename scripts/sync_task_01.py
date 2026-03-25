@@ -29,7 +29,7 @@ MID_SSH_HOST = "192.168.1.10"
 MID_SSH_PORT = 61008
 
 TARGET_SSH_HOST = "10.31.243.3"
-TARGET_SSH_DB_PORT = 3306
+TARGET_SSH_DB_PORT = 3308
 TARGET_SSH_USER = "root"
 TARGET_SSH_PASSWORD = "md@xinxi2022"
 TARGET_DIR = "/root/CollectionIMGJudgment/upload"
@@ -319,7 +319,7 @@ def process_archive(archive_file):
                                 files = {'file': (subfile, img_file, 'image/jpeg')}
                                 data = {
                                     'project_name': PROJECT_NAME,
-                                    'threshold': 0.74,
+                                    'threshold': 0.8188,
                                     'camera_id': camera_id
                                 }
                                 
@@ -487,7 +487,7 @@ def execute_remote_script(client, remote_script_path):
     script_name = os.path.basename(remote_script_path)
     
     # 构建执行命令
-    command = f"LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 cd {PROJECT_ROOT} && ./{script_name} '{PROJECT_NAME}' {TARGET_SSH_HOST} {TARGET_SSH_DB_PORT}"
+    command = f"LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 cd {PROJECT_ROOT} && ./{script_name} '{PROJECT_NAME}' {TARGET_SSH_HOST} {TARGET_SSH_DB_PORT} > {PROJECT_ROOT}/test.log 2>&1"
     
     print(f"📝 执行命令: {command}")
     print("=" * 80)
@@ -584,7 +584,7 @@ def main():
                 print(f"🎊 任务已完成：共处理/清理了 {total_handled_count} 个大包。退出死循环。")
                 break
 
-            time.sleep(10)
+            time.sleep(60)
             
             # 检查当前时间是否在凌晨1点到8点之间
             current_hour = datetime.now().hour
@@ -650,6 +650,8 @@ def main():
         delete_tar_gz_in_cwd()
         delete_directory(TMP_DIR)
         delete_directory(TMP_SECOND)
+    
+    print("thread join -----------")
     thread.join() 
 
 if __name__ == "__main__":

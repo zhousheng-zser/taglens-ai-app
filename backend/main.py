@@ -37,8 +37,7 @@ from core.database import (
     update_project_db,
     update_project_model_db,
     update_project_probability_db,
-    update_project_stop_time_db,
-    force_sync_to_minio
+    update_project_stop_time_db
 )
 from services.bulk_import_storage import (
     create_bulk_import_job,
@@ -286,7 +285,7 @@ class SearchResponse(BaseModel):
 
 class ImageSimilarityCheckRequest(BaseModel):
     image: str  # Base64 data URI
-    threshold: Optional[float] = 0.74  # 相似度阈值,默认0.74（74%）
+    threshold: Optional[float] = 0.8188  # 相似度阈值,默认0.8188（81.88%）
     max_results: Optional[int] = 5  # 最多返回几个相似图片
 
 class SimilarImageResult(BaseModel):
@@ -307,7 +306,7 @@ class ImageSimilarityCheckResponse(BaseModel):
 
 # --- 批量导入模型 ---
 class BulkImportStartRequest(BaseModel):
-    threshold: Optional[float] = 0.74  # 默认 74%
+    threshold: Optional[float] = 0.8188  # 默认 81.88%
     directory: Optional[str] = None  # 默认 ./data/local/img
 
 
@@ -441,9 +440,7 @@ async def lifespan(app: FastAPI):
     
     # --- Shutdown ---
     print("正在关闭服务...")
-    print("正在同步数据库到 MinIO...")
-    force_sync_to_minio()
-    print("数据库同步完成,服务已关闭")
+    print("服务已关闭")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -901,6 +898,15 @@ def call_qwen_vision_api(api_key: str, data_uri: str, prompt: str):
             top_p=0.8
         )
         content_text = completion.choices[0].message.content
+        # 将 Qwen 原始响应写入日志文件，便于排查
+        try:
+            log_path = Path(__file__).parent.parent / "B_qwen_response.txt"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*40}\nQwen response at {datetime.now().isoformat()}:\n")
+                f.write((content_text or "")[:800])
+                f.write("\n")
+        except Exception:
+            pass
         # 清理返回的文本，提取纯JSON
         if content_text and "```json" in content_text:
             content_text = content_text.split("```json")[1].split("```")[0]
@@ -984,6 +990,16 @@ def call_gemini_vision_api(api_key: str, data_uri: str, prompt: str):
             timeout=60
         )
         
+        # 无论成功或失败，先把状态码与部分响应体写入日志文件，便于排查
+        try:
+            log_path = Path(__file__).parent.parent / "A_gemini_response.txt"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*40}\nGemini HTTP {response.status_code} at {datetime.now().isoformat()}:\n")
+                f.write(response.text[:800])
+                f.write("\n")
+        except Exception:
+            pass
+
         response.raise_for_status()
         result = response.json()
         
@@ -1121,7 +1137,7 @@ async def check_image_similarity(request: ImageSimilarityCheckRequest):
             )
         
         # 设置阈值
-        threshold = request.threshold or 0.74
+        threshold = request.threshold or 0.8188
         
         # 使用 Faiss LSH 快速检查是否存在相似图片（只找最相似的1个）
         exists, max_similarity, similar_uuid = faiss_manager.check_similarity_exists(query_vector, threshold)
@@ -1223,7 +1239,7 @@ async def create_bulk_import_job_api(request: BulkImportStartRequest, background
     """创建新的批量导入任务并自动开始"""
     try:
         directory = request.directory if request.directory else "./data/local/img"
-        threshold = request.threshold or 0.74
+        threshold = request.threshold or 0.8188
         
         job = create_bulk_import_job(threshold=threshold, directory=directory)
         job_id = job.get('id')
@@ -1262,7 +1278,7 @@ async def resume_bulk_import(request: BulkImportActionRequest, background_tasks:
     # 设置为 pending 再拉起
     update_bulk_import_job_status(job_id, "pending", current_file=None, last_error=None)
     directory = Path(job.get("directory") or BULK_IMPORT_DEFAULT_DIR)
-    threshold = job.get("threshold") or 0.74
+    threshold = job.get("threshold") or 0.8188
     background_tasks.add_task(run_bulk_import_job, job_id, directory, threshold)
     return BulkImportStatusResponse(success=True, job=get_bulk_import_job(job_id))
 
@@ -1338,7 +1354,18 @@ async def bulk_import_logs(
 @app.post("/analyze")
 async def analyze_image(request: ImageAnalysisRequest):
     """分析图片，支持选择 Qwen、Gemini 或两者"""
-    model = request.model.lower()
+    # 日志：记录调用来源的关键特征，方便对比前端“图片标签”和管理任务的请求形态
+    raw_model = (request.model or "gemini") if hasattr(request, "model") else "gemini"
+    img_str = request.image if hasattr(request, "image") and request.image else ""
+    try:
+        print("=" * 60)
+        print(f"[/analyze] Incoming request - model={raw_model}")
+        print(f"[/analyze] image_length={len(img_str)}, prefix={img_str[:80]!r}")
+    except Exception:
+        # 日志失败不影响主流程
+        pass
+
+    model = raw_model.lower()
     
     # 如果选择 both，返回 DualAnalysisResponse
     if model == "both":
@@ -1650,7 +1677,7 @@ async def search_images_api(request: SearchRequest):
                 raise HTTPException(status_code=500, detail=f"向量化查询文本失败: {str(e)}")
         else:
             # 如果查询为空，返回所有图片（不使用向量搜索）
-            print("查询文本为空，返回所有图片")
+            print("查询关键词为空，将依赖时间范围或返回最新图片。")
         
         # 验证相似度阈值
         similarity_threshold = request.similarityThreshold or 0.6
@@ -1752,6 +1779,68 @@ async def get_all_images_api(limit: int = Query(100, ge=1, le=1000)):
         print(f"获取图片列表时发生错误: {e}")
         raise HTTPException(status_code=500, detail=f"获取图片列表失败: {str(e)}")
 
+# --- 直接读取文件系统图片接口 ---
+@app.get("/api/images/direct")
+async def get_image_direct(
+    path: str = Query(..., description="图片路径（MinIO 对象路径）")
+):
+    """直接从文件系统读取图片（不通过 MinIO 客户端）"""
+    # MinIO 数据目录的常见路径
+    possible_dirs = [
+        "/var/lib/minio/data",
+        "/data/minio/data",
+        "/opt/minio/data",
+        "/usr/local/minio/data",
+        "/root/minio/data",
+    ]
+    
+    # MinIO bucket 名称
+    bucket_name = "bucket-taglens"
+    
+    # 尝试从文件系统直接读取
+    file_path = None
+    tried_paths = []
+    for data_dir in possible_dirs:
+        full_path = Path(data_dir) / bucket_name / path
+        tried_paths.append(str(full_path))
+        if full_path.exists() and full_path.is_file():
+            file_path = full_path
+            break
+    
+    if not file_path:
+        # 如果文件系统找不到，直接返回错误，不回退到 MinIO 客户端
+        error_msg = f"图片文件不存在。尝试的路径：{', '.join(tried_paths)}"
+        print(f"[警告] {error_msg}")
+        raise HTTPException(status_code=404, detail=error_msg)
+    
+    try:
+        # 从文件系统读取
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+        
+        # 获取 Content-Type
+        ext = file_path.suffix.lower()
+        content_type_map = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.bmp': 'image/bmp',
+        }
+        content_type = content_type_map.get(ext, 'image/jpeg')
+        
+        return Response(
+            content=file_data,
+            media_type=content_type,
+            headers={"Content-Disposition": f'inline; filename="{file_path.name}"'}
+        )
+    except Exception as e:
+        error_msg = f"读取图片文件失败: {str(e)}，文件路径: {file_path}"
+        print(f"[警告] {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+
+
 # --- MinIO 图片下载接口 ---
 @app.get("/api/minio/download/image")
 async def download_image_api(
@@ -1787,7 +1876,7 @@ async def process_uploaded_image_api(
     project_name: str = Form(...),
     timestamp: Optional[str] = Form(None),
     camera_id: Optional[str] = Form(None),
-    threshold: float = Form(0.74)
+    threshold: float = Form(0.8188)
 ):
     """
     接收上传的图片，执行完整处理流程：
@@ -2115,7 +2204,6 @@ async def update_project_model_api(
 ):
     try:
         update_project_model_db(project_id, model)
-        force_sync_to_minio()
         return {"success": True}
     except Exception as e:
         return {"success": False, "message": str(e)}
@@ -2127,7 +2215,6 @@ async def update_project_probability_api(
 ):
     try:
         update_project_probability_db(project_id, api_probability)
-        force_sync_to_minio()
         return {"success": True}
     except Exception as e:
         return {"success": False, "message": str(e)}

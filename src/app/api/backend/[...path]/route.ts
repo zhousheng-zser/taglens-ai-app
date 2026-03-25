@@ -14,9 +14,6 @@ export async function GET(
 
     const response = await fetch(url, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
       // 增加超时时间到10分钟（600秒）
       signal: AbortSignal.timeout(600000),
     });
@@ -28,6 +25,19 @@ export async function GET(
       );
     }
 
+    // 检查 Content-Type，如果是图片或其他二进制类型，返回二进制响应
+    const contentType = response.headers.get('Content-Type') || '';
+    if (contentType.startsWith('image/') || contentType.startsWith('application/octet-stream')) {
+      const buffer = await response.arrayBuffer();
+      return new NextResponse(buffer, {
+        headers: {
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+      });
+    }
+
+    // 否则返回 JSON 响应
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error: any) {

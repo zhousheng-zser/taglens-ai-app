@@ -352,6 +352,15 @@ export default function ProjectSyncPage() {
     };
 
     const handleDeleteProject = async (projectId: string) => {
+        const target = projects.find(p => p.id === projectId);
+        if (target?.status === 'running') {
+            toast({
+                title: '无法删除正在运行的项目',
+                description: '请先停止任务后再删除。',
+                variant: 'destructive',
+            });
+            return;
+        }
         try {
             await deleteProject(projectId);
             const remaining = projects.filter(p => p.id !== projectId);
@@ -413,9 +422,44 @@ export default function ProjectSyncPage() {
                                     <span className="truncate text-sm">{project.name}</span>
                                     <span className="truncate text-[10px] opacity-60 font-mono">{project.scriptPath}</span>
                                 </div>
-                                {project.status === 'running' && (
-                                    <span className="flex h-1.5 w-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></span>
-                                )}
+                                <div className="flex items-center gap-2">
+                                    {project.status === 'running' && (
+                                        <span className="flex h-1.5 w-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></span>
+                                    )}
+
+                                    <AlertDialog>
+                                        <AlertDialogTrigger asChild>
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                onClick={(e) => e.stopPropagation()}
+                                                disabled={isLoading}
+                                                aria-label="删除项目"
+                                            >
+                                                <Trash2 className="h-4 w-4" />
+                                            </Button>
+                                        </AlertDialogTrigger>
+                                        <AlertDialogContent onClick={(e) => e.stopPropagation()}>
+                                            <AlertDialogHeader>
+                                                <AlertDialogTitle>确认删除项目？</AlertDialogTitle>
+                                                <AlertDialogDescription>
+                                                    将删除项目「{project.name}」。此操作不可恢复。
+                                                </AlertDialogDescription>
+                                            </AlertDialogHeader>
+                                            <AlertDialogFooter>
+                                                <AlertDialogCancel>取消</AlertDialogCancel>
+                                                <AlertDialogAction
+                                                    className="bg-red-600 hover:bg-red-600/90"
+                                                    onClick={() => handleDeleteProject(project.id)}
+                                                >
+                                                    删除
+                                                </AlertDialogAction>
+                                            </AlertDialogFooter>
+                                        </AlertDialogContent>
+                                    </AlertDialog>
+                                </div>
                             </div>
                         ))}
                     </div>

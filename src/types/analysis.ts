@@ -49,3 +49,20 @@ export interface TrafficAnalysisOutput {
   semantic_search: SemanticSearch;
   training_data: TrainingData;
 }
+
+/**
+ * Interface for image search results from the database.
+ */
+export interface ImageSearchResult {
+  id: number;
+  uuid: string;
+  filePath: string;
+  fileName: string | null;
+  createdAt: string;
+  description: string;
+  keywords: string[];
+  tags: string[];
+  qwenCaptions: Record<string, any> | string[];
+  yoloObjects: string[];
+  similarity?: number;
+}

@@ -53,7 +53,7 @@ export default function ImageTaggerPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
   const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'both'>('qwen');
-  const [similarityThreshold, setSimilarityThreshold] = useState(0.74); // 默认74%
+  const [similarityThreshold, setSimilarityThreshold] = useState(0.8188); // 默认81.88%
   const { toast } = useToast();
 
   // 当前显示的图片信息

@@ -1,137 +1,67 @@
 # -*- coding: utf-8 -*-
 """
 数据库模块 - 使用 SQLite 存储图片标签和元数据
-支持从 MinIO 同步数据
 """
 import sqlite3
 import json
 import time
 import os
-import atexit
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
-from core.minio_storage_client import get_storage_client
 
 # 数据库文件路径
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "taglens.db"
 
-# MinIO 配置
-MINIO_DB_PATH = "tag_database/taglens.db"
-
-# 全局状态
-_db_modified = False
-_last_upload_time = 0
-_upload_interval = 180  # 3分钟（秒）
-_storage_client = None
+BACKUP_DIR = DB_PATH.parent / "backup"
+BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
+_backup_checked = False
 
 
-def _init_minio_sync():
-    """初始化 MinIO 同步功能"""
-    global _storage_client, _last_upload_time
-    
-    if _storage_client is None:
-        try:
-            _storage_client = get_storage_client(skip_bucket_check=True)
-            print("MinIO 客户端初始化成功")
-        except Exception as e:
-            print(f"MinIO 客户端初始化失败: {e}")
-            return
-    
-    # 修改：不再盲目删除本地文件
-    # 尝试从 MinIO 下载数据库文件 (如果存在)
+def _backup_db_if_needed() -> None:
+    """
+    本地数据库备份策略：
+    - 每次启动（首次访问 DB 时）检查是否已有当天备份；没有则创建
+    - 清理 7 天前备份（可用环境变量 DB_BACKUP_KEEP_DAYS 覆盖）
+    """
+    global _backup_checked
+    if _backup_checked:
+        return
+    _backup_checked = True
+
     try:
-        if _storage_client.file_exists(MINIO_DB_PATH):
-            print(f"发现云端数据库: {MINIO_DB_PATH}，准备同步...")
-            # 下载到临时文件
-            temp_path = str(DB_PATH) + ".tmp"
-            _storage_client.download_file(MINIO_DB_PATH, temp_path)
-            
-            # 只有下载成功才覆盖
-            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                if DB_PATH.exists():
-                    try:
-                        os.unlink(DB_PATH)
-                    except: 
-                        pass
-                os.rename(temp_path, str(DB_PATH))
-                print("数据库云端同步成功 (覆盖本地)")
-            else:
-                print("云端数据库文件为空或下载失败，保留本地副本")
-        else:
-            print("云端未找到数据库文件，将使用本地副本")
-            
-    except Exception as e:
-        print(f"从 MinIO 同步数据库失败 (保留本地副本): {e}")
-        temp_path = str(DB_PATH) + ".tmp"
-        if os.path.exists(temp_path):
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        backup_path = BACKUP_DIR / f"taglens.{today}.db"
+
+        # 没有当天备份则创建（数据库不存在就不备份）
+        if DB_PATH.exists() and not backup_path.exists():
+            shutil.copy2(DB_PATH, backup_path)
+            print(f"已创建本地数据库备份: {backup_path}")
+
+        # 清理过期备份（按文件 mtime 判断更稳健）
+        now_ts = time.time()
+        keep_seconds = BACKUP_KEEP_DAYS * 24 * 60 * 60
+        for p in BACKUP_DIR.glob("taglens.*.db"):
             try:
-                os.remove(temp_path)
-            except:
-                pass
-    
-    # 注册退出时上传（作为保底）
-    atexit.register(_upload_to_minio_on_exit)
-    
-    _last_upload_time = time.time()
-
-
-def force_sync_to_minio():
-    """强制上传数据库到 MinIO (Public)"""
-    global _db_modified, _last_upload_time, _storage_client
-    
-    if _storage_client is None:
-        # 尝试重新初始化
-        try:
-            _storage_client = get_storage_client(skip_bucket_check=True)
-        except:
-            return
-            
-    try:
-        if DB_PATH.exists():
-            # print(f"正在上传数据库到 MinIO...") # 减少日志噪音
-            _storage_client.upload_file(str(DB_PATH), MINIO_DB_PATH)
-            _last_upload_time = time.time()
-            _db_modified = False
-            print(f"数据库已同步到 MinIO [{datetime.now().strftime('%H:%M:%S')}]")
+                if now_ts - p.stat().st_mtime > keep_seconds:
+                    p.unlink()
+                    print(f"已删除过期数据库备份: {p.name}")
+            except Exception as e:
+                print(f"删除过期备份失败: {p} err={e}")
     except Exception as e:
-        print(f"数据库上传 MinIO 失败: {e}")
-
-def _upload_to_minio():
-    # 内部定时调用使用
-    force_sync_to_minio()
-
-
-def _upload_to_minio_on_exit():
-    """程序退出时上传到 MinIO"""
-    global _db_modified
-    if _db_modified:
-        _upload_to_minio()
-
-
-def _mark_modified():
-    """标记数据库已修改"""
-    global _db_modified, _last_upload_time, _upload_interval
-    
-    _db_modified = True
-    
-    # 检查是否需要上传（如果已修改且超过3分钟）
-    current_time = time.time()
-    if current_time - _last_upload_time >= _upload_interval:
-        _upload_to_minio()
+        # 备份失败不应阻塞服务启动
+        print(f"数据库备份检查失败(忽略): {e}")
 
 
 def get_db_path() -> Path:
     """获取数据库文件路径，确保目录存在"""
-    global _storage_client
-    
-    # 首次调用时初始化 MinIO 同步
-    if _storage_client is None:
-        _init_minio_sync()
-    
     db_path = DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    _backup_db_if_needed()
     return db_path
 
 
@@ -145,8 +75,6 @@ def get_db_connection():
     try:
         yield conn
         conn.commit()
-        # 提交后标记为已修改
-        _mark_modified()
     except Exception:
         conn.rollback()
         raise
@@ -286,8 +214,7 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_keyword_embeddings_keyword ON keyword_embeddings(keyword)
         """)
         
-        # 初始化后标记为已修改（因为创建了新表）
-        _mark_modified()
+        # 本地数据库不再与 MinIO 同步，无需标记修改
 
 
 def save_image_to_db(
@@ -410,6 +337,9 @@ def search_images(
         # 构建 WHERE 条件
         where_conditions = []
         params = []
+
+        # 是否使用向量搜索（由调用方传入向量决定）
+        use_vector_search = (query_embeddings is not None and len(query_embeddings) > 0) or (query_embedding is not None)
         
         # 时间范围条件
         if start_date:
@@ -419,10 +349,20 @@ def search_images(
         if end_date:
             where_conditions.append("i.created_at <= ?")
             params.append(end_date)
-        
+
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         
-        # 查询所有符合条件的图片
+        # 先计算总数（用于分页显示）
+        count_sql = f"""
+            SELECT COUNT(DISTINCT i.id)
+            FROM images i
+            LEFT JOIN analysis_results ar ON i.id = ar.image_id
+            WHERE {where_clause}
+        """
+        cursor.execute(count_sql, params)
+        total_count = cursor.fetchone()[0]
+        
+        # 查询符合条件的图片（根据是否使用向量搜索决定是否一次性查询所有）
         sql = f"""
             SELECT DISTINCT
                 i.id,
@@ -439,8 +379,74 @@ def search_images(
             LEFT JOIN analysis_results ar ON i.id = ar.image_id
             WHERE {where_clause}
         """
+        # use_vector_search 已在上方确定
         
-        cursor.execute(sql, params)
+        # 如果不使用向量搜索，直接在 SQL 层面分页（更高效）
+        if not use_vector_search:
+            # 不使用向量搜索，按时间范围查询，直接在 SQL 层面分页
+            if page is not None and page_size is not None:
+                # 有分页参数，在 SQL 层面分页
+                sql += " ORDER BY i.created_at DESC LIMIT ? OFFSET ?"
+                offset = (page - 1) * page_size
+                cursor.execute(sql, params + [page_size, offset])
+            else:
+                # 没有分页参数，使用 limit（向后兼容）
+                sql += f" ORDER BY i.created_at DESC LIMIT {limit}"
+                cursor.execute(sql, params)
+            
+            rows = cursor.fetchall()
+            
+            # 直接构建结果，不需要向量计算
+            results = []
+            for row in rows:
+                # 获取该图片的所有标签
+                cursor.execute("""
+                    SELECT tag, tag_type FROM tags WHERE image_id = ?
+                """, (row['id'],))
+                
+                tags = []
+                keywords = []
+                yolo_objects = []
+                
+                for tag_row in cursor.fetchall():
+                    tag = tag_row['tag']
+                    tag_type = tag_row['tag_type']
+                    tags.append(tag)
+                    if tag_type == 'keyword':
+                        keywords.append(tag)
+                    else:
+                        yolo_objects.append(tag)
+                
+                # 解析 JSON 字段
+                keywords_json = json.loads(row['keywords_json'] or '[]')
+                qwen_captions = json.loads(row['qwen_captions_json'] or '[]')
+                yolo_objects_json = json.loads(row['yolo_objects_json'] or '[]')
+                
+                results.append({
+                    'id': row['id'],
+                    'uuid': row['uuid'],
+                    'filePath': row['relative_path'],
+                    'fileName': row['file_name'],
+                    'createdAt': row['created_at'],
+                    'description': row['description'],
+                    'keywords': keywords_json,
+                    'tags': tags,
+                    'qwenCaptions': qwen_captions,
+                    'yoloObjects': yolo_objects_json,
+                })
+            
+            # 返回结果（total_count 已经在上面通过 COUNT 查询计算过了）
+            return results, total_count
+        
+        # 以下是向量搜索的逻辑（标签搜索页面使用）
+        # 如果使用向量搜索，需要查询所有数据来计算相似度
+        if page is not None and page_size is not None:
+            # 即使有分页参数，向量搜索也需要先查询所有数据来计算相似度
+            cursor.execute(sql, params)
+        else:
+            # 没有分页参数，查询所有数据
+            cursor.execute(sql, params)
+        
         rows = cursor.fetchall()
         
         # 确定使用的查询向量列表（优先使用query_embeddings，否则使用query_embedding）
@@ -458,7 +464,7 @@ def search_images(
             # 如果没有提供权重，平均分配
             weights_list = [1.0 / len(query_embeddings_list)] * len(query_embeddings_list)
         
-        # 如果使用向量搜索，计算相似度并过滤
+        # 使用向量搜索，计算相似度并过滤
         if query_embeddings_list:
             # 归一化所有查询向量
             query_vecs = []
@@ -591,10 +597,15 @@ def search_images(
                 })
         else:
             # 不使用向量搜索，按创建时间排序
-            results = []
-            sorted_rows = sorted(rows, key=lambda x: x['created_at'], reverse=True)[:limit]
+            # 注意：如果指定了分页，rows 已经在 SQL 层面分页了
+            # 如果没有分页参数，需要手动排序和限制
+            if page is None or page_size is None:
+                # 没有分页参数，使用原来的逻辑（向后兼容）
+                sorted_rows = sorted(rows, key=lambda x: x['created_at'], reverse=True)[:limit]
+                rows = sorted_rows
             
-            for row in sorted_rows:
+            results = []
+            for row in rows:
                 # 获取该图片的所有标签
                 cursor.execute("""
                     SELECT tag, tag_type FROM tags WHERE image_id = ?
@@ -631,15 +642,19 @@ def search_images(
                     'yoloObjects': yolo_objects_json,
                 })
         
-        # 计算总数（分页前的结果数）
-        total_count = len(results)
-        
-        # 如果需要分页，进行分页处理
-        if page is not None and page_size is not None:
-            # 页码从1开始，转换为索引从0开始
-            start_idx = (page - 1) * page_size
-            end_idx = start_idx + page_size
-            results = results[start_idx:end_idx]
+        # 对于向量搜索的情况，需要重新计算总数（因为过滤了相似度）
+        if query_embeddings_list:
+            # 向量搜索的结果总数是过滤后的数量
+            total_count = len(results)
+            
+            # 如果需要分页，进行分页处理（向量搜索的结果已经在内存中）
+            if page is not None and page_size is not None:
+                # 页码从1开始，转换为索引从0开始
+                start_idx = (page - 1) * page_size
+                end_idx = start_idx + page_size
+                results = results[start_idx:end_idx]
+        # 对于非向量搜索的情况，total_count 已经在上面通过 COUNT 查询计算过了
+        # 如果指定了分页，rows 已经在 SQL 层面分页了，不需要再次分页
         
         return results, total_count
 
@@ -710,6 +725,96 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
             "raw_keywords": keywords_json,
             "raw_yolo_objects": yolo_objects_json
         }
+
+
+# --- 项目管理 ---
+
+def get_all_projects_db() -> List[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                i.id,
+                i.uuid,
+                i.relative_path,
+                i.file_name,
+                i.created_at,
+                ar.keywords_json
+            FROM images i
+            LEFT JOIN analysis_results ar ON i.id = ar.image_id
+            WHERE ar.keywords_json IS NULL OR TRIM(ar.keywords_json) = '[]'
+            ORDER BY i.created_at DESC
+            LIMIT ?
+        """, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def upsert_analysis_results_and_tags_no_vectors(
+    image_id: int,
+    description: str,
+    keywords: List[str],
+    qwen_captions: Any,
+    yolo_objects: List[str],
+) -> None:
+    """
+    仅更新 analysis_results + tags，不生成/更新 keyword_embeddings，不触碰 Faiss。
+    用于已有图片“补齐缺失标签”的场景。
+    """
+    now = datetime.now().isoformat()
+    keywords = [k for k in (keywords or []) if k]
+    yolo_objects = [o for o in (yolo_objects or []) if o]
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM analysis_results WHERE image_id = ?", (image_id,))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute("""
+                UPDATE analysis_results
+                SET description = ?, keywords_json = ?, qwen_captions_json = ?, yolo_objects_json = ?, created_at = ?
+                WHERE image_id = ?
+            """, (
+                description or "",
+                json.dumps(keywords, ensure_ascii=False),
+                json.dumps(qwen_captions or [], ensure_ascii=False),
+                json.dumps(yolo_objects, ensure_ascii=False),
+                now,
+                image_id
+            ))
+        else:
+            cursor.execute("""
+                INSERT INTO analysis_results (image_id, description, keywords_json, qwen_captions_json, yolo_objects_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                image_id,
+                description or "",
+                json.dumps(keywords, ensure_ascii=False),
+                json.dumps(qwen_captions or [], ensure_ascii=False),
+                json.dumps(yolo_objects, ensure_ascii=False),
+                now
+            ))
+
+        # 重建 tags（避免旧的空/脏数据）
+        cursor.execute("DELETE FROM tags WHERE image_id = ?", (image_id,))
+        for k in keywords:
+            try:
+                cursor.execute(
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (?, ?, ?)",
+                    (image_id, k, "keyword"),
+                )
+            except sqlite3.IntegrityError:
+                pass
+        for o in yolo_objects:
+            try:
+                cursor.execute(
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (?, ?, ?)",
+                    (image_id, o, "yolo_object"),
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+        conn.commit()
 
 
 # --- 项目管理 ---

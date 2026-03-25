@@ -21,6 +21,11 @@ export function Header() {
               <ImageIcon className="h-4 w-4" /> 图片标签
             </Button>
           </Link>
+          <Link href="/tag-query" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Database className="h-4 w-4" /> 标签数据查询
+            </Button>
+          </Link>
           <Link href="/search" passHref>
             <Button variant="ghost" className="flex items-center gap-2">
               <Search className="h-4 w-4" /> 标签搜索

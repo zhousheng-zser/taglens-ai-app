@@ -229,7 +229,7 @@ export interface BulkImportLogsResponse {
 }
 
 // 新建批量导入任务
-export async function createBulkImportJob(threshold: number = 0.74, directory: string = './data/local/img'): Promise<BulkImportStatusResponse> {
+export async function createBulkImportJob(threshold: number = 0.8188, directory: string = './data/local/img'): Promise<BulkImportStatusResponse> {
   const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
   const url = `${backendUrl}/bulk-import/create`;
 
@@ -560,6 +560,54 @@ export async function getBulkImportLogs(
     return {
       success: false,
       error: error.message || '获取批量导入日志失败',
+    };
+  }
+}
+
+// ========== 搜索相关接口 ==========
+
+export interface SearchRequest {
+  query?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+  similarityThreshold?: number;
+}
+
+export interface SearchResponse {
+  success: boolean;
+  results: any[]; // 使用 ImageSearchResult 类型的后端数据
+  total: number;
+}
+
+export async function handleSearch(request: SearchRequest): Promise<SearchResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  const url = `${backendUrl}/search`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('搜索错误:', errorBody);
+      throw new Error(`后端服务响应错误: ${response.status}`);
+    }
+
+    const result = await response.json();
+    return result;
+  } catch (error: any) {
+    console.error('执行搜索时出错:', error);
+    return {
+      success: false,
+      results: [],
+      total: 0,
     };
   }
 }
