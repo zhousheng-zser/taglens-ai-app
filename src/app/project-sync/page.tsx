@@ -6,7 +6,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Switch } from '@/components/ui/switch';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -23,7 +22,7 @@ import {
     DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
 import {
-    Cloud, Play, Clock, Settings, Terminal,
+    Cloud, Play, Settings, Terminal,
     CheckCircle2, AlertCircle, Loader2, Database,
     RefreshCw, History, FileImage, Edit2, Save, X,
     Plus, Search, Trash2, MoreVertical, LayoutGrid, Square
@@ -36,7 +35,6 @@ import {
     stopProjectScript,
     verifyScript,
     readScript,
-    updateProjectSchedule,
     updateProjectName,
     updateProjectApiProbability,
     addProject,
@@ -177,32 +175,6 @@ export default function ProjectSyncPage() {
         return () => clearInterval(interval);
     }, [selectedProjectId, selectedProject?.status, selectedProject?.scriptPath]);
 
-    // 自动调度逻辑 (前端驱动)
-    useEffect(() => {
-        if (!selectedProject || !selectedProject.scheduleEnabled || isRunning) return;
-
-        const checkSchedule = async () => {
-            // 如果上次停止时间存在
-            if (selectedProject.lastStoppedAt) {
-                const stopTime = new Date(selectedProject.lastStoppedAt).getTime();
-                const now = Date.now();
-                const hoursPassed = (now - stopTime) / (1000 * 60 * 60);
-
-                if (hoursPassed >= selectedProject.scheduleInterval) {
-                    console.log(`[AutoScheduler] ${selectedProject.name}: 距离上次停止已过 ${hoursPassed.toFixed(2)} 小时 (设定: ${selectedProject.scheduleInterval})，正在自动重启...`);
-                    // 触发启动
-                    handleRun();
-                }
-            } else {
-                // 如果没有停止记录（比如刚创建），是否应该立即运行？
-                // 暂时不处理，等待用户第一次手动操作或明确逻辑
-            }
-        };
-
-        const timer = setInterval(checkSchedule, 60000); // 每分钟检查一次
-        return () => clearInterval(timer);
-    }, [selectedProject, isRunning]);
-
     const handleRun = async () => {
         if (!selectedProject) return;
         setIsRunning(true);
@@ -259,21 +231,6 @@ export default function ProjectSyncPage() {
         } catch (e) {
             console.error(e);
             loadProjects();
-        }
-    };
-
-    const handleScheduleChange = async (enabled: boolean, interval: number) => {
-        if (!selectedProject) return;
-        const updatedProjects = projects.map(p =>
-            p.id === selectedProject.id ? { ...p, scheduleEnabled: enabled, scheduleInterval: interval } : p
-        );
-        setProjects(updatedProjects);
-        try {
-            await updateProjectSchedule(selectedProject.id, enabled, interval);
-            toast({ title: '设置已更新', description: enabled ? `定时: 每 ${interval} 小时` : '定时已关闭' });
-        } catch (error) {
-            loadProjects();
-            toast({ title: '更新失败', variant: 'destructive' });
         }
     };
 
@@ -606,32 +563,6 @@ export default function ProjectSyncPage() {
                                     </div>
                                 </div>
 
-                                {/* Schedule Card */}
-                                <div className="p-4 rounded-xl bg-zinc-900/30 border border-white/5 hover:border-white/10 transition-colors">
-                                    <div className="flex items-center justify-between text-zinc-500 mb-2">
-                                        <div className="flex items-center gap-2">
-                                            <Clock className="h-4 w-4" />
-                                            <span className="text-xs font-medium uppercase tracking-wider">定时自动执行</span>
-                                        </div>
-                                        <Switch
-                                            checked={selectedProject.scheduleEnabled}
-                                            onCheckedChange={(c) => handleScheduleChange(c, selectedProject.scheduleInterval)}
-                                            className="scale-75 data-[state=checked]:bg-blue-600"
-                                        />
-                                    </div>
-                                    <div className="flex items-center gap-2 mt-2">
-                                        <span className="text-sm text-zinc-400">每</span>
-                                        <Input
-                                            type="number"
-                                            min={1}
-                                            className="h-6 w-16 bg-black/20 border-white/5 text-center text-xs p-0 focus-visible:ring-0"
-                                            value={selectedProject.scheduleInterval}
-                                            onChange={(e) => handleScheduleChange(true, Number(e.target.value))}
-                                            disabled={!selectedProject.scheduleEnabled}
-                                        />
-                                        <span className="text-sm text-zinc-400">小时</span>
-                                    </div>
-                                </div>
                             </div>
                         </div>
 

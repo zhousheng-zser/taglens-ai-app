@@ -240,6 +240,8 @@ total_files=${#files[@]}
 echo "📦 最终找到有效文件数: $total_files"
 
 if [ $total_files -gt 0 ]; then
+    # 保证上传目录存在（create_directories 负责创建，但这里做兜底）
+    mkdir -p ./upload
     files_per_pack=$(( (total_files + 9) / 10 ))
     for pack_num in {0..9}; do
         start=$((pack_num * files_per_pack))
@@ -257,6 +259,9 @@ if [ $total_files -gt 0 ]; then
         rm -rf "$pack_dir"
         echo "📦 已生成: ${final_name}"
     done
+
+    # 打包完成标记：sync_task_01.py 只在 sentinel 存在时才开始下载
+    touch "./upload/collection-${start_ts}-done.ok"
 fi
 
 rm -rf ./tmp

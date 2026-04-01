@@ -437,17 +437,14 @@ def create_directories(client):
     execute_command(client, f"pkill -9 -f {REMOTE_SH}", print_output=False)
     time.sleep(3)
 
-    directories = [
-        PROJECT_ROOT,
-        f"{PROJECT_ROOT}/tmp",
-        f"{PROJECT_ROOT}/upload"
-    ]
+    # 不清理 upload 目录，避免正在等待下载/处理的旧包被误删
+    execute_command(client, f"mkdir -p {PROJECT_ROOT}", print_output=False)
+    execute_command(client, f"mkdir -p {PROJECT_ROOT}/upload", print_output=False)
     
-    for directory in directories:
-        print(f"      删除旧目录及内容...")
-        execute_command(client, f"rm -rf {directory}", print_output=False)
-        print(f"   创建目录: {directory}")
-        execute_command(client, f"mkdir -p {directory}", print_output=False)
+    # 只清理 tmp 工作目录（QualityJudgment.sh 内部也会清理 tmp，这里做兜底）
+    print("      清理远端 tmp ...")
+    execute_command(client, f"rm -rf {PROJECT_ROOT}/tmp", print_output=False)
+    execute_command(client, f"mkdir -p {PROJECT_ROOT}/tmp", print_output=False)
     
     print("✅ 目录创建完成")
 
@@ -568,78 +565,157 @@ def delete_directory(path):
         print("目录不存在:", path)
 
 
+def _extract_start_ts_from_done_sentinel(filename: str):
+    """
+    文件名格式示例:
+      collection-<start_ts>-done.ok
+    """
+    if not filename.startswith("collection-") or not filename.endswith("-done.ok"):
+        return None
+    parts = filename.split("-")
+    if len(parts) < 3:
+        return None
+    return parts[1]
+
+
+def download_latest_ready_batch_and_process():
+    """
+    仅在 01:00-08:00 入口被调用:
+    1) 连接远端, 找到最新 done sentinel (collection-<start_ts>-done.ok)
+    2) 下载该 start_ts 对应所有 part tar (按 part0..partN 顺序)
+    3) 下载完成后再 process_archive 逐个处理
+    4) 处理结束后删除远端 part tar + sentinel
+    """
+    target_client = create_ssh_client(
+        MID_SSH_HOST, MID_SSH_PORT, TARGET_SSH_USER, TARGET_SSH_PASSWORD
+    )
+
+    sentinel_file = None
+    start_ts = None
+    part_files = []
+    local_archives = []
+    successful_parts = []
+    all_parts_count = 0
+
+    try:
+        all_files = list_remote_files(target_client, TARGET_DIR)
+        sentinel_files = [
+            f for f in all_files
+            if f.startswith("collection-") and f.endswith("-done.ok") and not f.endswith(".ing")
+        ]
+
+        if not sentinel_files:
+            return False
+
+        sentinel_files.sort(
+            key=lambda x: int(_extract_start_ts_from_done_sentinel(x) or -1),
+            reverse=True
+        )
+        sentinel_file = sentinel_files[0]
+        start_ts = _extract_start_ts_from_done_sentinel(sentinel_file)
+
+        if not start_ts:
+            print(f"无法解析 sentinel: {sentinel_file}")
+            return False
+
+        part_prefix = f"collection-{start_ts}-part"
+        part_files = [
+            f for f in all_files
+            if f.startswith(part_prefix) and f.endswith(".tar.gz") and not f.endswith(".ing")
+        ]
+        part_files = sorted(part_files)
+        all_parts_count = len(part_files)
+
+        if not part_files:
+            print(f"sentinel 存在但未找到 part tar: {sentinel_file}，将跳过并清理 sentinel。")
+            delete_remote_file(target_client, f"{TARGET_DIR}/{sentinel_file}")
+            return True
+
+        print(f"检测到可下载批次: {sentinel_file} (start_ts={start_ts})")
+        print(f"将下载 part: {part_files}")
+
+        # 先只下载，不处理
+        for part_file in part_files:
+            remote_path = f"{TARGET_DIR}/{part_file}"
+            local_path = f"./{part_file}"
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except Exception:
+                    pass
+            print(f"📥 下载 part: {part_file}")
+            try:
+                download_file(target_client, remote_path, local_path)
+                local_archives.append(local_path)
+                successful_parts.append(part_file)
+            except Exception as e:
+                print(f"❌ 下载失败(跳过该 part，继续其它): {part_file}, error={e}")
+                continue
+
+    finally:
+        try:
+            target_client.close()
+        except Exception:
+            pass
+
+    if not local_archives:
+        print("本批次未成功下载任何 part，保留 sentinel/remote tar，等待下轮重试。")
+        return False
+
+    # 下载完成后统一开始处理（不受时间窗口限制）
+    for archive in local_archives:
+        try:
+            print(f"🚀 开始处理本地归档: {archive}")
+            process_archive(archive)
+        except Exception as e:
+            print(f"❌ 处理失败(仍会继续处理下一个): {archive}, error={e}")
+
+    # 处理结束后再删远端 tar + sentinel
+    cleanup_client = create_ssh_client(
+        MID_SSH_HOST, MID_SSH_PORT, TARGET_SSH_USER, TARGET_SSH_PASSWORD
+    )
+    try:
+        for part_file in successful_parts:
+            try:
+                delete_remote_file(cleanup_client, f"{TARGET_DIR}/{part_file}")
+            except Exception as e:
+                print(f"⚠️ 删除远端 part 失败: {part_file}, error={e}")
+
+        # 只有当本批次所有 part 都已成功下载/处理时，才删除 sentinel
+        if sentinel_file and len(successful_parts) == all_parts_count:
+            try:
+                delete_remote_file(cleanup_client, f"{TARGET_DIR}/{sentinel_file}")
+            except Exception as e:
+                print(f"⚠️ 删除远端 sentinel 失败: {sentinel_file}, error={e}")
+    finally:
+        try:
+            cleanup_client.close()
+        except Exception:
+            pass
+
+    return True
+
+
 # ==================== 主循环 ====================
 def main():
     """主函数"""
-    thread = threading.Thread(target=remote)
-    thread.start()
-
-    failed_attempts = {}
-    total_handled_count = 0
+    last_packed_date = None
 
     while True:
         try:
-            # 检查是否已完成10个包的任务
-            if total_handled_count >= 10:
-                print(f"🎊 任务已完成：共处理/清理了 {total_handled_count} 个大包。退出死循环。")
-                break
+            now = datetime.now()
+            current_date = now.strftime("%Y-%m-%d")
 
-            time.sleep(60)
-            
-            # 检查当前时间是否在凌晨1点到8点之间
-            current_hour = datetime.now().hour
-            if current_hour < 1 or current_hour >= 8:
-                continue
-            
-            print("one loop -----------")
-            print(f"⏰ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (在下载时间段 01:00-08:00)")
-            
-            target_client = create_ssh_client(
-                MID_SSH_HOST, MID_SSH_PORT, TARGET_SSH_USER, TARGET_SSH_PASSWORD
-            )
-            
-            all_files = list_remote_files(target_client, TARGET_DIR)
-            files = [f for f in all_files if not f.endswith('.ing')]
-            
-            if len(files) < 1:
-                print("未发现可下载文件（跳过 .ing 文件），本轮结束")
-                target_client.close()
-                continue
-            
-            min_file = sorted(files)[0]
-            print(f"min line (lexicographic): {min_file}")
-            
-            remote_path = f"{TARGET_DIR}/{min_file}"
-            local_path = f"./{min_file}"
-            
-            print(f"📥 准备下载文件: {min_file}")
-            
-            try:
-                download_file(target_client, remote_path, local_path)
-                print(f"✅ 下载成功: {min_file}")
-                if min_file in failed_attempts: del failed_attempts[min_file]
-                
-                delete_remote_file(target_client, remote_path)
-                target_client.close()
-                process_archive(local_path)
-                total_handled_count += 1
-                print(f"📊 当前进度: {total_handled_count}/10")
-                
-            except Exception as e:
-                failed_attempts[min_file] = failed_attempts.get(min_file, 0) + 1
-                current_fails = failed_attempts[min_file]
-                print(f"❌ 下载失败 ({current_fails}/2): {e}")
-                
-                if current_fails >= 2:
-                    print(f"⚠️  文件 {min_file} 下载连续失败2次，强制删除远程文件以防阻塞。")
-                    delete_remote_file(target_client, remote_path)
-                    if min_file in failed_attempts: del failed_attempts[min_file]
-                    total_handled_count += 1
-                    print(f"📊 当前进度 (含失败记录): {total_handled_count}/10")
-                
-                if target_client: target_client.close()
-                time.sleep(5)
-                continue
+            # 1) 每天 22:00 远端执行打包任务
+            if now.hour == 22 and now.minute < 5 and last_packed_date != current_date:
+                print(f"⏰ {current_date} 22:00 触发远端打包...")
+                remote()
+                last_packed_date = current_date
+
+            # 2) 每天 01:00-08:00 下载已完成批次
+            if 1 <= now.hour < 8:
+                print(f"⏰ 当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')} (下载窗口 01:00-08:00)")
+                download_latest_ready_batch_and_process()
 
         except Exception as e:
             print(f"❌ 发生错误: {e}")
@@ -650,9 +726,7 @@ def main():
         delete_tar_gz_in_cwd()
         delete_directory(TMP_DIR)
         delete_directory(TMP_SECOND)
-    
-    print("thread join -----------")
-    thread.join() 
+        time.sleep(60)
 
 if __name__ == "__main__":
     main()
