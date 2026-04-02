@@ -16,6 +16,8 @@ if not hasattr(paramiko, "DSSKey"):
 
 from sshtunnel import SSHTunnelForwarder
 
+PDDY_PROJECT_NAMES = {"浦东道运视频质量诊断"}
+
 class BusinessStructureManager:
     """
     业务目录结构管理类
@@ -203,14 +205,206 @@ class BusinessStructureManager:
         
         return (sz_name, full_path)
 
+
+class PDDYBusinessStructureManager(BusinessStructureManager):
+    """
+    浦东道运业务目录结构管理类
+    - 02 项目没有 View_CameraGroupTag 视图
+    - 改为使用相机表 + 相机分组关系表 + 分组树自行还原目录路径
+    """
+
+    SSH_HOST = "192.168.1.10"
+    SSH_PORT = 61014
+    SSH_USER = "root"
+    SSH_PASSWORD = "md@xinxi2022"
+
+    DB_HOST = "127.0.0.1"
+    DB_PORT = 3307
+    DB_USER = "webadmin"
+    DB_PASSWORD = "3edcVFR$"
+    DB_NAME = "web-op"
+
+    OUTPUT_FILE = BusinessStructureManager.DATA_DIR / "business_structure_map_pddy.json"
+
+    ROOT_GROUP_IDS = {"1000000"}
+    ROOT_GROUP_NAMES = {"默认目录"}
+
+    def _fetch_all_from_db(self) -> List[Dict[str, Any]]:
+        """连接数据库并还原浦东道运的相机目录结构"""
+        print(f"[PDDYBusinessStructureManager] 正在连接 SSH 隧道 ({self.SSH_HOST})...")
+
+        all_results: List[Dict[str, Any]] = []
+        start_time = time.time()
+
+        with SSHTunnelForwarder(
+            (self.SSH_HOST, self.SSH_PORT),
+            ssh_username=self.SSH_USER,
+            ssh_password=self.SSH_PASSWORD,
+            remote_bind_address=(self.DB_HOST, self.DB_PORT)
+        ) as tunnel:
+            print(f"[PDDYBusinessStructureManager] SSH 隧道已建立 (Port: {tunnel.local_bind_port})")
+
+            print(f"[PDDYBusinessStructureManager] 正在连接 MySQL ({self.DB_HOST})...")
+            connection = pymysql.connect(
+                host="127.0.0.1",
+                port=tunnel.local_bind_port,
+                user=self.DB_USER,
+                password=self.DB_PASSWORD,
+                database=self.DB_NAME,
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=20,
+                charset="gbk",
+            )
+
+            try:
+                with connection.cursor() as cursor:
+                    print("[PDDYBusinessStructureManager] 正在拉取相机基础信息...")
+                    cursor.execute(
+                        """
+                        SELECT ubi_share_camera_id, ubi_short_id, sz_name
+                        FROM tbl_share_camera_info
+                        WHERE ubi_short_id IS NOT NULL
+                        """
+                    )
+                    cameras = cursor.fetchall()
+
+                    print("[PDDYBusinessStructureManager] 正在拉取相机与目录关联关系...")
+                    cursor.execute(
+                        """
+                        SELECT ubi_share_camera_id, ubi_group_id
+                        FROM tbl_share_custom_group_camera
+                        WHERE ubi_share_camera_id IS NOT NULL
+                          AND ubi_group_id IS NOT NULL
+                        """
+                    )
+                    camera_group_rows = cursor.fetchall()
+
+                    print("[PDDYBusinessStructureManager] 正在拉取目录树...")
+                    cursor.execute(
+                        """
+                        SELECT ubi_group_id, sz_name, ubi_parent_group_id
+                        FROM tbl_share_custom_group
+                        WHERE ubi_group_id IS NOT NULL
+                        """
+                    )
+                    group_rows = cursor.fetchall()
+
+                group_map: Dict[str, Dict[str, Any]] = {
+                    str(row["ubi_group_id"]): row for row in group_rows if row.get("ubi_group_id") is not None
+                }
+
+                camera_group_map: Dict[str, List[str]] = {}
+                for row in camera_group_rows:
+                    camera_id = row.get("ubi_share_camera_id")
+                    group_id = row.get("ubi_group_id")
+                    if camera_id is None or group_id is None:
+                        continue
+                    camera_group_map.setdefault(str(camera_id), []).append(str(group_id))
+
+                for camera in cameras:
+                    short_id = camera.get("ubi_short_id")
+                    share_camera_id = camera.get("ubi_share_camera_id")
+                    if short_id is None or share_camera_id is None:
+                        continue
+
+                    path_parts = self._select_best_path_parts(
+                        camera_group_map.get(str(share_camera_id), []),
+                        group_map,
+                    )
+                    all_results.append(
+                        {
+                            "ubi_short_id": short_id,
+                            "sz_name": camera.get("sz_name", ""),
+                            "szTagRef1": path_parts[0],
+                            "szTagRef2": path_parts[1],
+                            "szTagRef3": path_parts[2],
+                        }
+                    )
+
+                total_time = time.time() - start_time
+                print(
+                    f"[PDDYBusinessStructureManager] 数据拉取完成! 相机 {len(cameras)} 条, "
+                    f"目录关系 {len(camera_group_rows)} 条, 目录节点 {len(group_rows)} 条, "
+                    f"总耗时: {total_time:.2f}秒"
+                )
+            finally:
+                connection.close()
+                print("[PDDYBusinessStructureManager] 数据库连接已关闭")
+
+        return all_results
+
+    def _select_best_path_parts(
+        self,
+        group_ids: List[str],
+        group_map: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        """从一个相机的多个分组候选中选择最完整的一条路径"""
+        best_path: List[str] = []
+
+        for group_id in group_ids:
+            path = self._build_path_from_group(group_id, group_map)
+            if len(path) > len(best_path):
+                best_path = path
+
+        trimmed_path = best_path[:3]
+        while len(trimmed_path) < 3:
+            trimmed_path.append("")
+        return trimmed_path
+
+    def _build_path_from_group(
+        self,
+        group_id: str,
+        group_map: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        """沿父节点向上回溯，并过滤根目录等无业务意义节点"""
+        path_nodes: List[str] = []
+        visited = set()
+        current_group_id = str(group_id)
+
+        while current_group_id and current_group_id not in visited:
+            visited.add(current_group_id)
+            group = group_map.get(current_group_id)
+            if not group:
+                break
+
+            group_name = (group.get("sz_name") or "").strip()
+            if (
+                group_name
+                and current_group_id not in self.ROOT_GROUP_IDS
+                and group_name not in self.ROOT_GROUP_NAMES
+            ):
+                path_nodes.append(group_name)
+
+            parent_group_id = group.get("ubi_parent_group_id")
+            if parent_group_id in (None, "", 0, "0"):
+                break
+            current_group_id = str(parent_group_id)
+
+        path_nodes.reverse()
+        return path_nodes
+
 # 单例实例，方便其他模块直接引用
 _instance = None
+_pddy_instance = None
 
 def get_business_manager():
     global _instance
     if _instance is None:
         _instance = BusinessStructureManager()
     return _instance
+
+
+def get_pddy_business_manager():
+    global _pddy_instance
+    if _pddy_instance is None:
+        _pddy_instance = PDDYBusinessStructureManager()
+    return _pddy_instance
+
+
+def get_business_manager_for_project(project_name: Optional[str]):
+    if project_name in PDDY_PROJECT_NAMES:
+        return get_pddy_business_manager()
+    return get_business_manager()
 
 # 方便测试的主函数
 if __name__ == "__main__":

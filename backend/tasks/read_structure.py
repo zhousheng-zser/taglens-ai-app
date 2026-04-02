@@ -1,11 +1,17 @@
 import time
 from datetime import datetime
-from services.business_structure_manager import get_business_manager
+from services.business_structure_manager import (
+    get_business_manager,
+    get_pddy_business_manager,
+)
 
 def run_periodic_sync():
     print(f"\n[{datetime.now()}] Service started. Business structure sync task active.")
     
-    manager = get_business_manager()
+    managers = [
+        ("default", get_business_manager()),
+        ("pddy", get_pddy_business_manager()),
+    ]
     
     # Run immediately on start if not already loaded or just specific sync
     # The manager.__init__ tried to load from local.
@@ -23,7 +29,9 @@ def run_periodic_sync():
 
         try:
             print(f"\n[{datetime.now()}] Starting scheduled synchronization...")
-            manager.sync_from_remote()
+            for manager_name, manager in managers:
+                print(f"[{datetime.now()}] Starting scheduled synchronization for {manager_name}...")
+                manager.sync_from_remote()
             print(f"[{datetime.now()}] Synchronization finished.")
         except Exception as e:
              print(f"Job crashed: {e}")

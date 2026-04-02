@@ -56,7 +56,7 @@ from services.image_similarity import decode_base64_image, load_image_from_path,
 from services.faiss_index_manager import get_faiss_index_manager
 from core.minio_storage_client import get_storage_client
 from routers import management_api
-from services.business_structure_manager import get_business_manager
+from services.business_structure_manager import get_business_manager_for_project
 
 # 加载环境变量
 load_dotenv()
@@ -1968,7 +1968,7 @@ async def process_uploaded_image_api(
         final_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
         if camera_id:
             try:
-                bm = get_business_manager()
+                bm = get_business_manager_for_project(project_name)
                 c_name, c_struct = bm.get_camera_info(camera_id)
                 # 只有当能获取到有效信息时才添加上下文
                 if c_struct and c_struct != "未知区域":

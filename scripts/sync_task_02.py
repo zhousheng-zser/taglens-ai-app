@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#指挥中心视频质量诊断  
+#浦东道运视频质量诊断  
 import time
 import threading
 import json
@@ -26,10 +26,10 @@ os.environ['no_proxy'] = 'localhost,127.0.0.1'
 
 # ==================== 配置部分 ====================
 MID_SSH_HOST = "192.168.1.10"
-MID_SSH_PORT = 61008
+MID_SSH_PORT = 61014
 
-TARGET_SSH_HOST = "10.31.243.3"
-TARGET_SSH_DB_PORT = 3308
+TARGET_SSH_HOST = "127.0.0.1"
+TARGET_SSH_DB_PORT = 3307
 TARGET_SSH_USER = "root"
 TARGET_SSH_PASSWORD = "md@xinxi2022"
 TARGET_DIR = "/root/CollectionIMGJudgment/upload"
@@ -40,8 +40,8 @@ TMP_SECOND = "./tmpSecond"
 LOG_DIR = "./log"
 
 
-REMOTE_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "QualityJudgment.sh")
-PROJECT_NAME="视频质量诊断"
+REMOTE_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "QualityJudgment02.sh")
+PROJECT_NAME="浦东道运视频质量诊断"
 PROJECT_ROOT="/root/CollectionIMGJudgment"
 
 
@@ -440,7 +440,7 @@ def create_directories(client):
     execute_command(client, f"mkdir -p {PROJECT_ROOT}", print_output=False)
     execute_command(client, f"mkdir -p {PROJECT_ROOT}/upload", print_output=False)
     
-    # 只清理 tmp 工作目录（QualityJudgment.sh 内部也会清理 tmp，这里做兜底）
+    # 只清理 tmp 工作目录（QualityJudgment02.sh 内部也会清理 tmp，这里做兜底）
     print("      清理远端 tmp ...")
     execute_command(client, f"rm -rf {PROJECT_ROOT}/tmp", print_output=False)
     execute_command(client, f"mkdir -p {PROJECT_ROOT}/tmp", print_output=False)
@@ -706,14 +706,14 @@ def main():
             current_date = now.strftime("%Y-%m-%d")
 
             # 1) 每天 22:00 远端执行打包任务
-            if now.hour == 22 and now.minute < 5 and last_packed_date != current_date:
-                print(f"⏰ {current_date} 22:00 触发远端打包...")
+            if now.hour == 20 and now.minute < 5 and last_packed_date != current_date:
+                #print(f"⏰ {current_date} 20:00 触发远端打包...")
                 remote()
                 last_packed_date = current_date
 
-            # 2) 每天 01:00-08:00 下载已完成批次
-            if 1 <= now.hour < 8:
-                print(f"⏰ 当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')} (下载窗口 01:00-08:00)")
+            # 2) 每天 21:00-23:00 下载已完成批次
+            if 21 <= now.hour < 23:
+                print(f"⏰ 当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')} (下载窗口 21:00-23:00)")
                 download_latest_ready_batch_and_process()
 
         except Exception as e:
