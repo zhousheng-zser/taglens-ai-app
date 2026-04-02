@@ -34,13 +34,16 @@ TARGET_SSH_USER = "root"
 TARGET_SSH_PASSWORD = "md@xinxi2022"
 TARGET_DIR = "/root/CollectionIMGJudgment/upload"
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_LOCAL_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "runtime", "sync_task_02"))
+DOWNLOAD_DIR = os.path.join(PROJECT_LOCAL_ROOT, "downloads")
+TMP_DIR = os.path.join(PROJECT_LOCAL_ROOT, "tmp")
+TMP_SECOND = os.path.join(PROJECT_LOCAL_ROOT, "tmpSecond")
+LOG_DIR = os.path.join(PROJECT_LOCAL_ROOT, "log")
+PULL_LOG_FILE = os.path.join(LOG_DIR, "sync_task_02_pull.log")
 
-TMP_DIR = "./tmp"
-TMP_SECOND = "./tmpSecond"
-LOG_DIR = "./log"
 
-
-REMOTE_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "QualityJudgment02.sh")
+REMOTE_SH = os.path.join(SCRIPT_DIR, "QualityJudgment02.sh")
 PROJECT_NAME="浦东道运视频质量诊断"
 PROJECT_ROOT="/root/CollectionIMGJudgment"
 
@@ -61,6 +64,15 @@ FORWARD_TARGET_PORT=1200
 cameras = []
 group_mapping = {}
 forward_count = 0
+
+
+def ensure_local_directories():
+    """确保项目本地运行目录存在"""
+    os.makedirs(PROJECT_LOCAL_ROOT, exist_ok=True)
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(TMP_DIR, exist_ok=True)
+    os.makedirs(TMP_SECOND, exist_ok=True)
 
 def http_post(url, req_type):
     """统一发送 HTTP 请求"""
@@ -237,6 +249,7 @@ def process_archive(archive_file):
     try:
 
         """处理下载的归档文件"""
+        ensure_local_directories()
         shutil.rmtree(TMP_DIR, ignore_errors=True)
         shutil.rmtree(TMP_SECOND, ignore_errors=True)
         os.makedirs(TMP_DIR, exist_ok=True)
@@ -254,7 +267,7 @@ def process_archive(archive_file):
     
         # 记录日志
         os.makedirs(LOG_DIR, exist_ok=True)
-        with open(f"{LOG_DIR}/pull.log", "a") as log:
+        with open(PULL_LOG_FILE, "a") as log:
             log.write(f"{datetime.now()} pull tar, file size {file_size_mb:.2f} MB, "
                       f"------- {file_count} inner files\n")
    
@@ -548,10 +561,12 @@ def remote():
 
 
 def delete_tar_gz_in_cwd():
-    cwd = os.getcwd()
-    for file in os.listdir(cwd):
+    if not os.path.exists(DOWNLOAD_DIR):
+        return
+
+    for file in os.listdir(DOWNLOAD_DIR):
         if file.endswith(".tar.gz"):
-            file_path = os.path.join(cwd, file)
+            file_path = os.path.join(DOWNLOAD_DIR, file)
             print("删除文件:", file_path)
             os.remove(file_path)
 
@@ -560,8 +575,7 @@ def delete_directory(path):
     if os.path.exists(path):
         print("删除目录:", path)
         shutil.rmtree(path)   # 递归删除整个目录
-    else:
-        print("目录不存在:", path)
+    os.makedirs(path, exist_ok=True)
 
 
 def _extract_start_ts_from_done_sentinel(filename: str):
@@ -597,6 +611,7 @@ def download_latest_ready_batch_and_process():
     all_parts_count = 0
 
     try:
+        ensure_local_directories()
         all_files = list_remote_files(target_client, TARGET_DIR)
         sentinel_files = [
             f for f in all_files
@@ -636,7 +651,7 @@ def download_latest_ready_batch_and_process():
         # 先只下载，不处理
         for part_file in part_files:
             remote_path = f"{TARGET_DIR}/{part_file}"
-            local_path = f"./{part_file}"
+            local_path = os.path.join(DOWNLOAD_DIR, part_file)
             if os.path.exists(local_path):
                 try:
                     os.remove(local_path)
@@ -699,6 +714,7 @@ def download_latest_ready_batch_and_process():
 def main():
     """主函数"""
     last_packed_date = None
+    ensure_local_directories()
 
     while True:
         try:
