@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/management", tags=["management"])
 logger = logging.getLogger(__name__)
 
 # 缺失标签补齐任务的全局状态与日志文件
-REEXTRACT_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "reextract_missing_tags.log"
+REEXTRACT_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "reextract_missing_tags_gemini.log"
 CURRENT_REEXTRACT_TASK: Dict[str, Any] = {
     "running": False,     # 当前是否有脚本进程在运行（由 /status 实时计算）
     "model": None,
@@ -339,7 +339,7 @@ class ReextractTagsRequest(BaseModel):
 
 
 async def reextract_tags_generator(limit: int, model: str):
-    """调用 reextract_missing_tags.py 脚本进行缺失标签补齐"""
+    """调用 scripts/reextract_missing_tags_gemini.py 进行缺失标签补齐"""
     global CURRENT_REEXTRACT_TASK
 
     # 如果已有任务在运行，则拒绝重复启动
@@ -349,7 +349,7 @@ async def reextract_tags_generator(limit: int, model: str):
         return
 
     project_root = Path(__file__).parent.parent.parent
-    script_path = project_root / "scripts" / "reextract_missing_tags.py"
+    script_path = project_root / "scripts" / "reextract_missing_tags_gemini.py"
     
     if not script_path.exists():
         msg = f"脚本文件不存在: {script_path}"
@@ -493,7 +493,7 @@ async def reextract_tags_generator(limit: int, model: str):
 
 @router.post("/reextract-tags")
 async def reextract_tags_endpoint(req: ReextractTagsRequest):
-    """调用 reextract_missing_tags.py 脚本进行缺失标签补齐"""
+    """调用 reextract_missing_tags_gemini.py 脚本进行缺失标签补齐"""
     return StreamingResponse(
         reextract_tags_generator(req.limit, req.model),
         media_type="application/x-ndjson"

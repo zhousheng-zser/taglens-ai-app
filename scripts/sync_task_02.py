@@ -44,7 +44,7 @@ PULL_LOG_FILE = os.path.join(LOG_DIR, "sync_task_02_pull.log")
 
 
 REMOTE_SH = os.path.join(SCRIPT_DIR, "QualityJudgment02.sh")
-PROJECT_NAME="浦东道运视频质量诊断"
+PROJECT_NAME="浦东道运"
 PROJECT_ROOT="/root/CollectionIMGJudgment"
 
 
@@ -721,9 +721,9 @@ def main():
             now = datetime.now()
             current_date = now.strftime("%Y-%m-%d")
 
-            # 1) 每天 22:00 远端执行打包任务
+            # 1) 每天 20:00 远端执行打包任务
             if now.hour == 20 and now.minute < 5 and last_packed_date != current_date:
-                #print(f"⏰ {current_date} 20:00 触发远端打包...")
+                print(f"⏰ {current_date} 20:00 触发远端打包...")
                 remote()
                 last_packed_date = current_date
 
