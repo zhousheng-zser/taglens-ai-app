@@ -56,6 +56,7 @@ from services.image_similarity import decode_base64_image, load_image_from_path,
 from services.faiss_index_manager import get_faiss_index_manager
 from core.minio_storage_client import get_storage_client
 from routers import management_api
+from routers import dtc_api
 from services.business_structure_manager import get_business_manager_for_project
 
 # 加载环境变量
@@ -263,6 +264,8 @@ class SearchRequest(BaseModel):
     pageSize: Optional[int] = 20  # 每页数量
     startDate: Optional[str] = None  # ISO 格式日期时间
     endDate: Optional[str] = None    # ISO 格式日期时间
+    cameraName: Optional[str] = None  # 相机名模糊匹配（sz_name）
+    bizCategory: Optional[str] = None  # 业态目录模糊匹配（sz_tag_ref_json）
     similarityThreshold: Optional[float] = 0.6  # 相似度阈值,范围0-1
 
 class ImageSearchResult(BaseModel):
@@ -276,6 +279,8 @@ class ImageSearchResult(BaseModel):
     tags: List[str]
     qwenCaptions: Dict[str, Any] | List[str]
     yoloObjects: List[str]
+    szName: Optional[str] = None
+    szTagRefs: List[str] = []
     similarity: Optional[float] = None  # 相似度分数（0-1之间）
 
 class SearchResponse(BaseModel):
@@ -406,7 +411,14 @@ async def lifespan(app: FastAPI):
     try:
         class PollingFilter(logging.Filter):
             def filter(self, record: logging.LogRecord) -> bool:
-                return "/project/logs" not in record.getMessage()
+                msg = record.getMessage()
+                silent_paths = (
+                    "/project/logs",
+                    "/dtc/tasks",
+                    "/dtc/image-sets",
+                )
+                # 静默高频轮询访问日志，减少控制台噪音
+                return not any(p in msg for p in silent_paths)
         
         logging.getLogger("uvicorn.access").addFilter(PollingFilter())
     except Exception:
@@ -455,6 +467,7 @@ app.add_middleware(
 
 # 注册管理API路由
 app.include_router(management_api.router)
+app.include_router(dtc_api.router)
 
 # --- 批量导入相关常量与工具 ---
 BULK_IMPORT_DEFAULT_DIR = Path(__file__).parent.parent / "data" / "local" / "img"
@@ -1698,6 +1711,8 @@ async def search_images_api(request: SearchRequest):
             limit=use_limit if use_limit else 10000,  # 如果使用分页，limit设为较大值以获取所有结果用于分页
             start_date=request.startDate,
             end_date=request.endDate,
+            camera_name=request.cameraName,
+            biz_category=request.bizCategory,
             query_embeddings=query_embeddings if query_embeddings else None,  # 传递多个向量
             query_weights=weights if weights else None,  # 传递权重列表
             similarity_threshold=similarity_threshold,
@@ -1730,6 +1745,8 @@ async def search_images_api(request: SearchRequest):
 
                     qwenCaptions=r['qwenCaptions'],
                     yoloObjects=r['yoloObjects'],
+                    szName=r.get('szName'),
+                    szTagRefs=r.get('szTagRefs') or [],
                     similarity=similarity_value  # 添加相似度字段
                 )
             )
@@ -1876,6 +1893,7 @@ async def process_uploaded_image_api(
     project_name: str = Form(...),
     timestamp: Optional[str] = Form(None),
     camera_id: Optional[str] = Form(None),
+    sz_name: Optional[str] = Form(None),
     threshold: float = Form(0.8188)
 ):
     """
@@ -1885,6 +1903,7 @@ async def process_uploaded_image_api(
     3. AI 分析 (Qwen)
     4. 入库 (MySQL/SQLite)
     """
+    ai_error_message: Optional[str] = None
     try:
         # 1. 读取图片数据
         image_bytes = await file.read()
@@ -2041,6 +2060,22 @@ async def process_uploaded_image_api(
                 except:
                     pass
 
+        final_camera_id = (camera_id or "").strip() or None
+        client_sz = (sz_name or "").strip()
+        bm_name: Optional[str] = None
+        tag_refs: List[str] = []
+        if final_camera_id:
+            try:
+                bm_meta = get_business_manager_for_project(project_name)
+                bm_name, tag_refs = bm_meta.get_camera_sz_and_tag_refs(final_camera_id)
+            except Exception as meta_e:
+                print(f"业务结构元数据解析失败: {meta_e}")
+
+        final_sz_name = client_sz if client_sz else bm_name
+        if final_sz_name is not None and not str(final_sz_name).strip():
+            final_sz_name = None
+        sz_tag_ref_json_str = json.dumps(tag_refs, ensure_ascii=False) if tag_refs else None
+
         # 保存到 SQLite
         save_image_to_db(
             image_uuid=temp_uuid,
@@ -2052,7 +2087,10 @@ async def process_uploaded_image_api(
             description=description,
             qwen_captions=qwen_captions,
             yolo_objects=yolo_objects,
-            keyword_embeddings=keyword_embeddings
+            keyword_embeddings=keyword_embeddings,
+            camera_id=final_camera_id,
+            sz_name=final_sz_name,
+            sz_tag_ref_json=sz_tag_ref_json_str,
         )
         
         # 3.4 正式添加到 Faiss Index
@@ -2081,7 +2119,7 @@ async def process_uploaded_image_api(
             "minio_path": minio_path,
             "ai_result": clean_numpy(analysis_result) if analysis_result else None,
             "ai_skipped": not should_call_api or analysis_result is None,
-            "ai_error": ai_error_message if 'ai_error_message' in locals() else None
+            "ai_error": ai_error_message
         }
 
     except Exception as e:

@@ -97,6 +97,9 @@ def init_database():
                 file_path TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
                 file_name TEXT,
+                camera_id TEXT,
+                sz_name TEXT,
+                sz_tag_ref_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -148,6 +151,17 @@ def init_database():
         except Exception:
             # 字段已存在，忽略错误
             pass
+
+        for _sql, _label in (
+            ("ALTER TABLE images ADD COLUMN camera_id TEXT", "camera_id"),
+            ("ALTER TABLE images ADD COLUMN sz_name TEXT", "sz_name"),
+            ("ALTER TABLE images ADD COLUMN sz_tag_ref_json TEXT", "sz_tag_ref_json"),
+        ):
+            try:
+                cursor.execute(_sql)
+                print(f"已添加 {_label} 字段到 images 表")
+            except Exception:
+                pass
         
         # 创建索引以提高搜索性能
         cursor.execute("""
@@ -217,6 +231,19 @@ def init_database():
         # 本地数据库不再与 MinIO 同步，无需标记修改
 
 
+def _sz_tag_refs_from_db_value(sz_tag_ref_json: Optional[str]) -> List[str]:
+    """将 images.sz_tag_ref_json 解析为字符串列表。"""
+    if not sz_tag_ref_json or not str(sz_tag_ref_json).strip():
+        return []
+    try:
+        data = json.loads(sz_tag_ref_json)
+        if isinstance(data, list):
+            return [str(x) for x in data if x is not None and str(x).strip() != ""]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return []
+
+
 def save_image_to_db(
     image_uuid: str,
     file_path: str,
@@ -227,7 +254,10 @@ def save_image_to_db(
     description: str,
     qwen_captions: List[str],
     yolo_objects: List[str],
-    keyword_embeddings: Optional[List[tuple[str, bytes]]] = None  # List of (keyword, embedding_bytes) tuples
+    keyword_embeddings: Optional[List[tuple[str, bytes]]] = None,  # List of (keyword, embedding_bytes) tuples
+    camera_id: Optional[str] = None,
+    sz_name: Optional[str] = None,
+    sz_tag_ref_json: Optional[str] = None,
 ) -> int:
     """
     保存图片信息到数据库
@@ -241,9 +271,17 @@ def save_image_to_db(
         
         # 插入图片记录
         cursor.execute("""
-            INSERT INTO images (uuid, file_path, relative_path, file_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (image_uuid, file_path, relative_path, file_name, now, now))
+            INSERT INTO images (
+                uuid, file_path, relative_path, file_name,
+                camera_id, sz_name, sz_tag_ref_json,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            image_uuid, file_path, relative_path, file_name,
+            camera_id, sz_name, sz_tag_ref_json,
+            now, now,
+        ))
         
         image_id = cursor.lastrowid
         
@@ -309,6 +347,8 @@ def search_images(
     limit: int = 100,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    camera_name: Optional[str] = None,
+    biz_category: Optional[str] = None,
     query_embedding: Optional[bytes] = None,  # 单个查询文本的向量化结果（向后兼容）
     query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
     query_weights: Optional[List[float]] = None,  # 每个查询标签的权重列表
@@ -350,6 +390,14 @@ def search_images(
             where_conditions.append("i.created_at <= ?")
             params.append(end_date)
 
+        if camera_name:
+            where_conditions.append("i.sz_name LIKE ?")
+            params.append(f"%{camera_name}%")
+
+        if biz_category:
+            where_conditions.append("i.sz_tag_ref_json LIKE ?")
+            params.append(f"%{biz_category}%")
+
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         
         # 先计算总数（用于分页显示）
@@ -370,6 +418,9 @@ def search_images(
                 i.file_path,
                 i.relative_path,
                 i.file_name,
+                i.camera_id,
+                i.sz_name,
+                i.sz_tag_ref_json,
                 i.created_at,
                 ar.description,
                 ar.keywords_json,
@@ -427,6 +478,9 @@ def search_images(
                     'uuid': row['uuid'],
                     'filePath': row['relative_path'],
                     'fileName': row['file_name'],
+                    'cameraId': row['camera_id'],
+                    'szName': row['sz_name'],
+                    'szTagRefs': _sz_tag_refs_from_db_value(row['sz_tag_ref_json']),
                     'createdAt': row['created_at'],
                     'description': row['description'],
                     'keywords': keywords_json,
@@ -587,6 +641,9 @@ def search_images(
                     'uuid': row['uuid'],
                     'filePath': row['relative_path'],
                     'fileName': row['file_name'],
+                    'cameraId': row['camera_id'],
+                    'szName': row['sz_name'],
+                    'szTagRefs': _sz_tag_refs_from_db_value(row['sz_tag_ref_json']),
                     'createdAt': row['created_at'],
                     'description': row['description'],
                     'keywords': keywords_json,
@@ -634,6 +691,9 @@ def search_images(
                     'uuid': row['uuid'],
                     'filePath': row['relative_path'],
                     'fileName': row['file_name'],
+                    'cameraId': row['camera_id'],
+                    'szName': row['sz_name'],
+                    'szTagRefs': _sz_tag_refs_from_db_value(row['sz_tag_ref_json']),
                     'createdAt': row['created_at'],
                     'description': row['description'],
                     'keywords': keywords_json,
@@ -677,6 +737,9 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
                 i.file_path,
                 i.relative_path,
                 i.file_name,
+                i.camera_id,
+                i.sz_name,
+                i.sz_tag_ref_json,
                 i.created_at,
                 ar.description,
                 ar.keywords_json,
@@ -716,6 +779,9 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
             "uuid": row['uuid'],
             "file_path": row['file_path'],
             "file_name": row['file_name'],
+            "camera_id": row['camera_id'],
+            "sz_name": row['sz_name'],
+            "sz_tag_refs": _sz_tag_refs_from_db_value(row['sz_tag_ref_json']),
             "created_at": row['created_at'],
             "description": row['description'],
             "tags": tags,

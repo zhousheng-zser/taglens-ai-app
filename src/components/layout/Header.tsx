@@ -46,6 +46,11 @@ export function Header() {
               <Database className="h-4 w-4" /> 数据管理
             </Button>
           </Link>
+          <Link href="/dtc-data-fetch" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Database className="h-4 w-4" /> DTC数据获取
+            </Button>
+          </Link>
           <Link href="/about" passHref>
             <Button variant="ghost" className="flex items-center gap-2">
               <Info className="h-4 w-4" /> 关于

@@ -570,6 +570,8 @@ export interface SearchRequest {
   query?: string;
   startDate?: string;
   endDate?: string;
+  cameraName?: string;
+  bizCategory?: string;
   page?: number;
   pageSize?: number;
   similarityThreshold?: number;
@@ -579,6 +581,97 @@ export interface SearchResponse {
   success: boolean;
   results: any[]; // 使用 ImageSearchResult 类型的后端数据
   total: number;
+}
+
+export type DtcFetchMode = 'upload' | 'path';
+
+export interface RunDtcFetchRequest {
+  mode: DtcFetchMode;
+  prompt: string;
+  threshold?: number;
+  imageSetId?: string;
+  backendPath?: string;
+}
+
+export interface DtcImageSetItem {
+  image_set_id: string;
+  date: string;
+  mode: 'upload';
+  input_path: string;
+  file_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface DtcTaskItem {
+  task_id: string;
+  mode: DtcFetchMode;
+  status: 'queued' | 'running' | 'success' | 'failed';
+  queue_index?: number;
+  prompt: string;
+  threshold: number;
+  input_path: string;
+  output_base: string;
+  error?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  result_count?: number;
+}
+
+export interface DtcResultItem {
+  sourceName: string;
+  imageName?: string;
+  imagePath?: string;
+  jsonName?: string;
+  jsonPath?: string;
+  resultJson: Record<string, any>;
+}
+
+export interface DtcCreateTaskResponse {
+  success: boolean;
+  task?: DtcTaskItem;
+  error?: string;
+}
+
+export interface DtcTaskListResponse {
+  success: boolean;
+  tasks: DtcTaskItem[];
+  error?: string;
+}
+
+export interface DtcTaskResultsResponse {
+  success: boolean;
+  task?: DtcTaskItem;
+  results: DtcResultItem[];
+  error?: string;
+}
+
+export interface DtcDeleteTaskResponse {
+  success: boolean;
+  task_id?: string;
+  deleted_paths?: string[];
+  error?: string;
+}
+
+export interface DtcImageSetUploadResponse {
+  success: boolean;
+  imageSet?: DtcImageSetItem;
+  error?: string;
+}
+
+export interface DtcImageSetListResponse {
+  success: boolean;
+  imageSets: DtcImageSetItem[];
+  error?: string;
+}
+
+export interface DtcDeleteImageSetResponse {
+  success: boolean;
+  image_set_id?: string;
+  deleted_paths?: string[];
+  error?: string;
 }
 
 export async function handleSearch(request: SearchRequest): Promise<SearchResponse> {
@@ -609,5 +702,160 @@ export async function handleSearch(request: SearchRequest): Promise<SearchRespon
       results: [],
       total: 0,
     };
+  }
+}
+
+export async function runDtcFetch(request: RunDtcFetchRequest): Promise<DtcCreateTaskResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+
+  try {
+    let response: Response;
+
+    if (request.mode === 'upload') {
+      response = await fetch(`${backendUrl}/dtc/tasks/upload-run`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imageSetId: request.imageSetId,
+          prompt: request.prompt,
+          threshold: request.threshold ?? 0.3,
+        }),
+      });
+    } else {
+      response = await fetch(`${backendUrl}/dtc/tasks/path`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: request.prompt,
+          threshold: request.threshold ?? 0.3,
+          backendPath: request.backendPath,
+        }),
+      });
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('DTC 获取错误:', errorBody);
+      throw new Error(`后端服务响应错误: ${response.status}`);
+    }
+
+    const result = await response.json();
+    return {
+      success: !!result?.success,
+      task: result?.task,
+      error: result?.error,
+    };
+  } catch (error: any) {
+    console.error('执行 DTC 数据获取时出错:', error);
+    return {
+      success: false,
+      error: error?.message || 'DTC 数据获取失败',
+    };
+  }
+}
+
+export async function listDtcTasks(): Promise<DtcTaskListResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  try {
+    const response = await fetch(`${backendUrl}/dtc/tasks`, { method: 'GET' });
+    if (!response.ok) throw new Error(`后端服务响应错误: ${response.status}`);
+    const result = await response.json();
+    return { success: !!result?.success, tasks: result?.tasks || [] };
+  } catch (error: any) {
+    return { success: false, tasks: [], error: error?.message || '获取任务列表失败' };
+  }
+}
+
+export async function getDtcTaskResults(taskId: string): Promise<DtcTaskResultsResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  try {
+    const response = await fetch(`${backendUrl}/dtc/tasks/${taskId}/results`, { method: 'GET' });
+    if (!response.ok) throw new Error(`后端服务响应错误: ${response.status}`);
+    const result = await response.json();
+    return {
+      success: !!result?.success,
+      task: result?.task,
+      results: Array.isArray(result?.results) ? result.results : [],
+    };
+  } catch (error: any) {
+    return { success: false, results: [], error: error?.message || '获取任务结果失败' };
+  }
+}
+
+export async function deleteDtcTask(taskId: string): Promise<DtcDeleteTaskResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  try {
+    const response = await fetch(`${backendUrl}/dtc/tasks/${taskId}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(errorBody || `后端服务响应错误: ${response.status}`);
+    }
+    const result = await response.json();
+    return {
+      success: !!result?.success,
+      task_id: result?.task_id,
+      deleted_paths: result?.deleted_paths || [],
+    };
+  } catch (error: any) {
+    return { success: false, error: error?.message || '删除任务失败' };
+  }
+}
+
+export async function uploadDtcImageSetChunk(
+  files: File[],
+  imageSetId?: string
+): Promise<DtcImageSetUploadResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  try {
+    const formData = new FormData();
+    if (imageSetId) formData.append('imageSetId', imageSetId);
+    files.forEach((file) => formData.append('files', file));
+    const response = await fetch(`${backendUrl}/dtc/image-sets/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(errorBody || `后端服务响应错误: ${response.status}`);
+    }
+    const result = await response.json();
+    return { success: !!result?.success, imageSet: result?.imageSet };
+  } catch (error: any) {
+    return { success: false, error: error?.message || '上传图片集失败' };
+  }
+}
+
+export async function listDtcImageSets(): Promise<DtcImageSetListResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  try {
+    const response = await fetch(`${backendUrl}/dtc/image-sets`, { method: 'GET' });
+    if (!response.ok) throw new Error(`后端服务响应错误: ${response.status}`);
+    const result = await response.json();
+    return { success: !!result?.success, imageSets: result?.imageSets || [] };
+  } catch (error: any) {
+    return { success: false, imageSets: [], error: error?.message || '获取图片集失败' };
+  }
+}
+
+export async function deleteDtcImageSet(imageSetId: string): Promise<DtcDeleteImageSetResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  try {
+    const response = await fetch(`${backendUrl}/dtc/image-sets/${imageSetId}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(errorBody || `后端服务响应错误: ${response.status}`);
+    }
+    const result = await response.json();
+    return {
+      success: !!result?.success,
+      image_set_id: result?.image_set_id,
+      deleted_paths: result?.deleted_paths || [],
+    };
+  } catch (error: any) {
+    return { success: false, error: error?.message || '删除图片集失败' };
   }
 }

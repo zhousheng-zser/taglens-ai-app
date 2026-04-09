@@ -312,7 +312,24 @@ def process_archive(archive_file):
                 except Exception as e:
                     print(f"⚠️ 提取相机编号失败: {e}")
 
-        
+                row_sz_name_by_event = {}
+                try:
+                    for subfile_scan in os.listdir(TMP_SECOND):
+                        if not (
+                            subfile_scan.startswith("row_")
+                            and subfile_scan.lower().endswith(".json")
+                        ):
+                            continue
+                        event_stem = subfile_scan[4:-5]
+                        row_path = os.path.join(TMP_SECOND, subfile_scan)
+                        with open(row_path, "r", encoding="utf-8") as rf:
+                            row_data = json.load(rf)
+                        szn = row_data.get("sz_name")
+                        if szn and str(szn).strip():
+                            row_sz_name_by_event[event_stem] = str(szn).strip()
+                except Exception as e:
+                    print(f"⚠️ 解析 row_*.json 的 sz_name 失败: {e}")
+
                 # 上传文件并调用后端接口处理
                 for subfile in os.listdir(TMP_SECOND):
                     subfile_path = os.path.join(TMP_SECOND, subfile)
@@ -327,6 +344,8 @@ def process_archive(archive_file):
                         }
                         
                         try:
+                            jpg_stem = os.path.splitext(subfile)[0]
+                            sz_from_row = row_sz_name_by_event.get(jpg_stem)
                             # 准备请求数据
                             with open(subfile_path, 'rb') as img_file:
                                 files = {'file': (subfile, img_file, 'image/jpeg')}
@@ -335,6 +354,8 @@ def process_archive(archive_file):
                                     'threshold': 0.8188,
                                     'camera_id': camera_id
                                 }
+                                if sz_from_row:
+                                    data['sz_name'] = sz_from_row
                                 
                                 # 调用后端接口
                                 response = session.post(

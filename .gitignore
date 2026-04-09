@@ -62,3 +62,8 @@ tmp*
 *.log
 *.tar.gz
 .vscode/
+
+
+/sam3/input
+/sam3/output
+/sam3/sam3_pt

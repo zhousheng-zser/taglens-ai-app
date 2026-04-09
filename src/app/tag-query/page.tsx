@@ -2,12 +2,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { ParticleBackground } from '@/components/ParticleBackground';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { Calendar as CalendarIcon, Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid } from 'lucide-react';
+import { Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid } from 'lucide-react';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths, endOfDay, startOfDay } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
@@ -44,6 +44,8 @@ export default function TagQueryPage() {
     const [endDate, setEndDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
     const [startTime, setStartTime] = useState<string>('00:00:00');
     const [endTime, setEndTime] = useState<string>('23:59:59');
+    const [cameraNameFilter, setCameraNameFilter] = useState<string>('');
+    const [bizCategoryFilter, setBizCategoryFilter] = useState<string>('');
 
     const [selectedRange, setSelectedRange] = useState<string>('today');
     const [results, setResults] = useState<ImageSearchResult[]>([]);
@@ -128,6 +130,8 @@ export default function TagQueryPage() {
             const response = await handleSearch({
                 startDate: startDate ? `${startDate}T${startTime}` : undefined,
                 endDate: endDate ? `${endDate}T${endTime}` : undefined,
+                cameraName: cameraNameFilter.trim() || undefined,
+                bizCategory: bizCategoryFilter.trim() || undefined,
                 page: targetPage,
                 pageSize: pageSize,
             });
@@ -172,6 +176,8 @@ export default function TagQueryPage() {
                 const response = await handleSearch({
                     startDate: `${startStr}T${startT}`,
                     endDate: `${endStr}T${endT}`,
+                    cameraName: cameraNameFilter.trim() || undefined,
+                    bizCategory: bizCategoryFilter.trim() || undefined,
                     page: 1,
                     pageSize: pageSize,
                 });
@@ -189,6 +195,8 @@ export default function TagQueryPage() {
     // 重置表单
     const handleReset = () => {
         handleQuickRangeSelect('today');
+        setCameraNameFilter('');
+        setBizCategoryFilter('');
         setPage(1);
         setTimeout(() => fetchResults(1), 100);
     };
@@ -205,6 +213,8 @@ export default function TagQueryPage() {
             const response = await handleSearch({
                 startDate: startDate ? `${startDate}T${startTime}` : undefined,
                 endDate: endDate ? `${endDate}T${endTime}` : undefined,
+                cameraName: cameraNameFilter.trim() || undefined,
+                bizCategory: bizCategoryFilter.trim() || undefined,
                 page: 1,
                 pageSize: size, // 使用新的 size 值
             });
@@ -265,28 +275,14 @@ export default function TagQueryPage() {
     };
 
     return (
-        <div className="relative min-h-screen py-6 space-y-8 animate-in fade-in-50 duration-500">
+        <div className="relative min-h-screen py-3 space-y-4 animate-in fade-in-50 duration-500">
             <ParticleBackground />
 
-            <div className="relative z-10 space-y-6">
-                <header className="flex flex-col gap-2">
-                    <h1 className="text-3xl font-bold tracking-tight text-foreground font-headline">
-                        标签数据查询
-                    </h1>
-                    <p className="text-muted-foreground">
-                        按时间范围检索数据库中存储的所有图片及其 AI 提取的标签结果。
-                    </p>
-                </header>
+            <div className="relative z-10 space-y-4">
 
                 {/* 筛选区域 */}
                 <Card className="border-border/40 bg-background/60 backdrop-blur-md shadow-xl">
-                    <CardHeader className="pb-3 border-b border-border/20">
-                        <CardTitle className="text-lg font-medium flex items-center gap-2">
-                            <CalendarIcon className="h-5 w-5 text-primary" />
-                            查询条件
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="pt-6 space-y-6">
+                    <CardContent className="pt-4 space-y-6">
                         {/* 快捷按钮 */}
                         <div className="flex flex-wrap items-center gap-3">
                             <span className="text-sm font-medium text-muted-foreground mr-2">保存时间</span>
@@ -307,8 +303,26 @@ export default function TagQueryPage() {
                         </div>
 
                         <div className="space-y-3 bg-background/20 p-4 rounded-lg border border-border/20">
-                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-                                <div className="space-y-2">
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+                                <div className="space-y-2 md:col-span-3">
+                                    <label className="text-xs font-medium text-muted-foreground">相机名</label>
+                                    <Input
+                                        value={cameraNameFilter}
+                                        onChange={(e) => setCameraNameFilter(e.target.value)}
+                                        placeholder="例如：下立交"
+                                        className="h-8 bg-background/40 border-border/40 text-xs"
+                                    />
+                                </div>
+                                <div className="space-y-2 md:col-span-3">
+                                    <label className="text-xs font-medium text-muted-foreground">业态目录</label>
+                                    <Input
+                                        value={bizCategoryFilter}
+                                        onChange={(e) => setBizCategoryFilter(e.target.value)}
+                                        placeholder="例如：快速路"
+                                        className="h-8 bg-background/40 border-border/40 text-xs"
+                                    />
+                                </div>
+                                <div className="space-y-2 md:col-span-2">
                                     <label className="text-xs font-medium text-muted-foreground">开始日期</label>
                                     <Input
                                         type="date"
@@ -317,10 +331,10 @@ export default function TagQueryPage() {
                                             setStartDate(e.target.value);
                                             setSelectedRange('custom');
                                         }}
-                                        className="h-9 bg-background/40 border-border/40 text-sm"
+                                        className="h-8 bg-background/40 border-border/40 text-xs"
                                     />
                                 </div>
-                                <div className="space-y-2">
+                                <div className="space-y-2 md:col-span-2">
                                     <label className="text-xs font-medium text-muted-foreground">结束日期</label>
                                     <Input
                                         type="date"
@@ -329,24 +343,24 @@ export default function TagQueryPage() {
                                             setEndDate(e.target.value);
                                             setSelectedRange('custom');
                                         }}
-                                        className="h-9 bg-background/40 border-border/40 text-sm"
+                                        className="h-8 bg-background/40 border-border/40 text-xs"
                                     />
                                 </div>
-                                <div className="md:col-span-2 flex gap-3">
+                                <div className="flex gap-2 md:col-span-2">
                                     <Button
                                         onClick={() => fetchResults(1)}
-                                        className="flex-1 gap-2 h-9 shadow-lg shadow-primary/20"
+                                        className="flex-1 gap-1.5 h-8 text-xs shadow-lg shadow-primary/20"
                                         disabled={isLoading}
                                     >
-                                        <Search className="h-4 w-4" /> {isLoading ? '查询中...' : '查询'}
+                                        <Search className="h-3.5 w-3.5" /> {isLoading ? '查询中...' : '查询'}
                                     </Button>
                                     <Button
                                         variant="outline"
                                         onClick={handleReset}
-                                        className="gap-2 h-9 border-border/40 bg-background/20"
+                                        className="gap-1.5 h-8 text-xs border-border/40 bg-background/20"
                                         disabled={isLoading}
                                     >
-                                        <RotateCcw className="h-4 w-4" /> 重置
+                                        <RotateCcw className="h-3.5 w-3.5" /> 重置
                                     </Button>
                                 </div>
                             </div>
@@ -831,6 +845,18 @@ export default function TagQueryPage() {
                                             <span className="text-xs text-muted-foreground">文件路径</span>
                                             <p className="text-sm font-mono mt-1 break-all text-xs">{selectedImage.filePath}</p>
                                         </div>
+                                    <div>
+                                        <span className="text-xs text-muted-foreground">相机名</span>
+                                        <p className="text-sm font-medium mt-1 break-all">{selectedImage.szName || 'N/A'}</p>
+                                    </div>
+                                    <div>
+                                        <span className="text-xs text-muted-foreground">业态目录</span>
+                                        <p className="text-sm font-medium mt-1 break-all">
+                                            {(selectedImage.szTagRefs && selectedImage.szTagRefs.length > 0)
+                                                ? selectedImage.szTagRefs.join(' / ')
+                                                : 'N/A'}
+                                        </p>
+                                    </div>
                                     </div>
                                 </div>
                             </div>

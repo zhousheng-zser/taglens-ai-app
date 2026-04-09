@@ -16,7 +16,7 @@ if not hasattr(paramiko, "DSSKey"):
 
 from sshtunnel import SSHTunnelForwarder
 
-PDDY_PROJECT_NAMES = {"浦东道运视频质量诊断"}
+PDDY_PROJECT_NAMES = {"浦东道运视频质量诊断", "浦东道运"}
 
 class BusinessStructureManager:
     """
@@ -204,6 +204,25 @@ class BusinessStructureManager:
         full_path = "->".join(path_parts) if path_parts else "未分组"
         
         return (sz_name, full_path)
+
+    def get_camera_sz_and_tag_refs(self, ubi_short_id: int | str) -> Tuple[str, List[str]]:
+        """
+        根据 ubi_short_id 返回 (sz_name, [szTagRef1, szTagRef2, ...] 非空项)。
+        与业务结构缓存 _data_map 中 szTagRef1~3 一致。
+        """
+        key = str(ubi_short_id).strip()
+        if not key:
+            return ("未知设备", [])
+        info = self._data_map.get(key)
+        if not info:
+            return (f"未知设备({key})", [])
+        sz_name = (info.get("sz_name") or "").strip() or "未知名称"
+        refs: List[str] = []
+        for ref_key in ("szTagRef1", "szTagRef2", "szTagRef3"):
+            val = info.get(ref_key)
+            if val is not None and str(val).strip():
+                refs.append(str(val).strip())
+        return (sz_name, refs)
 
 
 class PDDYBusinessStructureManager(BusinessStructureManager):
