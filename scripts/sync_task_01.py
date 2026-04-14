@@ -20,6 +20,49 @@ import requests
 from sshtunnel import SSHTunnelForwarder
 
 
+def read_sz_name_from_row_json(row_path: str):
+    """
+    读取 row_*.json 中的 sz_name。若整文件非严格 JSON（常见：字段值含 \\0 等非法转义），
+    则仅按字节扫描提取 sz_name 字段，避免 json.load 整表失败。
+    """
+    try:
+        with open(row_path, "r", encoding="utf-8") as rf:
+            text = rf.read()
+    except Exception:
+        return None
+    try:
+        row_data = json.loads(text)
+        szn = row_data.get("sz_name")
+        if szn is not None and str(szn).strip():
+            return str(szn).strip()
+        return None
+    except json.JSONDecodeError:
+        pass
+    pos = text.find('"sz_name"')
+    if pos < 0:
+        return None
+    colon = text.find(":", pos)
+    if colon < 0:
+        return None
+    q = text.find('"', colon)
+    if q < 0:
+        return None
+    start = q + 1
+    out = []
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i : i + 2])
+            i += 2
+            continue
+        if c == '"':
+            return "".join(out).strip() or None
+        out.append(c)
+        i += 1
+    return "".join(out).strip() or None
+
+
 # 设置 NO_PROXY 环境变量，确保 localhost 请求不走代理
 os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
 os.environ['no_proxy'] = 'localhost,127.0.0.1'
@@ -322,11 +365,9 @@ def process_archive(archive_file):
                             continue
                         event_stem = subfile_scan[4:-5]
                         row_path = os.path.join(TMP_SECOND, subfile_scan)
-                        with open(row_path, "r", encoding="utf-8") as rf:
-                            row_data = json.load(rf)
-                        szn = row_data.get("sz_name")
-                        if szn and str(szn).strip():
-                            row_sz_name_by_event[event_stem] = str(szn).strip()
+                        szn = read_sz_name_from_row_json(row_path)
+                        if szn:
+                            row_sz_name_by_event[event_stem] = szn
                 except Exception as e:
                     print(f"⚠️ 解析 row_*.json 的 sz_name 失败: {e}")
 
@@ -351,7 +392,7 @@ def process_archive(archive_file):
                                 files = {'file': (subfile, img_file, 'image/jpeg')}
                                 data = {
                                     'project_name': PROJECT_NAME,
-                                    'threshold': 0.8188,
+                                    'threshold': 0.7409,
                                     'camera_id': camera_id
                                 }
                                 if sz_from_row:

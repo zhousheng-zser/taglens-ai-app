@@ -12,6 +12,11 @@ echo ""
 cd "$(dirname "$0")/backend"
 source venv/bin/activate
 
+# 强制 HuggingFace/Transformers 离线，避免后台自动转换线程访问外网报错。
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+
 echo "正在初始化数据库..."
 python3 -c "from core.database import init_database; init_database()" || echo "⚠ 数据库初始化可能失败"
 

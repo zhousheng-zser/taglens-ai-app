@@ -45,7 +45,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export default function BulkImportPage() {
-  const [threshold, setThreshold] = useState(0.8188);
+  const [threshold, setThreshold] = useState(0.7409);
   const [importDirectory, setImportDirectory] = useState('./data/local/img');
   const [allJobs, setAllJobs] = useState<BulkImportJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
@@ -310,11 +310,11 @@ export default function BulkImportPage() {
                     max="1"
                     step="0.01"
                     value={threshold}
-                    onChange={(e) => setThreshold(parseFloat(e.target.value) || 0.8188)}
+                    onChange={(e) => setThreshold(parseFloat(e.target.value) || 0.7409)}
                     className="w-32"
                   />
                   <span className="text-sm text-muted-foreground">
-                    (0-1，默认 0.8188)
+                    (0-1，默认 0.7409)
                   </span>
                 </div>
               </div>

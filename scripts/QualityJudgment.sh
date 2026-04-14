@@ -182,31 +182,30 @@ while IFS="$TAB" read -r -a values; do
     img_id=""
     if [ "$img_id_idx" -ge 0 ]; then img_id="${values[$img_id_idx]}"; fi
 
-    # 生成 JSON
+    # 生成 JSON（必须按列遍历：此前误用 for 循环结束后的 $i，已越界，导致 key/val 为空 → {} / {"":""}）
     json="{"
     jsonTwo="{"
-    key="${headers[$i]}"
-    val="${values[$i]}"
+    for ((i=0; i<${#headers[@]}; i++)); do
+        key="${headers[$i]}"
+        val="${values[$i]:-}"
 
-    # 仅对相机名称做 GBK -> UTF-8
-    if [ "$key" = "sz_name" ]; then
-    val="$(printf '%s' "$val" | iconv -f gbk -t utf-8 2>/dev/null || printf '%s' "$val")"
-    fi
+        # 仅对相机名称做 GBK -> UTF-8
+        if [ "$key" = "sz_name" ]; then
+            val="$(printf '%s' "$val" | iconv -f gbk -t utf-8 2>/dev/null || printf '%s' "$val")"
+        fi
 
-    # 再做转义（转码后再转义）
-    val="$(printf '%s' "$val" | sed 's/"/\\"/g')"
+        # 再做转义：先反斜杠再引号。否则 MySQL 里如 \0、路径等会产生非法 JSON（Invalid \escape）
+        val="$(printf '%s' "$val" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')"
 
-    json+="\"$key\":\"$val\""
-    if [ $i -lt $((${#headers[@]} - 1)) ]; then json+=","; fi
+        json+="\"$key\":\"$val\""
+        if [ $i -lt $((${#headers[@]} - 1)) ]; then json+=","; fi
 
-    case "$key" in
-    "sz_name") jsonTwo+="\"相机名称\":\"$val\", " ;;
-    "vei_ubi_short_id") jsonTwo+="\"相机短编号\":\"$val\", " ;;
-    "vei_ubi_detect_time") jsonTwo+="\"检测时间\":\"$val\", " ;;
-    esac
-    # (此处省略 jsonTwo 的 case 转换以节省空间，逻辑同原脚本)
-    # ...
-    
+        case "$key" in
+        "sz_name") jsonTwo+="\"相机名称\":\"$val\", " ;;
+        "vei_ubi_short_id") jsonTwo+="\"相机短编号\":\"$val\", " ;;
+        "vei_ubi_detect_time") jsonTwo+="\"检测时间\":\"$val\", " ;;
+        esac
+    done
     json+="}"
     jsonTwo=$(echo "$jsonTwo" | sed 's/, $//')
     jsonTwo+="}"

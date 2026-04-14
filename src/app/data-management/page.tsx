@@ -430,11 +430,11 @@ export default function DataManagementPage() {
                                     />
                                 </div>
 
-                                <div className="grid grid-cols-2 gap-3">
+                                <div className="grid grid-cols-3 gap-3">
                                     {isReextractRunning ? (
                                         <>
                                             <Button
-                                                className="col-span-2 w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-cyan-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
+                                                className="col-span-3 w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-cyan-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
                                                 onClick={openReextractLogStream}
                                             >
                                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -477,6 +477,23 @@ export default function DataManagementPage() {
                                             >
                                                 <Sparkles className="h-4 w-4 mr-2" />
                                                 千问 补齐
+                                            </Button>
+                                            <Button
+                                                className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                                disabled={!reextractLimit.trim() || (isProcessing && showLogModal)}
+                                                onClick={() => {
+                                                    setIsReextractRunning(true);
+                                                    runStreamTask(
+                                                        '/api/management/reextract-tags',
+                                                        { model: 'codex', limit: parseInt(reextractLimit || '2000', 10) || 2000 },
+                                                        '缺失标签补齐 (Codex)'
+                                                    ).finally(() => {
+                                                        setIsReextractRunning(false);
+                                                    });
+                                                }}
+                                            >
+                                                <Sparkles className="h-4 w-4 mr-2" />
+                                                Codex 补齐
                                             </Button>
                                         </>
                                     )}

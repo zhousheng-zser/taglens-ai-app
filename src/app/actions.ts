@@ -16,7 +16,7 @@ interface ActionResult {
 
 interface AnalyzeImageInput {
   photoDataUri: string;
-  model?: 'qwen' | 'gemini' | 'both';
+  model?: 'qwen' | 'gemini' | 'codex' | 'both';
 }
 
 interface SaveImageInput {
@@ -229,7 +229,7 @@ export interface BulkImportLogsResponse {
 }
 
 // 新建批量导入任务
-export async function createBulkImportJob(threshold: number = 0.8188, directory: string = './data/local/img'): Promise<BulkImportStatusResponse> {
+export async function createBulkImportJob(threshold: number = 0.7409, directory: string = './data/local/img'): Promise<BulkImportStatusResponse> {
   const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
   const url = `${backendUrl}/bulk-import/create`;
 

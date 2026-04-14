@@ -6,6 +6,10 @@ import asyncio
 import time
 import base64
 import uuid
+import shlex
+import shutil
+import subprocess
+import tempfile
 import threading
 import traceback
 import threading
@@ -61,6 +65,7 @@ from services.business_structure_manager import get_business_manager_for_project
 
 # 加载环境变量
 load_dotenv()
+PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 import numpy as np
 
@@ -216,7 +221,7 @@ BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 # --- Pydantic 模型定义 ---
 class ImageAnalysisRequest(BaseModel):
     image: str # Base64 data URI
-    model: str = "qwen"  # 可选值: "qwen", "gemini", "both"
+    model: str = "qwen"  # 可选值: "qwen", "gemini", "codex", "both"
 
 class SemanticSearch(BaseModel):
     description: str
@@ -290,7 +295,7 @@ class SearchResponse(BaseModel):
 
 class ImageSimilarityCheckRequest(BaseModel):
     image: str  # Base64 data URI
-    threshold: Optional[float] = 0.8188  # 相似度阈值,默认0.8188（81.88%）
+    threshold: Optional[float] = 0.7409  # 相似度阈值,默认0.7409（74.09%）
     max_results: Optional[int] = 5  # 最多返回几个相似图片
 
 class SimilarImageResult(BaseModel):
@@ -311,7 +316,7 @@ class ImageSimilarityCheckResponse(BaseModel):
 
 # --- 批量导入模型 ---
 class BulkImportStartRequest(BaseModel):
-    threshold: Optional[float] = 0.8188  # 默认 81.88%
+    threshold: Optional[float] = 0.7409  # 默认 74.09%
     directory: Optional[str] = None  # 默认 ./data/local/img
 
 
@@ -1046,6 +1051,144 @@ def call_gemini_vision_api(api_key: str, data_uri: str, prompt: str):
         raise HTTPException(status_code=500, detail=f"调用Gemini视觉模型时出错: {e}")
 
 
+CODEX_LOCAL_WORKDIR = os.getenv("CODEX_WORKDIR", str(Path(__file__).resolve().parent.parent / "data" / "codex_tmp"))
+CODEX_LOCAL_HTTP_PROXY = os.getenv("HTTP_PROXY", "http://192.168.2.245:10808")
+CODEX_LOCAL_HTTPS_PROXY = os.getenv("HTTPS_PROXY", "http://192.168.2.245:10808")
+CODEX_MODEL = os.getenv("CODEX_MODEL", "").strip()
+
+
+def _run_cmd(cmd: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=cwd, env=env)
+
+
+def _ensure_local_codex_workdir() -> Path:
+    wd = Path(CODEX_LOCAL_WORKDIR).expanduser().resolve()
+    wd.mkdir(parents=True, exist_ok=True)
+    test_file = wd / ".codex_write_test"
+    test_file.write_text("ok", encoding="utf-8")
+    test_file.unlink(missing_ok=True)
+    return wd
+
+
+def _extract_json_from_text(text: str) -> dict[str, Any]:
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Codex 返回为空")
+    if "```json" in raw:
+        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in raw:
+        raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        l = raw.find("{")
+        r = raw.rfind("}")
+        if l >= 0 and r > l:
+            return json.loads(raw[l : r + 1])
+        raise
+
+
+def _normalize_codex_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    semantic = payload.get("semantic_search")
+    training = payload.get("training_data")
+    if not isinstance(semantic, dict) or not isinstance(training, dict):
+        raise ValueError("Codex 返回缺少 semantic_search 或 training_data")
+
+    description = semantic.get("description", "")
+    keywords = semantic.get("keywords", [])
+    qwen_captions = training.get("qwen_captions", {})
+    yolo_objects = training.get("yolo_objects", [])
+
+    if not isinstance(description, str):
+        description = str(description)
+    if not isinstance(keywords, list):
+        keywords = []
+    if not isinstance(qwen_captions, (dict, list)):
+        qwen_captions = {}
+    if not isinstance(yolo_objects, list):
+        yolo_objects = []
+
+    return {
+        "semantic_search": {
+            "description": description,
+            "keywords": [str(k).strip() for k in keywords if str(k).strip()],
+        },
+        "training_data": {
+            "qwen_captions": qwen_captions,
+            "yolo_objects": [str(x).strip() for x in yolo_objects if str(x).strip()],
+        },
+    }
+
+
+def call_codex_vision_api(data_uri: str, prompt: str) -> dict[str, Any]:
+    """
+    通过本机 codex exec 分析单张图片。
+    """
+    if "," not in data_uri:
+        raise HTTPException(status_code=400, detail="无效图片数据")
+    if shutil.which("codex") is None:
+        raise HTTPException(status_code=500, detail="缺少依赖 codex CLI")
+
+    head, b64 = data_uri.split(",", 1)
+    ext = ".jpg"
+    if "image/png" in head:
+        ext = ".png"
+    elif "image/webp" in head:
+        ext = ".webp"
+    elif "image/gif" in head:
+        ext = ".gif"
+
+    workdir = _ensure_local_codex_workdir()
+    local_img: Path | None = None
+    local_out: Path | None = None
+    try:
+        unique = uuid.uuid4().hex[:10]
+        local_img = workdir / f"img_{unique}{ext}"
+        local_out = workdir / f"img_{unique}.result.txt"
+        local_img.write_bytes(base64.b64decode(b64))
+
+        cmd = [
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "-i",
+            str(local_img),
+            "-o",
+            str(local_out),
+        ]
+        if CODEX_MODEL:
+            cmd.extend(["-m", CODEX_MODEL])
+        cmd.append(prompt)
+
+        env = os.environ.copy()
+        env["HTTP_PROXY"] = CODEX_LOCAL_HTTP_PROXY
+        env["HTTPS_PROXY"] = CODEX_LOCAL_HTTPS_PROXY
+        env["http_proxy"] = CODEX_LOCAL_HTTP_PROXY
+        env["https_proxy"] = CODEX_LOCAL_HTTPS_PROXY
+
+        ret = _run_cmd(cmd, cwd=str(workdir), env=env)
+        if ret.returncode != 0:
+            raise RuntimeError(f"本地 codex 执行失败: {(ret.stderr or ret.stdout).strip()}")
+        if not local_out.exists():
+            raise RuntimeError(f"本地 codex 输出文件不存在: {local_out}")
+
+        payload = _extract_json_from_text(local_out.read_text(encoding="utf-8", errors="replace"))
+        return _normalize_codex_payload(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error calling Codex Vision API: {e}")
+        raise HTTPException(status_code=500, detail=f"调用Codex视觉模型时出错: {e}")
+    finally:
+        try:
+            if local_img and local_img.exists():
+                local_img.unlink()
+            if local_out and local_out.exists():
+                local_out.unlink()
+        except Exception:
+            pass
+
+
 def test_qwen_connection():
     """在启动时测试与通义千问的连接"""
     print("-" * 50)
@@ -1150,7 +1293,7 @@ async def check_image_similarity(request: ImageSimilarityCheckRequest):
             )
         
         # 设置阈值
-        threshold = request.threshold or 0.8188
+        threshold = request.threshold or 0.7409
         
         # 使用 Faiss LSH 快速检查是否存在相似图片（只找最相似的1个）
         exists, max_similarity, similar_uuid = faiss_manager.check_similarity_exists(query_vector, threshold)
@@ -1252,7 +1395,7 @@ async def create_bulk_import_job_api(request: BulkImportStartRequest, background
     """创建新的批量导入任务并自动开始"""
     try:
         directory = request.directory if request.directory else "./data/local/img"
-        threshold = request.threshold or 0.8188
+        threshold = request.threshold or 0.7409
         
         job = create_bulk_import_job(threshold=threshold, directory=directory)
         job_id = job.get('id')
@@ -1291,7 +1434,7 @@ async def resume_bulk_import(request: BulkImportActionRequest, background_tasks:
     # 设置为 pending 再拉起
     update_bulk_import_job_status(job_id, "pending", current_file=None, last_error=None)
     directory = Path(job.get("directory") or BULK_IMPORT_DEFAULT_DIR)
-    threshold = job.get("threshold") or 0.8188
+    threshold = job.get("threshold") or 0.7409
     background_tasks.add_task(run_bulk_import_job, job_id, directory, threshold)
     return BulkImportStatusResponse(success=True, job=get_bulk_import_job(job_id))
 
@@ -1466,6 +1609,21 @@ async def analyze_image(request: ImageAnalysisRequest):
             print(f"处理图片时发生错误: {e}")
             raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
     
+    elif model == "codex":
+        default_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
+        try:
+            analysis_result = await asyncio.to_thread(
+                call_codex_vision_api,
+                request.image,
+                default_prompt
+            )
+            validated_result = TrafficAnalysisOutput(**analysis_result)
+            return validated_result
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            print(f"处理图片时发生错误: {e}")
+            raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
     else:  # 默认使用 qwen
         api_key = os.getenv("QWEN_API_KEY")
         if not api_key :
@@ -1894,13 +2052,13 @@ async def process_uploaded_image_api(
     timestamp: Optional[str] = Form(None),
     camera_id: Optional[str] = Form(None),
     sz_name: Optional[str] = Form(None),
-    threshold: float = Form(0.8188)
+    threshold: float = Form(0.7409)
 ):
     """
     接收上传的图片，执行完整处理流程：
     1. 去重 (Faiss)
     2. 上传 MinIO
-    3. AI 分析 (Qwen)
+    3. AI 分析 (Qwen/Gemini/CodeX)
     4. 入库 (MySQL/SQLite)
     """
     ai_error_message: Optional[str] = None
@@ -2015,6 +2173,13 @@ async def process_uploaded_image_api(
                             data_uri,
                             final_prompt
                         )
+                elif use_model == 'codex':
+                    analysis_result = await loop.run_in_executor(
+                        None,
+                        call_codex_vision_api,
+                        data_uri,
+                        final_prompt
+                    )
                 else:
                     # Default to Gemini
                     gemini_key = os.getenv("GEMINI_API_KEY")
@@ -2137,7 +2302,6 @@ async def process_uploaded_image_api(
 
 
 # --- 项目脚本执行管理 ---
-import subprocess
 import collections
 import threading
 import os
@@ -2161,15 +2325,12 @@ async def run_project_script_api(
     
     if ".." in script_path or script_path.startswith("/"):
         abs_path = os.path.abspath(script_path)
-        project_root = os.path.abspath(os.getcwd())
+        project_root = os.path.abspath(PROJECT_ROOT)
         if not abs_path.startswith(project_root):
-             if not abs_path.startswith("/opt/Traffic-LLM/zser/taglens-ai-app"):
-                  return {"success": False, "message": "非法脚本路径"}
+             return {"success": False, "message": "非法脚本路径"}
     
-    # 1. 确定工作目录
-    cwd = os.getcwd()
-    if "/opt/Traffic-LLM/zser/taglens-ai-app" not in cwd:
-            cwd = "/opt/Traffic-LLM/zser/taglens-ai-app"
+    # 1. 确定工作目录（使用当前代码所在项目根目录，避免机器迁移后路径失效）
+    cwd = PROJECT_ROOT
     
     # 2. 准备日志文件
     log_dir = os.path.join(cwd, "logs")
@@ -2197,9 +2358,12 @@ async def run_project_script_api(
         f_out = open(log_file, 'a')
         
         # 构建命令
+        # 使用固定 venv 解释器，避免 activate 后仍命中系统 python3
+        venv_python = os.path.join(cwd, "backend", "venv", "bin", "python")
+        if not os.path.exists(venv_python):
+            return {"success": False, "message": f"未找到虚拟环境解释器: {venv_python}"}
         # 使用 exec 确保 python 进程替换 bash，这样 PID 才是 python 的，方便 pkill
-        activate_cmd = "source backend/venv/bin/activate"
-        run_cmd = f"{activate_cmd} && exec python3 -u {script_path}"
+        run_cmd = f"exec {shlex.quote(venv_python)} -u {shlex.quote(script_path)}"
         
         process = subprocess.Popen(
             ["bash", "-c", run_cmd],
@@ -2271,9 +2435,7 @@ async def stop_project_script_api(
         subprocess.check_call(cmd)
         
         # 记录停止操作到日志（如果可能）
-        cwd = os.getcwd()
-        if "/opt/Traffic-LLM/zser/taglens-ai-app" not in cwd:
-             cwd = "/opt/Traffic-LLM/zser/taglens-ai-app"
+        cwd = PROJECT_ROOT
         log_file = os.path.join(cwd, "logs", f"{os.path.basename(script_path)}.log")
         if os.path.exists(log_file):
             with open(log_file, "a") as f:
@@ -2296,9 +2458,7 @@ async def get_project_logs_api(script_path: str = Query(...)):
     """获取脚本日志"""
     
     # 1. 确定日志路径
-    cwd = os.getcwd()
-    if "/opt/Traffic-LLM/zser/taglens-ai-app" not in cwd:
-            cwd = "/opt/Traffic-LLM/zser/taglens-ai-app"
+    cwd = PROJECT_ROOT
     log_file = os.path.join(cwd, "logs", f"{os.path.basename(script_path)}.log")
     
     # 2. 检查进程状态
@@ -2344,12 +2504,10 @@ async def check_script_api(script_path: str = Query(...)):
     if ".." in script_path or script_path.startswith("/"):
         abs_path = os.path.abspath(script_path)
         # 简单检查
-        if not abs_path.startswith("/opt/Traffic-LLM/zser/taglens-ai-app"):
+        if not abs_path.startswith(os.path.abspath(PROJECT_ROOT)):
              return {"exists": False, "message": "非法路径"}
     
-    cwd = os.getcwd()
-    if "/opt/Traffic-LLM/zser/taglens-ai-app" not in cwd:
-         cwd = "/opt/Traffic-LLM/zser/taglens-ai-app"
+    cwd = PROJECT_ROOT
     
     # 确保是相对路径拼接
     if script_path.startswith("/"):
@@ -2370,9 +2528,7 @@ async def read_script_api(script_path: str = Query(...)):
     if not (script_path.endswith('.py') or script_path.endswith('.sh')):
          return {"success": False, "message": "不支持的文件类型"}
 
-    cwd = os.getcwd()
-    if "/opt/Traffic-LLM/zser/taglens-ai-app" not in cwd:
-         cwd = "/opt/Traffic-LLM/zser/taglens-ai-app"
+    cwd = PROJECT_ROOT
     
     if script_path.startswith("/"):
         script_path = script_path.lstrip("/")
@@ -2398,9 +2554,7 @@ async def get_projects_api():
     projects = get_all_projects_db()
     
     # 检查脚本是否存在
-    cwd = os.getcwd()
-    if "/opt/Traffic-LLM/zser/taglens-ai-app" not in cwd:
-         cwd = "/opt/Traffic-LLM/zser/taglens-ai-app"
+    cwd = PROJECT_ROOT
             
     final_list = []
     for p in projects:

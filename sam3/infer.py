@@ -226,9 +226,11 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading model on {device}...")
     
-    model = Sam3Model.from_pretrained("./sam3_pt").to(device)
-    processor = Sam3Processor.from_pretrained("./sam3_pt")
+    model = Sam3Model.from_pretrained("./sam3_pt", ignore_mismatched_sizes=True).to(device)
+    processor = Sam3Processor.from_pretrained("./sam3_pt", ignore_mismatched_sizes=True)
     model.eval()
+    # 打印模型参数实际所在设备，确认最终跑在 CPU 还是 GPU。
+    print(f"Model actual device: {next(model.parameters()).device}")
     
     print(f"Starting batch processing...")
     print("-" * 50)

@@ -204,7 +204,11 @@ export default function ProjectSyncPage() {
         try {
             const res = await updateProjectModel(selectedProject.id, value);
             if (res.success) {
-                toast({ title: '模型已更新', description: `项目现在使用: ${value === 'qwen' ? '通义千问' : 'Gemini'}` });
+                const modelLabel =
+                    value === 'qwen' ? '通义千问' :
+                    value === 'codex' ? 'CodeX' :
+                    'Gemini';
+                toast({ title: '模型已更新', description: `项目现在使用: ${modelLabel}` });
             } else {
                 toast({ title: '更新失败', description: res.message, variant: 'destructive' });
             }
@@ -537,6 +541,7 @@ export default function ProjectSyncPage() {
                                         <SelectContent>
                                             <SelectItem value="qwen">Qwen (通义千问)</SelectItem>
                                             <SelectItem value="gemini">Google Gemini</SelectItem>
+                                            <SelectItem value="codex">CodeX</SelectItem>
                                         </SelectContent>
                                     </Select>
                                 </div>

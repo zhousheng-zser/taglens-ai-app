@@ -16,7 +16,7 @@ from services import dtc_task_storage as storage
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 SAM3_ROOT = PROJECT_ROOT / "sam3"
 SAM3_INFER = SAM3_ROOT / "infer.py"
-PY_ENV_ACTIVATE = "/opt/Traffic-LLM/Lwen1243/MoE_exp/sam3/sam3_depend/bin/activate"
+VENV_PYTHON = PROJECT_ROOT / "backend" / "venv" / "bin" / "python"
 
 _dispatch_lock = threading.Lock()
 
@@ -46,6 +46,34 @@ def _build_task_paths(task_id: str, date_token: str) -> Dict[str, Path]:
 
 def _build_image_set_input_path(image_set_id: str, date_token: str) -> Path:
     return SAM3_ROOT / "input" / date_token / image_set_id
+
+
+def _resolve_backend_input_path(backend_path: str) -> Optional[Path]:
+    """
+    兼容前端传入的多种路径：
+    1) 绝对路径；
+    2) 项目内相对路径（相对 PROJECT_ROOT）；
+    3) 仅传 image_set_id，自动在 sam3/input 下递归定位。
+    """
+    raw = (backend_path or "").strip()
+    if not raw:
+        return None
+
+    candidates = [
+        Path(raw),
+        PROJECT_ROOT / raw,
+        SAM3_ROOT / "input" / raw,
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+
+    # 前端仅传 imageSetId 时，在 sam3/input/*/<imageSetId> 递归查找
+    recursive = list((SAM3_ROOT / "input").glob(f"**/{raw}"))
+    for p in recursive:
+        if p.exists():
+            return p.resolve()
+    return None
 
 
 def _save_upload_files(input_root: Path, files: List[Any]) -> None:
@@ -119,9 +147,10 @@ def create_upload_task_from_image_set(image_set_id: str, prompt: str, threshold:
 
 
 def create_path_task(backend_path: str, prompt: str, threshold: float) -> Dict[str, Any]:
-    if not backend_path or not Path(backend_path).exists():
+    resolved = _resolve_backend_input_path(backend_path)
+    if resolved is None:
         raise ValueError("backend_path 不存在")
-    task = _make_task_record("path", prompt, threshold, backend_path, "")
+    task = _make_task_record("path", prompt, threshold, str(resolved), "")
     paths = _build_task_paths(task["task_id"], task["date"])
     task["output_base"] = str(paths["output_base"])
     created = storage.create_task(task)
@@ -183,9 +212,11 @@ def _run_task(task: Dict[str, Any]) -> None:
     output_base = task["output_base"]
     Path(output_base).mkdir(parents=True, exist_ok=True)
 
+    if not VENV_PYTHON.exists():
+        raise RuntimeError(f"venv python 不存在: {VENV_PYTHON}")
+
     cmd = (
-        f"source {PY_ENV_ACTIVATE} && "
-        f"python \"{SAM3_INFER}\" "
+        f"\"{VENV_PYTHON}\" \"{SAM3_INFER}\" "
         f"-i \"{task['input_path']}\" "
         f"-o \"{output_base}\" "
         f"-t \"{task['prompt']}\" "

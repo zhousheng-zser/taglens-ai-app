@@ -335,7 +335,7 @@ async def check_features_endpoint():
 
 class ReextractTagsRequest(BaseModel):
     limit: int = 2000
-    model: str = "gemini"  # gemini | qwen
+    model: str = "gemini"  # gemini | qwen | codex
 
 
 async def reextract_tags_generator(limit: int, model: str):
@@ -349,7 +349,19 @@ async def reextract_tags_generator(limit: int, model: str):
         return
 
     project_root = Path(__file__).parent.parent.parent
-    script_path = project_root / "scripts" / "reextract_missing_tags_gemini.py"
+    model_normalized = (model or "").strip().lower()
+    script_name_by_model = {
+        "gemini": "reextract_missing_tags_gemini.py",
+        "qwen": "reextract_missing_tags_gemini.py",
+        "codex": "demo_codex_api.py",
+    }
+    script_name = script_name_by_model.get(model_normalized)
+    if not script_name:
+        yield format_log(f"不支持的模型: {model}", "error")
+        yield format_log("任务结束", "done")
+        return
+
+    script_path = project_root / "scripts" / script_name
     
     if not script_path.exists():
         msg = f"脚本文件不存在: {script_path}"
@@ -372,7 +384,7 @@ async def reextract_tags_generator(limit: int, model: str):
     except Exception as e:
         logger.warning(f"初始化缺失标签补齐日志文件失败: {e}")
 
-    start_msg = f"任务启动: 补齐缺失标签 (最新 {limit} 张, 模型: {model})"
+    start_msg = f"任务启动: 补齐缺失标签 (最新 {limit} 张, 模型: {model_normalized})"
     start_line = format_log(start_msg, "start")
     yield start_line
     try:
@@ -396,13 +408,13 @@ async def reextract_tags_generator(limit: int, model: str):
     env = os.environ.copy()
     env["REEXTRACT_MODE"] = "batch"
     env["REEXTRACT_LIMIT"] = str(limit)
-    if model == "gemini":
+    if model_normalized == "gemini":
         env["GEMINI_MODEL"] = "gemini-3-flash-preview"
     
     try:
         # 启动子进程
         process = subprocess.Popen(
-            [python_cmd, str(script_path)],
+            [python_cmd, "-u", str(script_path)],
             cwd=str(project_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
