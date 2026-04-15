@@ -1,3 +1,11 @@
+"""
+从minio下载指定bucket和prefix下的所有文件到本地目录
+Bucket：bucket-taglens
+Prefix：project_data/视频质量诊断/2026-01-14/
+本地保存：你执行命令时的当前目录下 minio/
+"""
+
+
 import os
 import sys
 from pathlib import Path
