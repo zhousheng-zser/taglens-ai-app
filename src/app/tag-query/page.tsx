@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ParticleBackground } from '@/components/ParticleBackground';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid } from 'lucide-react';
+import { Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid, Calendar } from 'lucide-react';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths, endOfDay, startOfDay } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
@@ -65,7 +65,18 @@ export default function TagQueryPage() {
         placement: 'bottom',
     });
     const tooltipTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+    const startDateInputRef = useRef<HTMLInputElement | null>(null);
+    const endDateInputRef = useRef<HTMLInputElement | null>(null);
     const { toast } = useToast();
+
+    const openDatePicker = (inputRef: React.RefObject<HTMLInputElement | null>) => {
+        const input = inputRef.current;
+        if (!input) return;
+        input.focus();
+        if (typeof input.showPicker === 'function') {
+            input.showPicker();
+        }
+    };
 
     // 处理快捷时间选择
     const handleQuickRangeSelect = (range: string) => {
@@ -324,27 +335,49 @@ export default function TagQueryPage() {
                                 </div>
                                 <div className="space-y-2 md:col-span-2">
                                     <label className="text-xs font-medium text-muted-foreground">开始日期</label>
-                                    <Input
-                                        type="date"
-                                        value={startDate}
-                                        onChange={(e) => {
-                                            setStartDate(e.target.value);
-                                            setSelectedRange('custom');
-                                        }}
-                                        className="h-8 bg-background/40 border-border/40 text-xs"
-                                    />
+                                    <div className="relative">
+                                        <Input
+                                            ref={startDateInputRef}
+                                            type="date"
+                                            value={startDate}
+                                            onChange={(e) => {
+                                                setStartDate(e.target.value);
+                                                setSelectedRange('custom');
+                                            }}
+                                            className="h-8 pr-10 bg-background/40 border-border/40 text-xs date-picker-visible-icon"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => openDatePicker(startDateInputRef)}
+                                            className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 rounded-md border border-primary/60 bg-primary/15 text-primary flex items-center justify-center hover:bg-primary/25 transition-colors"
+                                            aria-label="选择开始日期"
+                                        >
+                                            <Calendar className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="space-y-2 md:col-span-2">
                                     <label className="text-xs font-medium text-muted-foreground">结束日期</label>
-                                    <Input
-                                        type="date"
-                                        value={endDate}
-                                        onChange={(e) => {
-                                            setEndDate(e.target.value);
-                                            setSelectedRange('custom');
-                                        }}
-                                        className="h-8 bg-background/40 border-border/40 text-xs"
-                                    />
+                                    <div className="relative">
+                                        <Input
+                                            ref={endDateInputRef}
+                                            type="date"
+                                            value={endDate}
+                                            onChange={(e) => {
+                                                setEndDate(e.target.value);
+                                                setSelectedRange('custom');
+                                            }}
+                                            className="h-8 pr-10 bg-background/40 border-border/40 text-xs date-picker-visible-icon"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => openDatePicker(endDateInputRef)}
+                                            className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 rounded-md border border-primary/60 bg-primary/15 text-primary flex items-center justify-center hover:bg-primary/25 transition-colors"
+                                            aria-label="选择结束日期"
+                                        >
+                                            <Calendar className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="flex gap-2 md:col-span-2">
                                     <Button

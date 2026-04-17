@@ -96,3 +96,14 @@
     z-index: -1;
   }
 }
+
+@layer utilities {
+  .date-picker-visible-icon {
+    color-scheme: dark;
+  }
+
+  .date-picker-visible-icon::-webkit-calendar-picker-indicator {
+    opacity: 0;
+    pointer-events: none;
+  }
+}

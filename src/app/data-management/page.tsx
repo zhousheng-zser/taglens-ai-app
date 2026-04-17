@@ -6,10 +6,17 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
     Trash2, FileDiff, Database, Activity, Loader2, AlertTriangle, CheckCircle2, ShieldAlert,
-    Terminal, X, Check, AlertCircle, Info, Lock, ChevronRight, Sparkles
+    Terminal, X, Check, AlertCircle, Info, Lock, ChevronRight, Sparkles, Scissors, ChevronsUpDown
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import {
+    DropdownMenu,
+    DropdownMenuCheckboxItem,
+    DropdownMenuContent,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import type { EventOptionItem } from '@/types/event';
 
 // Log Entry Definition
 type LogType = 'info' | 'error' | 'success' | 'warning' | 'system' | 'start' | 'progress' | 'done';
@@ -28,6 +35,9 @@ export default function DataManagementPage() {
     const [checkPairPath, setCheckPairPath] = useState('');
     const [checkDbPath, setCheckDbPath] = useState('');
     const [reextractLimit, setReextractLimit] = useState('2000');
+    const [segmentLimit, setSegmentLimit] = useState('10');
+    const [segmentEventTypeOptions, setSegmentEventTypeOptions] = useState<EventOptionItem[]>([]);
+    const [selectedSegmentEventTypes, setSelectedSegmentEventTypes] = useState<string[]>([]);
 
     // Log Modal States
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -220,6 +230,25 @@ export default function DataManagementPage() {
         checkReextractStatus();
     }, []);
 
+    useEffect(() => {
+        const loadEventTypeOptions = async () => {
+            try {
+                const endpoint = process.env.NEXT_PUBLIC_API_URL
+                    ? `${process.env.NEXT_PUBLIC_API_URL}/events/meta`
+                    : `http://localhost:8000/events/meta`;
+                const res = await fetch(endpoint);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data?.success && Array.isArray(data?.eventTypeOptions)) {
+                    setSegmentEventTypeOptions(data.eventTypeOptions);
+                }
+            } catch {
+                // 不阻塞主流程
+            }
+        };
+        loadEventTypeOptions();
+    }, []);
+
     const getLogColor = (type: LogType) => {
         switch (type) {
             case 'start': return 'text-cyan-400 font-bold';
@@ -242,6 +271,13 @@ export default function DataManagementPage() {
             default: return <ChevronRight className="w-3 h-3 inline mr-2 opacity-50" />;
         }
     };
+
+    const segmentEventTypeLabel = selectedSegmentEventTypes.length > 0
+        ? segmentEventTypeOptions
+            .filter((item) => selectedSegmentEventTypes.includes(item.code))
+            .map((item) => item.name)
+            .join(' / ')
+        : '全部事件类型';
 
     return (
         <div className="min-h-screen w-full relative overflow-hidden bg-black text-slate-200 flex flex-col">
@@ -538,6 +574,82 @@ export default function DataManagementPage() {
                         </div>
                     </div>
 
+                    {/* Card 6: Event Video Segmentation */}
+                    <div className="group relative rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-950/20 to-transparent p-[1px] shadow-lg transition-all duration-300 hover:border-amber-500/40 hover:shadow-amber-900/10 flex flex-col">
+                        <div className="relative h-full bg-black/40 backdrop-blur-xl rounded-[15px] p-6 flex flex-col gap-5 transition-colors group-hover:bg-slate-900/40">
+                            <div className="flex items-center gap-4">
+                                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400">
+                                    <Scissors className="w-6 h-6" />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-white leading-tight">事件视频分块</h3>
+                                    <p className="text-xs uppercase tracking-wider text-amber-400/60 font-semibold mt-0.5">FFmpeg Segment</p>
+                                </div>
+                            </div>
+
+                            <p className="text-sm text-slate-400 leading-relaxed font-light min-h-[3em]">
+                                按 <span className="text-amber-300 font-mono">start_time</span> 倒序处理 N 条未分块视频，每 60 秒切分一段并回写分块元数据。
+                            </p>
+
+                            <div className="mt-auto space-y-4">
+                                <div className="space-y-2">
+                                    <Label htmlFor="segment-limit" className="text-xs text-slate-500 uppercase tracking-wider font-bold">Scope (处理N条)</Label>
+                                    <Input
+                                        id="segment-limit"
+                                        placeholder="10"
+                                        value={segmentLimit}
+                                        onChange={(e) => setSegmentLimit(e.target.value.replace(/[^\d]/g, ''))}
+                                        className="bg-slate-950/50 border-white/10 focus:border-amber-500/50 text-amber-100 placeholder:text-white/10 text-sm h-10 rounded-lg px-3 font-mono"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label className="text-xs text-slate-500 uppercase tracking-wider font-bold">事件类型筛选（可多选）</Label>
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button
+                                                variant="outline"
+                                                className="h-10 w-full justify-between bg-slate-950/50 border-white/10 text-amber-100 font-normal"
+                                            >
+                                                <span className="truncate text-left text-sm">{segmentEventTypeLabel}</span>
+                                                <ChevronsUpDown className="h-4 w-4 opacity-70" />
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent className="w-[320px] max-h-[320px] overflow-y-auto">
+                                            {segmentEventTypeOptions.map((type) => (
+                                                <DropdownMenuCheckboxItem
+                                                    key={type.code}
+                                                    checked={selectedSegmentEventTypes.includes(type.code)}
+                                                    onSelect={(event) => event.preventDefault()}
+                                                    onCheckedChange={(checked) => {
+                                                        setSelectedSegmentEventTypes((prev) =>
+                                                            checked ? [...prev, type.code] : prev.filter((item) => item !== type.code),
+                                                        );
+                                                    }}
+                                                >
+                                                    {type.name}
+                                                </DropdownMenuCheckboxItem>
+                                            ))}
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                </div>
+                                <Button
+                                    className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-amber-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                    disabled={!segmentLimit.trim() || (isProcessing && showLogModal)}
+                                    onClick={() => runStreamTask(
+                                        '/api/management/event-video-segment',
+                                        {
+                                            limit: parseInt(segmentLimit || '10', 10) || 10,
+                                            eventTypeCodes: selectedSegmentEventTypes,
+                                        },
+                                        '事件视频分块'
+                                    )}
+                                >
+                                    <Scissors className="h-4 w-4 mr-2" />
+                                    开始分块
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 {/* Log Stream Modal (Terminal Overlay) */}

@@ -1,6 +1,7 @@
 'use server';
 
 import type { TrafficAnalysisOutput } from '@/types/analysis';
+import type { EventMetaResponse, EventSearchRequest, EventSearchResponse } from '@/types/event';
 
 interface DualAnalysisResult {
   qwen: TrafficAnalysisOutput | null;
@@ -701,6 +702,67 @@ export async function handleSearch(request: SearchRequest): Promise<SearchRespon
       success: false,
       results: [],
       total: 0,
+    };
+  }
+}
+
+export async function searchEvents(request: EventSearchRequest): Promise<EventSearchResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  const url = `${backendUrl}/events/search`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('事件搜索错误:', errorBody);
+      throw new Error(`后端服务响应错误: ${response.status}`);
+    }
+
+    const result: EventSearchResponse = await response.json();
+    return result;
+  } catch (error: any) {
+    console.error('执行事件搜索时出错:', error);
+    return {
+      success: false,
+      results: [],
+      total: 0,
+    };
+  }
+}
+
+export async function getEventMeta(): Promise<EventMetaResponse> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  const url = `${backendUrl}/events/meta`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('事件字典获取错误:', errorBody);
+      throw new Error(`后端服务响应错误: ${response.status}`);
+    }
+
+    const result: EventMetaResponse = await response.json();
+    return result;
+  } catch (error: any) {
+    console.error('获取事件字典时出错:', error);
+    return {
+      success: false,
+      projectOptions: [],
+      eventTypeOptions: [],
     };
   }
 }

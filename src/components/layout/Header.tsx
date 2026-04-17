@@ -1,4 +1,4 @@
-import { Tags, Home, Image as ImageIcon, Info, Search, Upload, Cloud, Database } from 'lucide-react';
+import { Tags, Home, Image as ImageIcon, Info, Search, Upload, Cloud, Database, Video } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 
@@ -24,6 +24,11 @@ export function Header() {
           <Link href="/tag-query" passHref>
             <Button variant="ghost" className="flex items-center gap-2">
               <Database className="h-4 w-4" /> 标签数据查询
+            </Button>
+          </Link>
+          <Link href="/event-query" passHref>
+            <Button variant="ghost" className="flex items-center gap-2">
+              <Video className="h-4 w-4" /> 事件数据查询
             </Button>
           </Link>
           <Link href="/search" passHref>

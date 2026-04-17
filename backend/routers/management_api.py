@@ -21,6 +21,14 @@ from core.database import (
     get_all_image_uuids,
     get_image_by_uuid,
 )
+from core.event_database import (
+    get_pending_event_videos_for_segmentation,
+    update_event_segmentation_result,
+)
+from services.event_video_segment_service import (
+    ensure_ffmpeg_available,
+    process_event_video_segmentation,
+)
 
 router = APIRouter(prefix="/api/management", tags=["management"])
 logger = logging.getLogger(__name__)
@@ -336,6 +344,100 @@ async def check_features_endpoint():
 class ReextractTagsRequest(BaseModel):
     limit: int = 2000
     model: str = "gemini"  # gemini | qwen | codex
+
+
+class EventVideoSegmentRequest(BaseModel):
+    limit: int = 10
+    eventTypeCodes: List[str] = []
+
+
+async def event_video_segment_generator(limit: int, event_type_codes: Optional[List[str]] = None):
+    safe_limit = max(int(limit or 0), 1)
+    normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
+    scope_text = "全部事件类型" if not normalized_codes else f"事件类型={','.join(normalized_codes)}"
+    yield format_log(f"任务启动: 事件视频分块 (处理数量: {safe_limit}, {scope_text})", "start")
+    await asyncio.sleep(0.01)
+
+    try:
+        ensure_ffmpeg_available()
+        yield format_log("FFmpeg 环境检查通过", "success")
+    except Exception as exc:
+        yield format_log(f"FFmpeg 环境检查失败: {exc}", "error")
+        yield format_log("任务结束", "done")
+        return
+
+    try:
+        minio_client = get_storage_client(skip_bucket_check=True)
+        yield format_log("MinIO 客户端初始化成功", "success")
+        await asyncio.sleep(0.01)
+    except Exception as exc:
+        yield format_log(f"MinIO 客户端初始化失败: {exc}", "error")
+        yield format_log("任务结束", "done")
+        return
+
+    rows = get_pending_event_videos_for_segmentation(
+        safe_limit,
+        event_type_codes=normalized_codes,
+    )
+    total = len(rows)
+    if total <= 0:
+        yield format_log("未找到可处理视频（仅处理未分块、video_path 非空且符合事件类型筛选的记录）", "warning")
+        yield format_log("任务结束", "done")
+        return
+
+    yield format_log(f"待处理记录数: {total}（按 start_time 倒序）", "info")
+    await asyncio.sleep(0.01)
+
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for idx, row in enumerate(rows, start=1):
+        event_id = str(row["event_id"])
+        project_id = str(row["project_id"])
+        video_path = str(row["video_path"] or "").strip()
+        if not video_path:
+            skipped_count += 1
+            yield format_log(f"[{idx}/{total}] event_id={event_id} 跳过: video_path 为空", "warning")
+            await asyncio.sleep(0.01)
+            continue
+
+        yield format_log(f"[{idx}/{total}] 开始处理 event_id={event_id}", "info")
+        yield format_log(f"  -> 源视频: {video_path}", "progress")
+        await asyncio.sleep(0.01)
+        try:
+            result = process_event_video_segmentation(minio_client=minio_client, video_path=video_path)
+            segment_paths = result["segment_paths"]
+            segment_descriptions = result["segment_descriptions"]
+            segment_statuses = result["segment_statuses"]
+
+            update_event_segmentation_result(
+                event_id=event_id,
+                project_id=project_id,
+                segment_paths=segment_paths,
+                segment_descriptions=segment_descriptions,
+                segment_statuses=segment_statuses,
+            )
+            success_count += 1
+            yield format_log(f"  -> 分块成功: 共 {len(segment_paths)} 段", "success")
+        except Exception as exc:
+            failed_count += 1
+            yield format_log(f"  -> 分块失败: {exc}", "error")
+
+        await asyncio.sleep(0.01)
+
+    yield format_log(
+        f"任务完成: 成功 {success_count} 条, 失败 {failed_count} 条, 跳过 {skipped_count} 条",
+        "done",
+    )
+
+
+@router.post("/event-video-segment")
+async def event_video_segment_endpoint(req: EventVideoSegmentRequest):
+    return StreamingResponse(
+        event_video_segment_generator(req.limit, req.eventTypeCodes),
+        media_type="application/x-ndjson",
+    )
 
 
 async def reextract_tags_generator(limit: int, model: str):
