@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Search, RotateCcw, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle } from 'lucide-react';
+import { Search, RotateCcw, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2 } from 'lucide-react';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { getEventMeta, searchEvents } from '@/app/actions';
@@ -46,7 +46,7 @@ const PAGE_SIZE_OPTIONS = [5, 10, 20, 50];
 type EventStreamPlayerProps = {
   record: EventSearchResult;
   onDirtyChange: (dirty: boolean) => void;
-  onSaved: (payload: { eventId: string; projectId: string; segmentDescriptions: string[]; segmentStatuses: string[] }) => void;
+  onSaved: (payload: { eventId: string; projectId: string; eventTypeCode: string; segmentDescriptions: string[]; segmentStatuses: string[] }) => void;
 };
 
 const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirtyChange, onSaved }: EventStreamPlayerProps) {
@@ -127,6 +127,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
         body: JSON.stringify({
           eventId: record.eventId,
           projectId: record.projectId,
+          eventTypeCode: record.eventTypeCode,
           segmentDescriptions: draftDescriptions,
           segmentStatuses: draftStatuses,
         }),
@@ -141,6 +142,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
       onSaved({
         eventId: record.eventId,
         projectId: record.projectId,
+        eventTypeCode: record.eventTypeCode,
         segmentDescriptions: draftDescriptions,
         segmentStatuses: draftStatuses,
       });
@@ -265,6 +267,7 @@ export default function EventQueryPage() {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
   const [selectedRecord, setSelectedRecord] = useState<EventSearchResult | null>(null);
   const [hasUnsavedSegmentEdits, setHasUnsavedSegmentEdits] = useState(false);
+  const [deletingEventKey, setDeletingEventKey] = useState<string>('');
   const startDateInputRef = useRef<HTMLInputElement | null>(null);
   const endDateInputRef = useRef<HTMLInputElement | null>(null);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -431,11 +434,16 @@ export default function EventQueryPage() {
   const handleSegmentAnnotationsSaved = (payload: {
     eventId: string;
     projectId: string;
+    eventTypeCode: string;
     segmentDescriptions: string[];
     segmentStatuses: string[];
   }) => {
     setResults((prev) => prev.map((item) => {
-      if (item.eventId === payload.eventId && item.projectId === payload.projectId) {
+      if (
+        item.eventId === payload.eventId
+        && item.projectId === payload.projectId
+        && item.eventTypeCode === payload.eventTypeCode
+      ) {
         return {
           ...item,
           segmentDescriptions: payload.segmentDescriptions,
@@ -446,7 +454,11 @@ export default function EventQueryPage() {
     }));
     setSelectedRecord((prev) => {
       if (!prev) return prev;
-      if (prev.eventId === payload.eventId && prev.projectId === payload.projectId) {
+      if (
+        prev.eventId === payload.eventId
+        && prev.projectId === payload.projectId
+        && prev.eventTypeCode === payload.eventTypeCode
+      ) {
         return {
           ...prev,
           segmentDescriptions: payload.segmentDescriptions,
@@ -455,6 +467,43 @@ export default function EventQueryPage() {
       }
       return prev;
     });
+  };
+
+  const handleDeleteEvent = async (item: EventSearchResult) => {
+    const eventKey = `${item.eventId}|${item.projectId}|${item.eventTypeCode}`;
+    if (deletingEventKey === eventKey) return;
+    const confirmed = window.confirm(
+      `确认删除该事件吗？\n\n将同时删除：\n1) event.db 中记录\n2) MinIO(bucket-taglens) 对应事件目录全部文件`,
+    );
+    if (!confirmed) return;
+    try {
+      setDeletingEventKey(eventKey);
+      const endpoint = process.env.NEXT_PUBLIC_API_URL
+        ? `${process.env.NEXT_PUBLIC_API_URL}/events/delete`
+        : 'http://localhost:8000/events/delete';
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: item.eventId,
+          projectId: item.projectId,
+          eventTypeCode: item.eventTypeCode,
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || '删除失败');
+      }
+      if (selectedRecord?.uuid === item.uuid) {
+        setSelectedRecord(null);
+        setHasUnsavedSegmentEdits(false);
+      }
+      await fetchResults(safePage);
+    } catch (error: any) {
+      window.alert(`删除失败: ${error?.message || '未知错误'}`);
+    } finally {
+      setDeletingEventKey('');
+    }
   };
 
   const openDatePicker = (inputRef: React.RefObject<HTMLInputElement | null>) => {
@@ -709,6 +758,7 @@ export default function EventQueryPage() {
                     <TableHead className="font-semibold">事件类型</TableHead>
                     <TableHead className="font-semibold">描述语料</TableHead>
                     <TableHead className="w-[220px] pr-6 font-semibold">文件名</TableHead>
+                    <TableHead className="w-[100px] pr-6 font-semibold text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -747,11 +797,27 @@ export default function EventQueryPage() {
                         <TableCell className="pr-6 text-xs text-muted-foreground/70 truncate max-w-[220px]" title={item.fileName || '-'}>
                           {item.fileName || '-'}
                         </TableCell>
+                        <TableCell className="pr-6 text-right">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                            disabled={deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteEvent(item);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 mr-1" />
+                            {deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}` ? '删除中' : '删除'}
+                          </Button>
+                        </TableCell>
                       </TableRow>
                     ))
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={6} className="h-40 text-center text-muted-foreground">
+                      <TableCell colSpan={7} className="h-40 text-center text-muted-foreground">
                         {isLoading ? '正在查询事件记录...' : '没有找到匹配的事件记录'}
                       </TableCell>
                     </TableRow>
@@ -802,6 +868,22 @@ export default function EventQueryPage() {
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
+                          <div className="flex justify-end pt-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                              disabled={deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteEvent(item);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 mr-1" />
+                              {deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}` ? '删除中' : '删除'}
+                            </Button>
+                          </div>
                         </div>
                       </div>
                     ))}

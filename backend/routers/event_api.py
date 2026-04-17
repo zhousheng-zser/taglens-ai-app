@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from core.event_database import get_event_dict_cache, search_events, update_event_segment_annotations
+from core.event_database import (
+    delete_event_record,
+    get_event_record_media_paths,
+    get_event_dict_cache,
+    search_events,
+    update_event_segment_annotations,
+)
+from core.minio_storage_client import get_storage_client
 
 
 router = APIRouter(prefix="/events", tags=["events"])
+EVENT_MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
 
 
 class EventSearchRequest(BaseModel):
@@ -61,8 +70,45 @@ class EventMetaResponse(BaseModel):
 class EventSegmentAnnotationUpdateRequest(BaseModel):
     eventId: str
     projectId: str
+    eventTypeCode: str
     segmentDescriptions: List[str]
     segmentStatuses: List[str]
+
+
+class EventDeleteRequest(BaseModel):
+    eventId: str
+    projectId: str
+    eventTypeCode: str
+
+
+def _normalize_to_object_name(raw_path: str) -> str:
+    value = (raw_path or "").strip()
+    if not value:
+        return ""
+    if f"/{EVENT_MINIO_BUCKET}/" in value:
+        value = value.split(f"/{EVENT_MINIO_BUCKET}/", 1)[1]
+    elif value.startswith(f"{EVENT_MINIO_BUCKET}/"):
+        value = value[len(EVENT_MINIO_BUCKET) + 1 :]
+    return value.lstrip("/")
+
+
+def _extract_folder_prefixes(image_paths: str, video_path: str) -> List[str]:
+    prefixes: set[str] = set()
+    candidates = [item.strip() for item in (image_paths or "").split(",") if item.strip()]
+    if video_path and str(video_path).strip():
+        candidates.append(str(video_path).strip())
+
+    for path in candidates:
+        object_name = _normalize_to_object_name(path)
+        if "/" not in object_name:
+            continue
+        folder = object_name.rsplit("/", 1)[0].strip("/")
+        if not folder:
+            continue
+        if not folder.startswith("event_data/"):
+            continue
+        prefixes.add(f"{folder}/")
+    return sorted(prefixes)
 
 
 @router.get("/meta", response_model=EventMetaResponse)
@@ -110,6 +156,7 @@ async def update_event_segment_annotations_api(request: EventSegmentAnnotationUp
         update_event_segment_annotations(
             event_id=request.eventId,
             project_id=request.projectId,
+            event_type_corrected=request.eventTypeCode,
             segment_descriptions=request.segmentDescriptions,
             segment_statuses=request.segmentStatuses,
         )
@@ -118,3 +165,43 @@ async def update_event_segment_annotations_api(request: EventSegmentAnnotationUp
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"分段标注保存失败: {exc}")
+
+
+@router.post("/delete")
+async def delete_event_api(request: EventDeleteRequest) -> Dict[str, Any]:
+    try:
+        record = get_event_record_media_paths(
+            event_id=request.eventId,
+            project_id=request.projectId,
+            event_type_corrected=request.eventTypeCode,
+        )
+        folder_prefixes = _extract_folder_prefixes(
+            image_paths=record.get("image_paths", ""),
+            video_path=record.get("video_path", ""),
+        )
+
+        deleted_objects = 0
+        client = get_storage_client(skip_bucket_check=True)
+        for prefix in folder_prefixes:
+            for obj in client.client.list_objects(EVENT_MINIO_BUCKET, prefix=prefix, recursive=True):
+                client.client.remove_object(EVENT_MINIO_BUCKET, obj.object_name)
+                deleted_objects += 1
+
+        delete_event_record(
+            event_id=request.eventId,
+            project_id=request.projectId,
+            event_type_corrected=request.eventTypeCode,
+        )
+
+        return {
+            "success": True,
+            "bucket": EVENT_MINIO_BUCKET,
+            "deletedPrefixes": folder_prefixes,
+            "deletedObjects": deleted_objects,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"删除事件失败: {exc}")

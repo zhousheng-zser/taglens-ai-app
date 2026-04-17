@@ -414,6 +414,7 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
             update_event_segmentation_result(
                 event_id=event_id,
                 project_id=project_id,
+                event_type_corrected=str(row.get("event_type_corrected") or ""),
                 segment_paths=segment_paths,
                 segment_descriptions=segment_descriptions,
                 segment_statuses=segment_statuses,

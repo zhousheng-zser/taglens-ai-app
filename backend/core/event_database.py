@@ -523,6 +523,7 @@ def get_pending_event_videos_for_segmentation(
             SELECT
                 event_id,
                 project_id,
+                event_type_corrected,
                 video_path,
                 start_time,
                 segment_count
@@ -538,6 +539,7 @@ def get_pending_event_videos_for_segmentation(
         {
             "event_id": str(row["event_id"]),
             "project_id": row["project_id"],
+            "event_type_corrected": row["event_type_corrected"],
             "video_path": row["video_path"],
             "start_time": row["start_time"],
             "segment_count": int(row["segment_count"] or 0),
@@ -549,6 +551,7 @@ def get_pending_event_videos_for_segmentation(
 def update_event_segmentation_result(
     event_id: str,
     project_id: str,
+    event_type_corrected: str,
     segment_paths: List[str],
     segment_descriptions: List[str],
     segment_statuses: List[str],
@@ -568,7 +571,7 @@ def update_event_segmentation_result(
                 segment_paths_json = ?,
                 segment_descriptions_json = ?,
                 segment_statuses_json = ?
-            WHERE event_id = ? AND project_id = ?
+            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
             """,
             (
                 len(segment_paths),
@@ -577,6 +580,7 @@ def update_event_segmentation_result(
                 payload_statuses,
                 event_id,
                 project_id,
+                event_type_corrected,
             ),
         )
 
@@ -584,6 +588,7 @@ def update_event_segmentation_result(
 def update_event_segment_annotations(
     event_id: str,
     project_id: str,
+    event_type_corrected: str,
     segment_descriptions: List[str],
     segment_statuses: List[str],
 ) -> None:
@@ -600,12 +605,62 @@ def update_event_segment_annotations(
             SET
                 segment_descriptions_json = ?,
                 segment_statuses_json = ?
-            WHERE event_id = ? AND project_id = ?
+            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
             """,
             (
                 payload_descriptions,
                 payload_statuses,
                 event_id,
                 project_id,
+                event_type_corrected,
             ),
         )
+
+
+def get_event_record_media_paths(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+) -> Dict[str, str]:
+    """按主键获取事件记录关联媒体路径。"""
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT image_paths, video_path
+            FROM event_records
+            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+            LIMIT 1
+            """,
+            (event_id, project_id, event_type_corrected),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("目标事件记录不存在")
+
+        image_paths = str(row["image_paths"] or "").strip()
+        video_path = str(row["video_path"] or "").strip()
+
+        return {
+            "image_paths": image_paths,
+            "video_path": video_path,
+        }
+
+
+def delete_event_record(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+) -> None:
+    """按主键删除事件记录。"""
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM event_records
+            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+            """,
+            (event_id, project_id, event_type_corrected),
+        )
+        if cursor.rowcount <= 0:
+            raise ValueError("目标事件记录不存在")

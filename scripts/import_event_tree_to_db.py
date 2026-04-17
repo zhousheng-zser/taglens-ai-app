@@ -22,7 +22,7 @@ DEFAULT_BATCH_SIZE = 1000
 
 
 INSERT_SQL = """
-INSERT OR IGNORE INTO event_records (
+INSERT INTO event_records (
     event_id,
     project_id,
     project_name,
@@ -61,10 +61,9 @@ INSERT OR IGNORE INTO event_records (
     video_path,
     download_source,
     status,
-    created_at,
-    description
+    created_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 """
 
@@ -211,18 +210,47 @@ def make_row(
         "skipped",  # download_source
         "completed",  # status
         created_at,  # created_at
-        "[]",  # description
     )
 
 
 def batched_insert(
     conn: sqlite3.Connection,
     rows: List[Tuple[str, ...]],
-) -> int:
-    before = conn.total_changes
-    conn.executemany(INSERT_SQL, rows)
-    conn.commit()
-    return conn.total_changes - before
+) -> Tuple[int, int]:
+    inserted = 0
+    failed = 0
+    if not rows:
+        return inserted, failed
+    cursor = conn.cursor()
+    try:
+        cursor.executemany(INSERT_SQL, rows)
+        conn.commit()
+        inserted = len(rows)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        for row in rows:
+            try:
+                cursor.execute(INSERT_SQL, row)
+                inserted += 1
+            except sqlite3.IntegrityError:
+                failed += 1
+        conn.commit()
+    return inserted, failed
+
+
+def load_existing_keys(conn: sqlite3.Connection) -> set[Tuple[str, str, str]]:
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT event_id, project_id, event_type_corrected
+        FROM event_records
+        """
+    )
+    rows = cursor.fetchall()
+    return {
+        (str(row[0]), str(row[1]), str(row[2] or ""))
+        for row in rows
+    }
 
 
 def import_file(
@@ -243,8 +271,10 @@ def import_file(
     conn.row_factory = sqlite3.Row
     project_dict = load_project_dict(conn)
     event_type_dict = load_event_type_dict(conn)
+    existing_keys = load_existing_keys(conn)
 
     pending_rows: List[Tuple[str, ...]] = []
+    pending_keys: set[Tuple[str, str, str]] = set()
 
     with input_path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -261,7 +291,12 @@ def import_file(
                 obj = json.loads(text)
                 created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
                 row = make_row(obj, project_dict, event_type_dict, created_at)
+                dedup_key = (str(row[0]), str(row[1]), str(row[13]))
+                if dedup_key in existing_keys or dedup_key in pending_keys:
+                    counters.duplicate_skipped += 1
+                    continue
                 pending_rows.append(row)
+                pending_keys.add(dedup_key)
                 counters.parsed_ok += 1
             except Exception as exc:
                 counters.failed += 1
@@ -270,15 +305,19 @@ def import_file(
                 continue
 
             if len(pending_rows) >= batch_size:
-                inserted_now = batched_insert(conn, pending_rows)
+                inserted_now, failed_now = batched_insert(conn, pending_rows)
                 counters.inserted += inserted_now
-                counters.duplicate_skipped += len(pending_rows) - inserted_now
+                counters.failed += failed_now
+                for row in pending_rows:
+                    dedup_key = (str(row[0]), str(row[1]), str(row[13]))
+                    existing_keys.add(dedup_key)
                 pending_rows = []
+                pending_keys = set()
 
     if pending_rows:
-        inserted_now = batched_insert(conn, pending_rows)
+        inserted_now, failed_now = batched_insert(conn, pending_rows)
         counters.inserted += inserted_now
-        counters.duplicate_skipped += len(pending_rows) - inserted_now
+        counters.failed += failed_now
 
     conn.close()
     return counters
