@@ -463,6 +463,10 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
           <div className="text-xs text-muted-foreground">
             快速标注：{quickMarkStatus ? `状态=${quickMarkStatus}，已选${quickMarkSelections.length}个` : '请选择一个目标状态'}
           </div>
+          <div className="pt-2 border-t border-border/20">
+            <span className="text-xs text-muted-foreground">事件类型</span>
+            <p className="text-sm font-medium mt-1 break-all">{record.eventTypeName}</p>
+          </div>
         </div>
       </div>
 
@@ -1199,10 +1203,6 @@ export default function EventQueryPage() {
                   <div>
                     <span className="text-xs text-muted-foreground">项目分类</span>
                     <p className="text-sm font-medium mt-1 break-all">{selectedRecord.projectName}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs text-muted-foreground">事件类型</span>
-                    <p className="text-sm font-medium mt-1 break-all">{selectedRecord.eventTypeName}</p>
                   </div>
                   <div>
                     <span className="text-xs text-muted-foreground">视频源</span>

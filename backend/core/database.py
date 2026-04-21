@@ -950,11 +950,39 @@ def update_project_db(project_id: str, updates: Dict[str, Any]):
         cursor.execute(sql, values)
 
 def delete_image_by_uuid(image_uuid: str) -> bool:
-    """根据 UUID 删除图片记录"""
+    """根据 UUID 删除图片及其关联记录。"""
+    started_at = time.time()
+    print(f"[delete_image_by_uuid] start uuid={image_uuid}")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM images WHERE uuid = ?", (image_uuid,))
-        return cursor.rowcount > 0
+        t0 = time.time()
+        cursor.execute("SELECT id FROM images WHERE uuid = ?", (image_uuid,))
+        row = cursor.fetchone()
+        print(f"[delete_image_by_uuid] select image id cost={time.time()-t0:.3f}s")
+        if not row:
+            print(f"[delete_image_by_uuid] uuid not found uuid={image_uuid}")
+            return False
+        image_id = int(row["id"])
+        print(f"[delete_image_by_uuid] image_id={image_id}")
+
+        t1 = time.time()
+        cursor.execute("DELETE FROM tags WHERE image_id = ?", (image_id,))
+        print(f"[delete_image_by_uuid] delete tags affected={cursor.rowcount} cost={time.time()-t1:.3f}s")
+
+        t2 = time.time()
+        cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = ?", (image_id,))
+        print(f"[delete_image_by_uuid] delete keyword_embeddings affected={cursor.rowcount} cost={time.time()-t2:.3f}s")
+
+        t3 = time.time()
+        cursor.execute("DELETE FROM analysis_results WHERE image_id = ?", (image_id,))
+        print(f"[delete_image_by_uuid] delete analysis_results affected={cursor.rowcount} cost={time.time()-t3:.3f}s")
+
+        t4 = time.time()
+        cursor.execute("DELETE FROM images WHERE id = ?", (image_id,))
+        affected = cursor.rowcount
+        print(f"[delete_image_by_uuid] delete images affected={affected} cost={time.time()-t4:.3f}s")
+        print(f"[delete_image_by_uuid] done uuid={image_uuid} total_cost={time.time()-started_at:.3f}s")
+        return affected > 0
 
 def get_images_by_path_prefix(prefix: str) -> List[Dict[str, Any]]:
     """获取指定路径前缀的所有图片"""

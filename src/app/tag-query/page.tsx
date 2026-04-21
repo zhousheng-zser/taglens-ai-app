@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid, Calendar } from 'lucide-react';
+import { Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid, Calendar, Trash2 } from 'lucide-react';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths, endOfDay, startOfDay } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
@@ -67,7 +67,10 @@ export default function TagQueryPage() {
     const tooltipTimerRef = React.useRef<NodeJS.Timeout | null>(null);
     const startDateInputRef = useRef<HTMLInputElement | null>(null);
     const endDateInputRef = useRef<HTMLInputElement | null>(null);
+    const [deletingUuid, setDeletingUuid] = useState<string>('');
     const { toast } = useToast();
+
+    const DELETE_API_ENDPOINT = '/api/backend/images/delete';
 
     const openDatePicker = (inputRef: React.RefObject<HTMLInputElement | null>) => {
         const input = inputRef.current;
@@ -272,6 +275,42 @@ export default function TagQueryPage() {
     // 行点击处理 - 打开预览模态框
     const handleRowClick = (item: ImageSearchResult) => {
         setSelectedImage(item);
+    };
+
+    const handleDeleteImage = async (item: ImageSearchResult) => {
+        if (deletingUuid === item.uuid) return;
+        const ok = window.confirm('确认删除该图片数据吗？将删除数据库记录和Faiss特征。');
+        if (!ok) return;
+        setDeletingUuid(item.uuid);
+        try {
+            const endpoint = DELETE_API_ENDPOINT;
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uuid: item.uuid }),
+            });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(text || '删除失败');
+            }
+            if (selectedImage?.uuid === item.uuid) {
+                setSelectedImage(null);
+            }
+            setResults((prev) => prev.filter((row) => row.uuid !== item.uuid));
+            setTotal((prev) => Math.max(0, prev - 1));
+            toast({
+                title: '删除成功',
+                description: '图片记录已删除',
+            });
+        } catch (error: any) {
+            toast({
+                variant: 'destructive',
+                title: '删除失败',
+                description: `${error?.message || '未知错误'}（请求地址：${DELETE_API_ENDPOINT}）`,
+            });
+        } finally {
+            setDeletingUuid('');
+        }
     };
 
     // 关闭预览模态框
@@ -545,6 +584,19 @@ export default function TagQueryPage() {
                                             >
                                                 <TableCell className="pl-6">
                                                     <div className="relative h-12 w-20 rounded shadow-md overflow-hidden bg-muted transition-transform group-hover:scale-105">
+                                                        <button
+                                                            type="button"
+                                                            className="absolute right-1 top-1 z-20 inline-flex h-5 w-5 items-center justify-center rounded bg-black/55 text-white/90 hover:bg-red-600 transition-colors"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleDeleteImage(item);
+                                                            }}
+                                                            disabled={deletingUuid === item.uuid}
+                                                            aria-label="删除图片"
+                                                            title="删除图片"
+                                                        >
+                                                            <Trash2 className="h-3 w-3" />
+                                                        </button>
                                                         <img
                                                             src={getImageUrl(item.filePath)}
                                                             alt={item.fileName || 'Image'}
@@ -628,6 +680,19 @@ export default function TagQueryPage() {
                                                     onClick={() => handleRowClick(item)}
                                                 >
                                                     <div className="relative aspect-video w-full overflow-hidden bg-muted">
+                                                        <button
+                                                            type="button"
+                                                            className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded bg-black/55 text-white/90 hover:bg-red-600 transition-colors"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleDeleteImage(item);
+                                                            }}
+                                                            disabled={deletingUuid === item.uuid}
+                                                            aria-label="删除图片"
+                                                            title="删除图片"
+                                                        >
+                                                            <Trash2 className="h-3.5 w-3.5" />
+                                                        </button>
                                                         <img
                                                             src={getImageUrl(item.filePath)}
                                                             alt={item.fileName || 'Image'}

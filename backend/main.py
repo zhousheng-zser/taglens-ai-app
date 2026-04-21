@@ -41,7 +41,8 @@ from core.database import (
     update_project_db,
     update_project_model_db,
     update_project_probability_db,
-    update_project_stop_time_db
+    update_project_stop_time_db,
+    delete_image_by_uuid,
 )
 from core.event_database import init_event_database
 from services.bulk_import_storage import (
@@ -294,6 +295,10 @@ class SearchResponse(BaseModel):
     success: bool
     results: List[ImageSearchResult]
     total: int
+
+
+class DeleteImageRequest(BaseModel):
+    uuid: str
 
 class ImageSimilarityCheckRequest(BaseModel):
     image: str  # Base64 data URI
@@ -1917,6 +1922,40 @@ async def get_all_images_api(limit: int = Query(100, ge=1, le=1000)):
     except Exception as e:
         print(f"获取图片列表时发生错误: {e}")
         raise HTTPException(status_code=500, detail=f"获取图片列表失败: {str(e)}")
+
+
+@app.post("/images/delete")
+async def delete_image_api(request: DeleteImageRequest):
+    """删除标签查询图片：数据库关联记录 + Faiss 向量。"""
+    image_uuid = (request.uuid or "").strip()
+    if not image_uuid:
+        raise HTTPException(status_code=400, detail="uuid 不能为空")
+    api_start = time.time()
+    print(f"[images/delete] start uuid={image_uuid}")
+    try:
+        db_start = time.time()
+        deleted = delete_image_by_uuid(image_uuid)
+        print(f"[images/delete] db delete finished cost={time.time()-db_start:.3f}s deleted={deleted}")
+        if not deleted:
+            raise HTTPException(status_code=404, detail="图片记录不存在")
+        # 从 Faiss 索引中同步移除（逻辑删除）
+        try:
+            faiss_start = time.time()
+            print(f"[images/delete] before get_faiss_index_manager")
+            faiss_manager = get_faiss_index_manager()
+            print(f"[images/delete] after get_faiss_index_manager")
+            removed = faiss_manager.remove_vector(image_uuid)
+            print(f"[images/delete] faiss remove finished removed={removed} cost={time.time()-faiss_start:.3f}s")
+            print("[images/delete] faiss save_index scheduled by background uploader")
+        except Exception as faiss_exc:
+            print(f"删除 Faiss 向量失败 uuid={image_uuid}: {faiss_exc}")
+        print(f"[images/delete] done uuid={image_uuid} total_cost={time.time()-api_start:.3f}s")
+        return {"success": True, "uuid": image_uuid}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[images/delete] failed uuid={image_uuid} err={e} total_cost={time.time()-api_start:.3f}s")
+        raise HTTPException(status_code=500, detail=f"删除图片失败: {str(e)}")
 
 # --- 直接读取文件系统图片接口 ---
 @app.get("/api/images/direct")

@@ -9,6 +9,8 @@ import numpy as np
 import json
 import time
 import atexit
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 import threading
@@ -49,7 +51,15 @@ class FaissIndexManager:
         # 上传控制
         self.last_upload_time = 0  # 上次上传时间
         self.upload_interval = 180  # 3分钟（秒）
+        self.upload_batch_size = int(os.getenv("FAISS_UPLOAD_BATCH_SIZE", "500"))
+        self.flush_hour = int(os.getenv("FAISS_FLUSH_HOUR", "19"))
+        self.pending_delete_file = self.data_dir / "faiss_pending_delete_uuids.json"
         self.is_modified = False  # 是否已修改
+        self.pending_update_count = 0
+        self.last_modified_time = 0.0
+        self.pending_delete_uuids: List[str] = []
+        self._uploader_stop_event = threading.Event()
+        self._uploader_thread: Optional[threading.Thread] = None
         
         # 初始化 MinIO 客户端
         self.storage_client = get_storage_client(skip_bucket_check=True)
@@ -60,6 +70,9 @@ class FaissIndexManager:
         # 清空本地数据并从 MinIO 加载
         self._clear_local_data()
         self._load_from_minio()
+        self._load_pending_delete_file()
+        self._replay_pending_deletes()
+        self._start_uploader_thread()
     
     def _clear_local_data(self):
         """清空本地 Faiss 相关数据"""
@@ -128,20 +141,93 @@ class FaissIndexManager:
                 self.storage_client.upload_file(str(self.uuid_map_file), self.minio_uuid_map_path)
             self.last_upload_time = time.time()
             self.is_modified = False
+            self.pending_update_count = 0
+            self.pending_delete_uuids = []
+            self._persist_pending_delete_file()
+            print("[faiss] flush success, pending delete file cleared")
         except Exception:
             pass
     
     def _upload_to_minio_on_exit(self):
         """程序退出时上传到 MinIO"""
+        self._uploader_stop_event.set()
+        try:
+            if self._uploader_thread and self._uploader_thread.is_alive():
+                self._uploader_thread.join(timeout=2.0)
+        except Exception:
+            pass
         if self.is_modified:
             self._upload_to_minio()
     
-    def _check_and_upload(self):
-        """检查是否需要上传（如果已修改且超过3分钟）"""
-        if self.is_modified:
-            current_time = time.time()
-            if current_time - self.last_upload_time >= self.upload_interval:
-                self._upload_to_minio()
+    def _mark_modified(self):
+        # 调用方应在持有 self.lock 时调用
+        self.is_modified = True
+        self.pending_update_count += 1
+        self.last_modified_time = time.time()
+
+    def _persist_pending_delete_file(self):
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.pending_delete_file, "w", encoding="utf-8") as f:
+                json.dump(self.pending_delete_uuids, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[faiss] persist pending delete file failed: {e}")
+
+    def _load_pending_delete_file(self):
+        if not self.pending_delete_file.exists():
+            self.pending_delete_uuids = []
+            return
+        try:
+            with open(self.pending_delete_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self.pending_delete_uuids = [str(x).strip() for x in data if str(x).strip()]
+            else:
+                self.pending_delete_uuids = []
+            if self.pending_delete_uuids:
+                print(f"[faiss] loaded pending deletes: {len(self.pending_delete_uuids)}")
+        except Exception as e:
+            print(f"[faiss] load pending delete file failed: {e}")
+            self.pending_delete_uuids = []
+
+    def _replay_pending_deletes(self):
+        if not self.pending_delete_uuids:
+            return
+        removed = 0
+        with self.lock:
+            for uid in self.pending_delete_uuids:
+                if uid in self.uuid_map.get("uuid_to_index", {}):
+                    del self.uuid_map["uuid_to_index"][uid]
+                    removed += 1
+            if removed > 0:
+                self._mark_modified()
+        if removed > 0:
+            print(f"[faiss] replay pending deletes removed={removed}")
+
+    def _is_flush_time(self) -> bool:
+        now = datetime.now()
+        return now.hour == self.flush_hour
+
+    def _start_uploader_thread(self):
+        def _run():
+            while not self._uploader_stop_event.is_set():
+                try:
+                    should_upload = False
+                    with self.lock:
+                        if self.is_modified:
+                            batch_reached = len(self.pending_delete_uuids) >= self.upload_batch_size
+                            should_upload = batch_reached and self._is_flush_time()
+                    if should_upload:
+                        print(
+                            f"[faiss] flush trigger reached pending={len(self.pending_delete_uuids)} "
+                            f"hour={datetime.now().hour}"
+                        )
+                        self._upload_to_minio()
+                except Exception:
+                    pass
+                self._uploader_stop_event.wait(15.0)
+        self._uploader_thread = threading.Thread(target=_run, daemon=True, name="faiss-uploader")
+        self._uploader_thread.start()
     
     def _create_new_index(self, dim: int = 9000, nbits: int = 128):
         """
@@ -182,12 +268,10 @@ class FaissIndexManager:
                 self.uuid_map["index_to_uuid"].append(uuid)
                 self.uuid_map["uuid_to_index"][uuid] = index_id
                 self.uuid_map["total_vectors"] = self.index.ntotal
-                self.is_modified = True
+                self._mark_modified()
                 result = True
             except Exception:
                 return False
-        if result:
-            self._check_and_upload()
         return result
     
     def search_similar(self, query_vector: np.ndarray, k: int = 1, threshold: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -279,8 +363,10 @@ class FaissIndexManager:
         with self.lock:
             if uuid in self.uuid_map.get("uuid_to_index", {}):
                 del self.uuid_map["uuid_to_index"][uuid]
-                self.is_modified = True
-                self._check_and_upload()
+                self._mark_modified()
+                if uuid not in self.pending_delete_uuids:
+                    self.pending_delete_uuids.append(uuid)
+                    self._persist_pending_delete_file()
                 return True
             return False
     

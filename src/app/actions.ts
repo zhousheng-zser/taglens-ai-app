@@ -706,6 +706,28 @@ export async function handleSearch(request: SearchRequest): Promise<SearchRespon
   }
 }
 
+export async function deleteTagQueryImage(uuid: string): Promise<{ success: boolean; error?: string }> {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+  const url = `${backendUrl}/images/delete`;
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ uuid }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(errorBody || `后端服务响应错误: ${response.status}`);
+    }
+    return { success: true };
+  } catch (error: any) {
+    console.error('删除标签查询图片失败:', error);
+    return { success: false, error: error?.message || '删除失败' };
+  }
+}
+
 export async function searchEvents(request: EventSearchRequest): Promise<EventSearchResponse> {
   const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
   const url = `${backendUrl}/events/search`;
