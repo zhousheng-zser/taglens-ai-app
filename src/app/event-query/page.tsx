@@ -41,7 +41,12 @@ const QUICK_TIME_RANGES = [
   { label: '上个月', value: 'last_month' },
 ];
 
-const PAGE_SIZE_OPTIONS = [5, 10, 20, 50];
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500];
+const PROCESSING_STATUS_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'processed', label: '已标注完成' },
+  { value: 'unprocessed', label: '待标注' },
+] as const;
 
 type EventStreamPlayerProps = {
   record: EventSearchResult;
@@ -50,14 +55,19 @@ type EventStreamPlayerProps = {
 };
 
 const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirtyChange, onSaved }: EventStreamPlayerProps) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number>(-1);
   const [activeStreamUrl, setActiveStreamUrl] = useState<string>('');
   const [activeStreamPath, setActiveStreamPath] = useState<string>('');
+  const [activeMediaKind, setActiveMediaKind] = useState<'video' | 'image'>('video');
+  const [activeImageType, setActiveImageType] = useState<'big' | 'composite' | 'overlay' | null>(null);
   const [draftDescriptions, setDraftDescriptions] = useState<string[]>([]);
   const [draftStatuses, setDraftStatuses] = useState<string[]>([]);
   const [initialDescriptions, setInitialDescriptions] = useState<string[]>([]);
   const [initialStatuses, setInitialStatuses] = useState<string[]>([]);
   const [isSaving, setIsSaving] = useState(false);
+  const [quickMarkStatus, setQuickMarkStatus] = useState<'待定' | '正样本' | '负样本' | null>(null);
+  const [quickMarkSelections, setQuickMarkSelections] = useState<number[]>([]);
 
   const getActiveSegmentDescription = (streamIndex: number) => {
     const descriptions = draftDescriptions || [];
@@ -65,6 +75,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     const value = descriptions[streamIndex] || '';
     return value.trim() || '-';
   };
+  const activeEditableSegmentIndex = activeStreamIndex >= 0 ? activeStreamIndex : null;
 
   const segmentLineCount = Math.max(
     record.segmentCount || 0,
@@ -78,6 +89,8 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     setActiveStreamIndex(-1);
     setActiveStreamUrl(record.videoUrl || '');
     setActiveStreamPath(record.videoPath || '-');
+    setActiveMediaKind('video');
+    setActiveImageType(null);
     const nextDescriptions = Array.from({ length: segmentLineCount }, (_, idx) => (record.segmentDescriptions || [])[idx] || '');
     const nextStatuses = Array.from({ length: segmentLineCount }, (_, idx) => {
       const v = (record.segmentStatuses || [])[idx];
@@ -87,6 +100,8 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     setDraftStatuses(nextStatuses);
     setInitialDescriptions(nextDescriptions);
     setInitialStatuses(nextStatuses);
+    setQuickMarkSelections([]);
+    setQuickMarkStatus(null);
     onDirtyChange(false);
   }, [record.uuid, record.videoUrl, record.videoPath]);
 
@@ -101,6 +116,8 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
   }, [isDirty, onDirtyChange]);
 
   const switchStream = (targetIndex: number) => {
+    setActiveMediaKind('video');
+    setActiveImageType(null);
     if (targetIndex < 0) {
       setActiveStreamIndex(-1);
       setActiveStreamUrl(record.videoUrl || '');
@@ -114,38 +131,111 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     setActiveStreamPath(path);
   };
 
+  const switchImage = (imageType: 'big' | 'composite' | 'overlay') => {
+    const imageUrl = imageType === 'big'
+      ? (record.imageBigUrl || '')
+      : imageType === 'composite'
+        ? (record.imageCompositeUrl || '')
+        : (record.imageOverlayUrl || '');
+    if (!imageUrl) return;
+    setActiveMediaKind('image');
+    setActiveImageType(imageType);
+    setActiveStreamUrl(imageUrl);
+    setActiveStreamPath(imageUrl);
+  };
+
+  const applyQuickMarkToSegment = (segmentIndex: number) => {
+    if (segmentIndex < 0 || quickMarkStatus === null) return;
+    setQuickMarkSelections((prev) => {
+      if (prev.includes(segmentIndex)) {
+        return prev.filter((item) => item !== segmentIndex);
+      }
+      return [...prev, segmentIndex];
+    });
+  };
+
+  const selectAllSegmentsForQuickMark = () => {
+    if (quickMarkStatus === null || segmentLineCount <= 0) return;
+    setQuickMarkSelections(Array.from({ length: segmentLineCount }, (_, idx) => idx));
+  };
+
+  const saveSegmentAnnotations = async (descriptions: string[], statuses: string[]) => {
+    const endpoint = process.env.NEXT_PUBLIC_API_URL
+      ? `${process.env.NEXT_PUBLIC_API_URL}/events/segment-annotations`
+      : 'http://localhost:8000/events/segment-annotations';
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: record.eventId,
+        projectId: record.projectId,
+        eventTypeCode: record.eventTypeCode,
+        segmentDescriptions: descriptions,
+        segmentStatuses: statuses,
+      }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || '保存失败');
+    }
+    setInitialDescriptions(descriptions);
+    setInitialStatuses(statuses);
+    onDirtyChange(false);
+    onSaved({
+      eventId: record.eventId,
+      projectId: record.projectId,
+      eventTypeCode: record.eventTypeCode,
+      segmentDescriptions: descriptions,
+      segmentStatuses: statuses,
+    });
+  };
+
+  const applyQuickMarkBatch = async () => {
+    if (isSaving || quickMarkStatus === null || quickMarkSelections.length === 0) return;
+    const next = [...draftStatuses];
+    quickMarkSelections.forEach((idx) => {
+      if (idx >= 0 && idx < next.length) {
+        next[idx] = quickMarkStatus;
+      }
+    });
+    setIsSaving(true);
+    try {
+      setDraftStatuses(next);
+      await saveSegmentAnnotations(draftDescriptions, next);
+      setQuickMarkSelections([]);
+      setQuickMarkStatus(null);
+    } catch (error: any) {
+      window.alert(`快速标注保存失败: ${error?.message || '未知错误'}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSegmentButtonClick = (segmentIndex: number) => {
+    if (quickMarkStatus !== null) {
+      // 快速标注开启时，仅更新状态，不切换播放视频
+      applyQuickMarkToSegment(segmentIndex);
+      return;
+    }
+    switchStream(segmentIndex);
+  };
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !activeStreamUrl || activeMediaKind !== 'video') return;
+    const playPromise = el.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        // 浏览器可能因策略阻止自动播放，静默忽略
+      });
+    }
+  }, [activeStreamUrl, activeMediaKind]);
+
   const handleSaveAll = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      const endpoint = process.env.NEXT_PUBLIC_API_URL
-        ? `${process.env.NEXT_PUBLIC_API_URL}/events/segment-annotations`
-        : 'http://localhost:8000/events/segment-annotations';
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          eventId: record.eventId,
-          projectId: record.projectId,
-          eventTypeCode: record.eventTypeCode,
-          segmentDescriptions: draftDescriptions,
-          segmentStatuses: draftStatuses,
-        }),
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || '保存失败');
-      }
-      setInitialDescriptions(draftDescriptions);
-      setInitialStatuses(draftStatuses);
-      onDirtyChange(false);
-      onSaved({
-        eventId: record.eventId,
-        projectId: record.projectId,
-        eventTypeCode: record.eventTypeCode,
-        segmentDescriptions: draftDescriptions,
-        segmentStatuses: draftStatuses,
-      });
+      await saveSegmentAnnotations(draftDescriptions, draftStatuses);
     } catch (error: any) {
       window.alert(`保存失败: ${error?.message || '未知错误'}`);
     } finally {
@@ -155,89 +245,237 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
 
   return (
     <div className="space-y-3">
-      {activeStreamUrl ? (
-        <video
-          src={activeStreamUrl}
-          controls
-          className="w-full rounded-lg border border-border/50 bg-black"
-          preload="metadata"
-        />
-      ) : (
-        <div className="w-full h-[220px] rounded-lg border border-border/50 bg-black/40 flex items-center justify-center text-sm text-muted-foreground">
-          当前事件暂无可播放视频
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start">
+        <div className="space-y-3">
+          <div className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video min-h-[320px]">
+            {activeStreamUrl ? (
+              activeMediaKind === 'video' ? (
+                <video
+                  ref={videoRef}
+                  src={activeStreamUrl}
+                  controls
+                  autoPlay
+                  playsInline
+                  className="absolute inset-0 h-full w-full object-contain bg-black"
+                  preload="metadata"
+                />
+              ) : (
+                <img
+                  src={activeStreamUrl}
+                  alt="事件图片预览"
+                  className="absolute inset-0 h-full w-full object-contain bg-black"
+                />
+              )
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                当前事件暂无可播放视频
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => switchStream(-1)}
+              className={
+                activeMediaKind === 'video' && activeStreamIndex === -1
+                  ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
+                  : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
+              }
+            >
+              主视频
+            </Button>
+            {record.imageBigUrl ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => switchImage('big')}
+                className={
+                  activeMediaKind === 'image' && activeImageType === 'big'
+                    ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
+                    : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
+                }
+              >
+                big
+              </Button>
+            ) : null}
+            {record.imageCompositeUrl ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => switchImage('composite')}
+                className={
+                  activeMediaKind === 'image' && activeImageType === 'composite'
+                    ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
+                    : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
+                }
+              >
+                composite
+              </Button>
+            ) : null}
+            {record.imageOverlayUrl ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => switchImage('overlay')}
+                className={
+                  activeMediaKind === 'image' && activeImageType === 'overlay'
+                    ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
+                    : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
+                }
+              >
+                overlay
+              </Button>
+            ) : null}
+            {(record.segmentUrls || []).map((_, idx) => (
+              <Button
+                key={`${record.uuid}-segment-${idx}`}
+                type="button"
+                size="sm"
+                onClick={() => handleSegmentButtonClick(idx)}
+                className={
+                  activeStreamIndex === idx
+                    ? 'relative h-8 px-3 text-xs bg-yellow-500 hover:bg-yellow-400 text-black border border-yellow-300'
+                    : `relative h-8 px-3 text-xs border ${
+                      (draftStatuses[idx] || '待定') === '正样本'
+                        ? 'bg-emerald-900/30 hover:bg-emerald-800/45 text-emerald-100 border-emerald-600/60'
+                        : (draftStatuses[idx] || '待定') === '负样本'
+                          ? 'bg-rose-900/30 hover:bg-rose-800/45 text-rose-100 border-rose-600/60'
+                          : 'bg-yellow-900/30 hover:bg-yellow-800/50 text-yellow-100 border-yellow-600/60'
+                    }`
+                }
+              >
+                {quickMarkStatus !== null ? (
+                  <span
+                    className={`absolute -right-1 -top-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border text-[9px] ${
+                      quickMarkSelections.includes(idx)
+                        ? 'border-emerald-400 bg-emerald-500 text-white'
+                        : 'border-zinc-400/80 bg-transparent text-transparent'
+                    }`}
+                  >
+                    ✓
+                  </span>
+                ) : null}
+                {idx.toString().padStart(3, '0')}
+              </Button>
+            ))}
+          </div>
         </div>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          size="sm"
-          onClick={() => switchStream(-1)}
-          className={
-            activeStreamIndex === -1
-              ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
-              : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
-          }
-        >
-          主视频
-        </Button>
-        {(record.segmentUrls || []).map((_, idx) => (
-          <Button
-            key={`${record.uuid}-segment-${idx}`}
-            type="button"
-            size="sm"
-            onClick={() => switchStream(idx)}
-            className={
-              activeStreamIndex === idx
-                ? 'h-8 px-3 text-xs bg-yellow-500 hover:bg-yellow-400 text-black border border-yellow-300'
-                : 'h-8 px-3 text-xs bg-yellow-900/30 hover:bg-yellow-800/50 text-yellow-100 border border-yellow-600/60'
-            }
-          >
-            {idx.toString().padStart(3, '0')}
-          </Button>
-        ))}
-      </div>
-      <div className="grid grid-cols-1 gap-2 text-sm">
-        <div>
+        <div className="rounded-lg border border-border/40 bg-background/30 p-3 space-y-2">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-muted-foreground">分段描述</span>
+            <span className="text-xs text-muted-foreground">分段描述编辑</span>
             <Button
               type="button"
               size="sm"
               onClick={handleSaveAll}
-              disabled={isSaving || !isDirty}
+              disabled={isSaving || !isDirty || activeEditableSegmentIndex === null}
               className="h-7 px-3 text-xs"
             >
               {isSaving ? '保存中...' : '全部保存'}
             </Button>
           </div>
-          <p className="mt-1 whitespace-pre-wrap leading-6">{getActiveSegmentDescription(activeStreamIndex)}</p>
+          <div className="text-xs text-muted-foreground">
+            {activeEditableSegmentIndex === null
+              ? '请选择 000/001... 分段后编辑描述'
+              : `当前分段：${activeEditableSegmentIndex.toString().padStart(3, '0')}`}
+          </div>
+          <textarea
+            value={activeEditableSegmentIndex === null ? '' : (draftDescriptions[activeEditableSegmentIndex] || '')}
+            onChange={(e) => {
+              if (activeEditableSegmentIndex === null) return;
+              const next = [...draftDescriptions];
+              next[activeEditableSegmentIndex] = e.target.value;
+              setDraftDescriptions(next);
+            }}
+            placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : '请输入当前分段描述'}
+            disabled={activeEditableSegmentIndex === null}
+            className="w-full min-h-[160px] rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-y disabled:opacity-60"
+          />
+          <div className="text-xs text-muted-foreground">
+            当前状态：{activeEditableSegmentIndex === null ? '-' : (draftStatuses[activeEditableSegmentIndex] || '待定')}
+          </div>
+          <div className="pt-1">
+            <div className="text-xs text-muted-foreground mb-2">快速标注</div>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+              {(['待定', '正样本', '负样本'] as const).map((status) => (
+                <Button
+                  key={`quick-mark-${status}`}
+                  type="button"
+                  size="sm"
+                  onClick={() => setQuickMarkStatus(status)}
+                  className={
+                    quickMarkStatus === status
+                      ? `h-8 px-3 text-xs border ${
+                        status === '正样本'
+                          ? 'bg-emerald-600/90 hover:bg-emerald-500 text-white border-emerald-400'
+                          : status === '负样本'
+                            ? 'bg-rose-600/90 hover:bg-rose-500 text-white border-rose-400'
+                            : 'bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400'
+                      }`
+                      : `h-8 px-3 text-xs border ${
+                        status === '正样本'
+                          ? 'bg-emerald-900/20 hover:bg-emerald-800/35 text-emerald-200 border-emerald-700/60'
+                          : status === '负样本'
+                            ? 'bg-rose-900/20 hover:bg-rose-800/35 text-rose-200 border-rose-700/60'
+                            : 'bg-amber-900/20 hover:bg-amber-800/35 text-amber-200 border-amber-700/60'
+                      }`
+                  }
+                >
+                  {status}
+                </Button>
+              ))}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={selectAllSegmentsForQuickMark}
+                disabled={isSaving || quickMarkStatus === null || segmentLineCount <= 0}
+                className="h-8 px-3 text-xs border border-sky-500/60 bg-sky-600/85 hover:bg-sky-500 text-white disabled:opacity-50"
+              >
+                全选
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={applyQuickMarkBatch}
+                disabled={isSaving || quickMarkStatus === null || quickMarkSelections.length === 0}
+                className="h-8 px-3 text-xs border border-blue-500/60 bg-blue-600/90 hover:bg-blue-500 text-white disabled:opacity-50"
+              >
+                {isSaving ? '保存中...' : '保存'}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => {
+                  setQuickMarkSelections([]);
+                  setQuickMarkStatus(null);
+                }}
+                disabled={isSaving || quickMarkStatus === null}
+                className="h-8 px-3 text-xs border border-border/50 bg-background/40 hover:bg-background/60 text-foreground disabled:opacity-50"
+              >
+                取消
+              </Button>
+              </div>
+            </div>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            快速标注：{quickMarkStatus ? `状态=${quickMarkStatus}，已选${quickMarkSelections.length}个` : '请选择一个目标状态'}
+          </div>
         </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 text-sm">
         {Array.from({ length: segmentLineCount }).map((_, idx) => (
           <div key={`${record.uuid}-edit-row-${idx}`} className="grid grid-cols-[110px_70px_1fr] items-center gap-2">
-            <select
-              value={draftStatuses[idx] || '待定'}
-              onChange={(e) => {
-                const next = [...draftStatuses];
-                next[idx] = e.target.value;
-                setDraftStatuses(next);
-              }}
-              className="h-8 rounded-md border border-border/40 bg-background/40 px-2 text-xs"
-            >
-              <option value="正样本">正样本</option>
-              <option value="负样本">负样本</option>
-              <option value="待定">待定</option>
-            </select>
-            <div className="text-xs font-mono text-muted-foreground text-center">{idx.toString().padStart(3, '0')}</div>
-            <Input
-              value={draftDescriptions[idx] || ''}
-              onChange={(e) => {
-                const next = [...draftDescriptions];
-                next[idx] = e.target.value;
-                setDraftDescriptions(next);
-              }}
-              placeholder={`分段 ${idx.toString().padStart(3, '0')} 描述`}
-              className="h-8 bg-background/40 border-border/40 text-xs"
-            />
+            <div className="h-8 rounded-md border border-border/40 bg-background/30 px-2 text-xs font-mono text-foreground/95 flex items-center">
+              {draftStatuses[idx] || '待定'}
+            </div>
+            <div className="text-xs font-mono text-foreground/95 text-center">{idx.toString().padStart(3, '0')}</div>
+            <div className="h-8 rounded-md border border-border/40 bg-background/30 px-3 text-xs font-mono flex items-center text-foreground/95 truncate">
+              {draftDescriptions[idx] || `分段 ${idx.toString().padStart(3, '0')} 描述`}
+            </div>
           </div>
         ))}
         <div>
@@ -253,6 +491,7 @@ export default function EventQueryPage() {
   const [selectedProjectCategories, setSelectedProjectCategories] = useState<string[]>([]);
   const [selectedEventTypes, setSelectedEventTypes] = useState<string[]>([]);
   const [videoSourceFilter, setVideoSourceFilter] = useState('');
+  const [processingStatus, setProcessingStatus] = useState<'all' | 'processed' | 'unprocessed'>('all');
   const [selectedRange, setSelectedRange] = useState('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -333,6 +572,7 @@ export default function EventQueryPage() {
     setSelectedProjectCategories([]);
     setSelectedEventTypes([]);
     setVideoSourceFilter('');
+    setProcessingStatus('all');
     setSelectedRange('all');
     setStartDate('');
     setEndDate('');
@@ -347,6 +587,7 @@ export default function EventQueryPage() {
         projectIds: selectedProjectCategories,
         eventTypeCodes: selectedEventTypes,
         sourceName: videoSourceFilter.trim() || undefined,
+        processingStatus,
         startDate: startDate ? `${startDate} 00:00:00.000000` : undefined,
         endDate: endDate ? `${endDate} 23:59:59.999999` : undefined,
         page: targetPage,
@@ -541,7 +782,7 @@ export default function EventQueryPage() {
                   </Button>
                 ))}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+              <div className="grid grid-cols-1 md:grid-cols-[repeat(15,minmax(0,1fr))] gap-3 items-end">
                 <div className="space-y-2 md:col-span-2">
                   <label className="text-xs font-medium text-muted-foreground">项目分类</label>
                   <DropdownMenu>
@@ -602,7 +843,7 @@ export default function EventQueryPage() {
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-                <div className="space-y-2 md:col-span-2">
+                <div className="space-y-2 md:col-span-3">
                   <label className="text-xs font-medium text-muted-foreground">视频源</label>
                   <Input
                     value={videoSourceFilter}
@@ -610,6 +851,21 @@ export default function EventQueryPage() {
                     placeholder="例如：外环77路-S4市区方向至S20内枪机1"
                     className="h-8 bg-background/40 border-border/40 text-xs"
                   />
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs font-medium text-muted-foreground">分段标注状态</label>
+                  <Select value={processingStatus} onValueChange={(value: 'all' | 'processed' | 'unprocessed') => setProcessingStatus(value)}>
+                    <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PROCESSING_STATUS_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2 md:col-span-2">
                   <label className="text-xs font-medium text-muted-foreground">开始日期</label>
@@ -904,7 +1160,7 @@ export default function EventQueryPage() {
             onClick={handleClosePreview}
           >
             <div
-              className="bg-background rounded-lg max-w-5xl w-full max-h-[90vh] overflow-auto"
+              className="bg-background rounded-lg w-[94vw] max-w-[1500px] max-h-[90vh] overflow-auto"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="sticky top-0 bg-background border-b p-4 flex justify-between items-center">

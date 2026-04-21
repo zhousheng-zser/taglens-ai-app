@@ -366,6 +366,28 @@ def _build_image_big_url(image_paths: Optional[str]) -> Optional[str]:
     return f"{scheme}://{MINIO_ENDPOINT}/{MINIO_BUCKET}/{object_path}"
 
 
+def _build_image_variant_urls(image_paths: Optional[str]) -> Dict[str, Optional[str]]:
+    variants: Dict[str, Optional[str]] = {
+        "big": None,
+        "composite": None,
+        "overlay": None,
+    }
+    if not image_paths:
+        return variants
+    parts = [segment.strip() for segment in str(image_paths).split(",") if segment.strip()]
+    for item in parts:
+        normalized = _normalize_video_object_path(item)
+        if not normalized:
+            continue
+        if normalized.endswith("/image_big.jpg"):
+            variants["big"] = _build_video_url(normalized)
+        elif normalized.endswith("/image_composite.jpg"):
+            variants["composite"] = _build_video_url(normalized)
+        elif normalized.endswith("/image_overlay.jpg"):
+            variants["overlay"] = _build_video_url(normalized)
+    return variants
+
+
 def _parse_json_string_list(raw_value: Optional[str]) -> List[str]:
     if not raw_value:
         return []
@@ -382,6 +404,7 @@ def search_events(
     project_ids: Optional[List[str]] = None,
     event_type_codes: Optional[List[str]] = None,
     source_name: Optional[str] = None,
+    processing_status: str = "all",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page: int = 1,
@@ -409,6 +432,27 @@ def search_events(
     if source_name and source_name.strip():
         where_conditions.append("source_name LIKE ?")
         params.append(f"%{source_name.strip()}%")
+
+    if processing_status == "processed":
+        where_conditions.append(
+            """
+            IFNULL(segment_count, 0) > 0
+            AND TRIM(IFNULL(segment_statuses_json, '')) <> ''
+            AND segment_statuses_json <> '[]'
+            AND segment_statuses_json NOT LIKE '%待定%'
+            """
+        )
+    elif processing_status == "unprocessed":
+        where_conditions.append(
+            """
+            (
+                IFNULL(segment_count, 0) <= 0
+                OR TRIM(IFNULL(segment_statuses_json, '')) = ''
+                OR segment_statuses_json = '[]'
+                OR segment_statuses_json LIKE '%待定%'
+            )
+            """
+        )
 
     if start_date:
         where_conditions.append("start_time >= ?")
@@ -467,6 +511,7 @@ def search_events(
             _normalize_video_object_path(item) for item in segment_paths if _normalize_video_object_path(item)
         ]
         segment_urls = [_build_video_url(item) for item in normalized_segment_paths]
+        image_variants = _build_image_variant_urls(row["image_paths"])
         project_name = get_project_name_by_id(row["project_id"]) or row["project_name"] or row["project_id"]
         event_type_name = (
             get_event_type_name_by_code(row["event_type_corrected"])
@@ -492,6 +537,8 @@ def search_events(
                 "segmentDescriptions": segment_descriptions,
                 "segmentStatuses": segment_statuses,
                 "imageBigUrl": _build_image_big_url(row["image_paths"]),
+                "imageCompositeUrl": image_variants["composite"],
+                "imageOverlayUrl": image_variants["overlay"],
                 "fileName": Path(normalized_video_path).name if normalized_video_path else None,
             }
         )

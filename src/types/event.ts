@@ -2,6 +2,7 @@ export interface EventSearchRequest {
   projectIds?: string[];
   eventTypeCodes?: string[];
   sourceName?: string;
+  processingStatus?: 'all' | 'processed' | 'unprocessed';
   startDate?: string;
   endDate?: string;
   page?: number;
@@ -25,6 +26,8 @@ export interface EventSearchResult {
   segmentDescriptions?: string[];
   segmentStatuses?: string[];
   imageBigUrl?: string | null;
+  imageCompositeUrl?: string | null;
+  imageOverlayUrl?: string | null;
   fileName?: string | null;
 }
 

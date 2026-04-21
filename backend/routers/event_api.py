@@ -24,6 +24,7 @@ class EventSearchRequest(BaseModel):
     projectIds: List[str] = []
     eventTypeCodes: List[str] = []
     sourceName: Optional[str] = None
+    processingStatus: str = "all"
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     page: int = 1
@@ -47,6 +48,8 @@ class EventSearchResult(BaseModel):
     segmentDescriptions: List[str] = []
     segmentStatuses: List[str] = []
     imageBigUrl: Optional[str] = None
+    imageCompositeUrl: Optional[str] = None
+    imageOverlayUrl: Optional[str] = None
     fileName: Optional[str] = None
 
 
@@ -127,12 +130,15 @@ async def search_events_api(request: EventSearchRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="page 必须大于等于 1")
     if request.pageSize < 1:
         raise HTTPException(status_code=400, detail="pageSize 必须大于等于 1")
+    if request.processingStatus not in {"all", "processed", "unprocessed"}:
+        raise HTTPException(status_code=400, detail="processingStatus 取值非法")
 
     try:
         results, total = search_events(
             project_ids=request.projectIds,
             event_type_codes=request.eventTypeCodes,
             source_name=request.sourceName,
+            processing_status=request.processingStatus,
             start_date=request.startDate,
             end_date=request.endDate,
             page=request.page,
