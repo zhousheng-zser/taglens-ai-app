@@ -635,7 +635,7 @@ def delete_tar_gz_in_cwd():
 # 2. 删除目录及其所有内容
 def delete_directory(path):
     if os.path.exists(path):
-        print("删除目录:", path)
+        #print("删除目录:", path)
         shutil.rmtree(path)   # 递归删除整个目录
     os.makedirs(path, exist_ok=True)
 
