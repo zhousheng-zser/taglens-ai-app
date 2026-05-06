@@ -14,6 +14,10 @@ export async function GET(
 
     const response = await fetch(url, {
       method: 'GET',
+      headers: {
+        // 透传 Range，支持视频分段播放
+        ...(request.headers.get('range') ? { Range: request.headers.get('range') as string } : {}),
+      },
       // 增加超时时间到10分钟（600秒）
       signal: AbortSignal.timeout(600000),
     });
@@ -25,14 +29,21 @@ export async function GET(
       );
     }
 
-    // 检查 Content-Type，如果是图片或其他二进制类型，返回二进制响应
+    // 检查 Content-Type：除 JSON 外都按二进制转发（覆盖视频/音频/图片等）
     const contentType = response.headers.get('Content-Type') || '';
-    if (contentType.startsWith('image/') || contentType.startsWith('application/octet-stream')) {
+    const isJson = contentType.includes('application/json');
+    if (!isJson) {
       const buffer = await response.arrayBuffer();
       return new NextResponse(buffer, {
+        status: response.status,
         headers: {
           'Content-Type': contentType,
           'Cache-Control': 'public, max-age=31536000, immutable',
+          'Accept-Ranges': response.headers.get('Accept-Ranges') || 'bytes',
+          'Content-Length': response.headers.get('Content-Length') || String(buffer.byteLength),
+          ...(response.headers.get('Content-Range')
+            ? { 'Content-Range': response.headers.get('Content-Range') as string }
+            : {}),
         },
       });
     }

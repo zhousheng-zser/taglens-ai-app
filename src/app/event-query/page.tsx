@@ -51,7 +51,14 @@ const PROCESSING_STATUS_OPTIONS = [
 type EventStreamPlayerProps = {
   record: EventSearchResult;
   onDirtyChange: (dirty: boolean) => void;
-  onSaved: (payload: { eventId: string; projectId: string; eventTypeCode: string; segmentDescriptions: string[]; segmentStatuses: string[] }) => void;
+  onSaved: (payload: {
+    eventId: string;
+    projectId: string;
+    eventTypeCode: string;
+    segmentDescriptions: string[];
+    segmentStatuses: string[];
+    questionsAnswersList: Array<Array<{ question: string; answer: string }>>;
+  }) => void;
 };
 
 const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirtyChange, onSaved }: EventStreamPlayerProps) {
@@ -63,8 +70,10 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
   const [activeImageType, setActiveImageType] = useState<'big' | 'composite' | 'overlay' | null>(null);
   const [draftDescriptions, setDraftDescriptions] = useState<string[]>([]);
   const [draftStatuses, setDraftStatuses] = useState<string[]>([]);
+  const [draftQuestionsAnswers, setDraftQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
   const [initialDescriptions, setInitialDescriptions] = useState<string[]>([]);
   const [initialStatuses, setInitialStatuses] = useState<string[]>([]);
+  const [initialQuestionsAnswers, setInitialQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [quickMarkStatus, setQuickMarkStatus] = useState<'待定' | '正样本' | '负样本' | null>(null);
   const [quickMarkSelections, setQuickMarkSelections] = useState<number[]>([]);
@@ -85,6 +94,37 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     (record.segmentStatuses || []).length,
   );
 
+  const normalizeQuestionsAnswers = (
+    value: Array<Array<{ question: string; answer: string }>> | undefined,
+    count: number,
+  ): Array<Array<{ question: string; answer: string }>> => {
+    const rawPool = (record.eventTypeQuestions || []).map((q) => (q || '').trim()).filter(Boolean);
+    const dedupPool = Array.from(new Set(rawPool));
+    const fallbackQuestions = dedupPool.length >= 2
+      ? dedupPool.slice(0, 2)
+      : ['临时填充问题1?', '临时填充问题2?'];
+
+    const result: Array<Array<{ question: string; answer: string }>> = [];
+    for (let i = 0; i < count; i += 1) {
+      const current = Array.isArray(value?.[i]) ? value?.[i] : [];
+      const cleaned = current
+        .map((item) => ({
+          question: String(item?.question || '').trim(),
+          answer: String(item?.answer || '').trim(),
+        }))
+        .filter((item) => item.question)
+        .slice(0, 2);
+      while (cleaned.length < 2) {
+        cleaned.push({
+          question: fallbackQuestions[cleaned.length] || `临时填充问题${cleaned.length + 1}?`,
+          answer: '',
+        });
+      }
+      result.push(cleaned);
+    }
+    return result;
+  };
+
   useEffect(() => {
     setActiveStreamIndex(-1);
     setActiveStreamUrl(record.videoUrl || '');
@@ -98,8 +138,11 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     });
     setDraftDescriptions(nextDescriptions);
     setDraftStatuses(nextStatuses);
+    const nextQuestionsAnswers = normalizeQuestionsAnswers(record.questionsAnswersList, segmentLineCount);
+    setDraftQuestionsAnswers(nextQuestionsAnswers);
     setInitialDescriptions(nextDescriptions);
     setInitialStatuses(nextStatuses);
+    setInitialQuestionsAnswers(nextQuestionsAnswers);
     setQuickMarkSelections([]);
     setQuickMarkStatus(null);
     onDirtyChange(false);
@@ -107,8 +150,9 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
 
   const isDirty = useMemo(
     () => JSON.stringify(draftDescriptions) !== JSON.stringify(initialDescriptions)
-      || JSON.stringify(draftStatuses) !== JSON.stringify(initialStatuses),
-    [draftDescriptions, draftStatuses, initialDescriptions, initialStatuses],
+      || JSON.stringify(draftStatuses) !== JSON.stringify(initialStatuses)
+      || JSON.stringify(draftQuestionsAnswers) !== JSON.stringify(initialQuestionsAnswers),
+    [draftDescriptions, draftStatuses, draftQuestionsAnswers, initialDescriptions, initialStatuses, initialQuestionsAnswers],
   );
 
   useEffect(() => {
@@ -159,10 +203,14 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     setQuickMarkSelections(Array.from({ length: segmentLineCount }, (_, idx) => idx));
   };
 
-  const saveSegmentAnnotations = async (descriptions: string[], statuses: string[]) => {
+  const saveSegmentAnnotations = async (
+    descriptions: string[],
+    statuses: string[],
+    questionsAnswersList: Array<Array<{ question: string; answer: string }>>,
+  ) => {
     const endpoint = process.env.NEXT_PUBLIC_API_URL
       ? `${process.env.NEXT_PUBLIC_API_URL}/events/segment-annotations`
-      : 'http://localhost:8000/events/segment-annotations';
+      : '/api/backend/events/segment-annotations';
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -172,6 +220,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
         eventTypeCode: record.eventTypeCode,
         segmentDescriptions: descriptions,
         segmentStatuses: statuses,
+        questionsAnswersList,
       }),
     });
     if (!response.ok) {
@@ -180,6 +229,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     }
     setInitialDescriptions(descriptions);
     setInitialStatuses(statuses);
+    setInitialQuestionsAnswers(questionsAnswersList);
     onDirtyChange(false);
     onSaved({
       eventId: record.eventId,
@@ -187,6 +237,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
       eventTypeCode: record.eventTypeCode,
       segmentDescriptions: descriptions,
       segmentStatuses: statuses,
+      questionsAnswersList,
     });
   };
 
@@ -201,7 +252,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     setIsSaving(true);
     try {
       setDraftStatuses(next);
-      await saveSegmentAnnotations(draftDescriptions, next);
+      await saveSegmentAnnotations(draftDescriptions, next, draftQuestionsAnswers);
       setQuickMarkSelections([]);
       setQuickMarkStatus(null);
     } catch (error: any) {
@@ -235,7 +286,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     if (isSaving) return;
     setIsSaving(true);
     try {
-      await saveSegmentAnnotations(draftDescriptions, draftStatuses);
+      await saveSegmentAnnotations(draftDescriptions, draftStatuses, draftQuestionsAnswers);
     } catch (error: any) {
       window.alert(`保存失败: ${error?.message || '未知错误'}`);
     } finally {
@@ -389,13 +440,85 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
             }}
             placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : '请输入当前分段描述'}
             disabled={activeEditableSegmentIndex === null}
-            className="w-full min-h-[160px] rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-y disabled:opacity-60"
+            className="w-full min-h-[64px] rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-y disabled:opacity-60"
           />
-          <div className="text-xs text-muted-foreground">
-            当前状态：{activeEditableSegmentIndex === null ? '-' : (draftStatuses[activeEditableSegmentIndex] || '待定')}
+          <div className="pt-2 border-t border-border/20 space-y-2">
+            {activeEditableSegmentIndex === null ? (
+              <div className="text-xs text-muted-foreground">请选择一个分段后编辑回答</div>
+            ) : (
+              (draftQuestionsAnswers[activeEditableSegmentIndex] || []).map((qa, qaIdx) => (
+                <div key={`qa-${activeEditableSegmentIndex}-${qaIdx}`} className="space-y-1 rounded-md border border-border/30 p-2 bg-background/20">
+                  {(() => {
+                    const optionPool = [
+                      ...(record.eventTypeQuestions || []),
+                      qa.question,
+                    ].map((item) => (item || '').trim()).filter(Boolean);
+                    const options = Array.from(new Set(optionPool));
+                    return (
+                      <>
+                        <div className="rounded-md border border-border/40 bg-background/30 px-2 py-1.5 text-xs leading-5 break-words whitespace-normal">
+                          {qa.question || '未选择问题'}
+                        </div>
+                        <Select
+                          value={qa.question}
+                          onValueChange={(value) => {
+                            if (activeEditableSegmentIndex === null) return;
+                            const currentSegment = draftQuestionsAnswers[activeEditableSegmentIndex] || [];
+                            const otherQuestion = currentSegment[qaIdx === 0 ? 1 : 0]?.question || '';
+                            if (otherQuestion && otherQuestion === value) {
+                              window.alert('同一分段的两个问题不能相同，请选择其他问题。');
+                              return;
+                            }
+                            const next = draftQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
+                            if (!next[activeEditableSegmentIndex]) return;
+                            next[activeEditableSegmentIndex][qaIdx] = {
+                              ...next[activeEditableSegmentIndex][qaIdx],
+                              question: value,
+                            };
+                            setDraftQuestionsAnswers(next);
+                          }}
+                        >
+                          <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
+                            <span className="text-xs text-muted-foreground">选择问题</span>
+                          </SelectTrigger>
+                          <SelectContent>
+                            {options.map((question) => (
+                              <SelectItem
+                                key={`${record.uuid}-qa-${qaIdx}-${question}`}
+                                value={question}
+                                className="whitespace-normal break-words leading-5 py-2"
+                              >
+                                {question}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </>
+                    );
+                  })()}
+                  <textarea
+                    value={qa.answer}
+                    onChange={(e) => {
+                      if (activeEditableSegmentIndex === null) return;
+                      const next = draftQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
+                      if (!next[activeEditableSegmentIndex]) return;
+                      next[activeEditableSegmentIndex][qaIdx] = {
+                        ...next[activeEditableSegmentIndex][qaIdx],
+                        answer: e.target.value,
+                      };
+                      setDraftQuestionsAnswers(next);
+                    }}
+                    className="w-full min-h-[64px] rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-y"
+                    placeholder="请输入回答"
+                  />
+                </div>
+              ))
+            )}
+            <div className="text-xs text-muted-foreground pt-1">
+              当前状态：{activeEditableSegmentIndex === null ? '-' : (draftStatuses[activeEditableSegmentIndex] || '待定')}
+            </div>
           </div>
           <div className="pt-1">
-            <div className="text-xs text-muted-foreground mb-2">快速标注</div>
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
               {(['待定', '正样本', '负样本'] as const).map((status) => (
@@ -660,18 +783,18 @@ export default function EventQueryPage() {
 
   const handlePreviewPrev = () => {
     if (!hasPrevRecord || selectedRecordIndex < 1) return;
-    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态有未保存修改，确认切换到上一条吗？')) return;
+    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态/问答有未保存修改，确认切换到上一条吗？')) return;
     setSelectedRecord(pageData[selectedRecordIndex - 1]);
   };
 
   const handlePreviewNext = () => {
     if (!hasNextRecord || selectedRecordIndex < 0) return;
-    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态有未保存修改，确认切换到下一条吗？')) return;
+    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态/问答有未保存修改，确认切换到下一条吗？')) return;
     setSelectedRecord(pageData[selectedRecordIndex + 1]);
   };
 
   const handleClosePreview = () => {
-    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态有未保存修改，确认关闭预览吗？')) return;
+    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态/问答有未保存修改，确认关闭预览吗？')) return;
     setSelectedRecord(null);
     setHasUnsavedSegmentEdits(false);
   };
@@ -682,6 +805,7 @@ export default function EventQueryPage() {
     eventTypeCode: string;
     segmentDescriptions: string[];
     segmentStatuses: string[];
+    questionsAnswersList: Array<Array<{ question: string; answer: string }>>;
   }) => {
     setResults((prev) => prev.map((item) => {
       if (
@@ -693,6 +817,7 @@ export default function EventQueryPage() {
           ...item,
           segmentDescriptions: payload.segmentDescriptions,
           segmentStatuses: payload.segmentStatuses,
+          questionsAnswersList: payload.questionsAnswersList,
         };
       }
       return item;
@@ -708,6 +833,7 @@ export default function EventQueryPage() {
           ...prev,
           segmentDescriptions: payload.segmentDescriptions,
           segmentStatuses: payload.segmentStatuses,
+          questionsAnswersList: payload.questionsAnswersList,
         };
       }
       return prev;
@@ -725,7 +851,7 @@ export default function EventQueryPage() {
       setDeletingEventKey(eventKey);
       const endpoint = process.env.NEXT_PUBLIC_API_URL
         ? `${process.env.NEXT_PUBLIC_API_URL}/events/delete`
-        : 'http://localhost:8000/events/delete';
+        : '/api/backend/events/delete';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

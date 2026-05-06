@@ -320,8 +320,12 @@ export default function TagQueryPage() {
 
     // 获取图片URL - 直接使用 MinIO HTTP 访问
     const getImageUrl = (filePath: string) => {
-        // MINIO_ENDPOINT + MINIO_BUCKET + file_path
-        return `http://192.168.1.117:9000/bucket-taglens/${filePath}`;
+        const normalized = (filePath || '').replace(/^\/+/, '');
+        const encodedPath = normalized
+            .split('/')
+            .map((seg) => encodeURIComponent(seg))
+            .join('/');
+        return `/bucket-taglens/${encodedPath}`;
     };
 
     return (

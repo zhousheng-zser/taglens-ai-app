@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form, Request
 from fastapi.responses import Response
 import mimetypes
 from fastapi.middleware.cors import CORSMiddleware
@@ -2040,6 +2040,78 @@ async def download_image_api(
             content=file_data,
             media_type=content_type,
             headers={"Content-Disposition": f'inline; filename="{filename}"'}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+# --- MinIO 通用文件下载接口（图片/视频等） ---
+@app.get("/api/minio/download/file")
+async def download_file_api(
+    request: Request,
+    object_name: str = Query(..., description="MinIO 中的对象名称（路径）")
+):
+    """从 MinIO 下载任意文件（用于视频、图片等资源直链）"""
+    try:
+        storage_client = get_storage_client(skip_bucket_check=True)
+        if not storage_client.file_exists(object_name):
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        stat = storage_client.client.stat_object(storage_client.bucket, object_name)
+        total_size = int(getattr(stat, "size", 0) or 0)
+        range_header = request.headers.get("range")
+
+        # 默认返回整个文件；若客户端传了 Range，则返回 206 分段内容
+        offset = 0
+        length: Optional[int] = None
+        status_code = 200
+        content_range = None
+        if range_header and range_header.startswith("bytes=") and total_size > 0:
+            byte_range = range_header[len("bytes="):].strip()
+            start_str, _, end_str = byte_range.partition("-")
+            if start_str.isdigit():
+                start = int(start_str)
+                if start >= total_size:
+                    raise HTTPException(status_code=416, detail="Range Not Satisfiable")
+                end = total_size - 1
+                if end_str.isdigit():
+                    end = min(int(end_str), total_size - 1)
+                if end < start:
+                    raise HTTPException(status_code=416, detail="Range Not Satisfiable")
+                offset = start
+                length = end - start + 1
+                status_code = 206
+                content_range = f"bytes {start}-{end}/{total_size}"
+
+        response_obj = storage_client.client.get_object(
+            storage_client.bucket,
+            object_name,
+            offset=offset,
+            length=length,
+        )
+        file_data = response_obj.read()
+        response_obj.close()
+        response_obj.release_conn()
+        filename = os.path.basename(object_name)
+        content_type, _ = mimetypes.guess_type(object_name)
+        if content_type is None:
+            content_type = "application/octet-stream"
+
+        headers = {
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(len(file_data)),
+        }
+        if content_range:
+            headers["Content-Range"] = content_range
+
+        return Response(
+            content=file_data,
+            media_type=content_type,
+            headers=headers,
+            status_code=status_code,
         )
     except HTTPException:
         raise

@@ -47,6 +47,8 @@ class EventSearchResult(BaseModel):
     segmentUrls: List[str] = []
     segmentDescriptions: List[str] = []
     segmentStatuses: List[str] = []
+    questionsAnswersList: List[List[Dict[str, str]]] = []
+    eventTypeQuestions: List[str] = []
     imageBigUrl: Optional[str] = None
     imageCompositeUrl: Optional[str] = None
     imageOverlayUrl: Optional[str] = None
@@ -76,6 +78,7 @@ class EventSegmentAnnotationUpdateRequest(BaseModel):
     eventTypeCode: str
     segmentDescriptions: List[str]
     segmentStatuses: List[str]
+    questionsAnswersList: List[List[Dict[str, str]]] = []
 
 
 class EventDeleteRequest(BaseModel):
@@ -155,6 +158,8 @@ async def search_events_api(request: EventSearchRequest) -> Dict[str, Any]:
 async def update_event_segment_annotations_api(request: EventSegmentAnnotationUpdateRequest) -> Dict[str, Any]:
     if len(request.segmentDescriptions) != len(request.segmentStatuses):
         raise HTTPException(status_code=400, detail="segmentDescriptions 与 segmentStatuses 长度不一致")
+    if len(request.questionsAnswersList) != len(request.segmentDescriptions):
+        raise HTTPException(status_code=400, detail="questionsAnswersList 与 segmentDescriptions 长度不一致")
     valid_status = {"正样本", "负样本", "待定"}
     if any(item not in valid_status for item in request.segmentStatuses):
         raise HTTPException(status_code=400, detail="segmentStatuses 含非法值")
@@ -165,6 +170,7 @@ async def update_event_segment_annotations_api(request: EventSegmentAnnotationUp
             event_type_corrected=request.eventTypeCode,
             segment_descriptions=request.segmentDescriptions,
             segment_statuses=request.segmentStatuses,
+            questions_answers_list=request.questionsAnswersList,
         )
         return {"success": True}
     except HTTPException:

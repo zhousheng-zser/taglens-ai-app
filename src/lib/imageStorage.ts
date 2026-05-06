@@ -41,11 +41,6 @@ export function saveImageMetadata(image: Omit<StoredImage, 'id' | 'createdAt'>):
  * 如果是相对路径，需要转换为可访问的 URL
  */
 export function getImageUrl(filePath: string): string {
-  // 直接通过 MinIO HTTP 访问: MINIO_ENDPOINT + MINIO_BUCKET + filePath
-  // 与“标签数据查询”页面保持一致
-  const MINIO_ENDPOINT = '192.168.1.117:9000';
-  const MINIO_BUCKET = 'bucket-taglens';
-
   const normalized = (filePath || '').replace(/^\/+/, ''); // 防止双斜杠
   // 对每个 path segment 做 encode，避免中文/空格导致 URL 异常
   const encodedPath = normalized
@@ -53,7 +48,7 @@ export function getImageUrl(filePath: string): string {
     .map((seg) => encodeURIComponent(seg))
     .join('/');
 
-  return `http://${MINIO_ENDPOINT}/${MINIO_BUCKET}/${encodedPath}`;
+  return `/bucket-taglens/${encodedPath}`;
 }
 
 /**

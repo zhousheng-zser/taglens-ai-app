@@ -25,6 +25,8 @@ export interface EventSearchResult {
   segmentUrls?: string[];
   segmentDescriptions?: string[];
   segmentStatuses?: string[];
+  questionsAnswersList?: Array<Array<{ question: string; answer: string }>>;
+  eventTypeQuestions?: string[];
   imageBigUrl?: string | null;
   imageCompositeUrl?: string | null;
   imageOverlayUrl?: string | null;

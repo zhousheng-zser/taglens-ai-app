@@ -4,6 +4,7 @@
 """
 import json
 import os
+import random
 import shutil
 import sqlite3
 import time
@@ -15,13 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 EVENT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "event.db"
 BACKUP_DIR = EVENT_DB_PATH.parent / "backup"
 BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "192.168.1.117:9000")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
-MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 _event_backup_checked = False
-_event_dict_cache: Dict[str, List[Dict[str, str]]] = {
+_event_dict_cache: Dict[str, Any] = {
     "projectOptions": [],
     "eventTypeOptions": [],
+    "eventTypeQuestionsMap": {},
 }
 
 STANDARD_PROJECT_OPTIONS: List[Tuple[str, str]] = [
@@ -209,6 +209,16 @@ def init_event_database() -> None:
             print("已添加 segment_statuses_json 字段到 event_records 表")
         except Exception:
             pass
+        try:
+            cursor.execute("ALTER TABLE event_type_dict ADD COLUMN questions_list TEXT DEFAULT '[]'")
+            print("已添加 questions_list 字段到 event_type_dict 表")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE event_records ADD COLUMN questions_answers_list TEXT DEFAULT '[]'")
+            print("已添加 questions_answers_list 字段到 event_records 表")
+        except Exception:
+            pass
         cursor.execute(
             """
             UPDATE event_records
@@ -235,6 +245,20 @@ def init_event_database() -> None:
             UPDATE event_records
             SET segment_statuses_json = '[]'
             WHERE segment_statuses_json IS NULL OR TRIM(segment_statuses_json) = ''
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE event_type_dict
+            SET questions_list = '[]'
+            WHERE questions_list IS NULL OR TRIM(questions_list) = ''
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE event_records
+            SET questions_answers_list = '[]'
+            WHERE questions_answers_list IS NULL OR TRIM(questions_answers_list) = ''
             """
         )
 
@@ -268,7 +292,7 @@ def init_event_database() -> None:
     refresh_event_dict_cache()
 
 
-def refresh_event_dict_cache() -> Dict[str, List[Dict[str, str]]]:
+def refresh_event_dict_cache() -> Dict[str, Any]:
     """从字典表加载到内存缓存，供高频读取。"""
     global _event_dict_cache
     with get_event_db_connection() as conn:
@@ -284,7 +308,7 @@ def refresh_event_dict_cache() -> Dict[str, List[Dict[str, str]]]:
 
         cursor.execute(
             """
-            SELECT event_type_code, event_type_name
+            SELECT event_type_code, event_type_name, IFNULL(questions_list, '[]') AS questions_list
             FROM event_type_dict
             ORDER BY sort_order ASC, event_type_code ASC
             """
@@ -300,11 +324,15 @@ def refresh_event_dict_cache() -> Dict[str, List[Dict[str, str]]]:
             {"code": row["event_type_code"], "name": row["event_type_name"]}
             for row in event_type_rows
         ],
+        "eventTypeQuestionsMap": {
+            row["event_type_code"]: _parse_json_string_list(row["questions_list"])
+            for row in event_type_rows
+        },
     }
     return _event_dict_cache
 
 
-def get_event_dict_cache() -> Dict[str, List[Dict[str, str]]]:
+def get_event_dict_cache() -> Dict[str, Any]:
     """获取事件字典缓存；为空时懒加载。"""
     if not _event_dict_cache["projectOptions"] or not _event_dict_cache["eventTypeOptions"]:
         return refresh_event_dict_cache()
@@ -331,6 +359,84 @@ def get_event_type_name_by_code(event_type_code: Optional[str]) -> Optional[str]
     return None
 
 
+def get_event_type_questions_by_code(event_type_code: Optional[str]) -> List[str]:
+    if not event_type_code:
+        return []
+    cache = get_event_dict_cache()
+    questions_map = cache.get("eventTypeQuestionsMap", {})
+    value = questions_map.get(event_type_code) if isinstance(questions_map, dict) else None
+    return [str(item).strip() for item in (value or []) if str(item).strip()]
+
+
+def _build_default_questions_answers(
+    segment_count: int,
+    event_type_code: str,
+    event_id: str,
+) -> List[List[Dict[str, str]]]:
+    template = get_event_type_questions_by_code(event_type_code)
+    unique_template = list(dict.fromkeys([q.strip() for q in template if q and q.strip()]))
+    if len(unique_template) < 2:
+        unique_template = ["临时填充问题1?", "临时填充问题2?"]
+
+    result: List[List[Dict[str, str]]] = []
+    for idx in range(max(segment_count, 0)):
+        # 默认初始化：每个分段随机抽取两个不重复问题
+        picked = random.sample(unique_template, 2)
+        result.append([
+            {"question": picked[0], "answer": ""},
+            {"question": picked[1], "answer": ""},
+        ])
+    return result
+
+
+def _parse_questions_answers_2d(
+    raw_value: Optional[str],
+    segment_count: int,
+    event_type_code: str,
+    event_id: str,
+) -> List[List[Dict[str, str]]]:
+    fallback = _build_default_questions_answers(segment_count, event_type_code, event_id)
+    if not raw_value:
+        return fallback
+    try:
+        parsed = json.loads(raw_value)
+    except Exception:
+        return fallback
+    if not isinstance(parsed, list):
+        return fallback
+
+    normalized: List[List[Dict[str, str]]] = []
+    for seg in parsed:
+        if not isinstance(seg, list):
+            normalized.append([])
+            continue
+        pair_list: List[Dict[str, str]] = []
+        for qa in seg:
+            if not isinstance(qa, dict):
+                continue
+            q = str(qa.get("question", "")).strip()
+            a = str(qa.get("answer", "")).strip()
+            if not q:
+                continue
+            pair_list.append({"question": q, "answer": a})
+            if len(pair_list) >= 2:
+                break
+        normalized.append(pair_list)
+
+    target_len = max(segment_count, 0)
+    if len(normalized) < target_len:
+        normalized.extend([[] for _ in range(target_len - len(normalized))])
+    elif len(normalized) > target_len:
+        normalized = normalized[:target_len]
+
+    for idx in range(target_len):
+        if len(normalized[idx]) < 2:
+            normalized[idx] = fallback[idx]
+        elif len(normalized[idx]) > 2:
+            normalized[idx] = normalized[idx][:2]
+    return normalized
+
+
 def _normalize_video_object_path(video_path: Optional[str]) -> Optional[str]:
     if not video_path:
         return None
@@ -346,8 +452,7 @@ def _build_video_url(video_path: Optional[str]) -> Optional[str]:
     object_path = _normalize_video_object_path(video_path)
     if not object_path:
         return None
-    scheme = "https" if MINIO_SECURE else "http"
-    return f"{scheme}://{MINIO_ENDPOINT}/{MINIO_BUCKET}/{object_path}"
+    return f"/{MINIO_BUCKET}/{object_path}"
 
 
 def _build_image_big_url(image_paths: Optional[str]) -> Optional[str]:
@@ -362,8 +467,7 @@ def _build_image_big_url(image_paths: Optional[str]) -> Optional[str]:
     object_path = _normalize_video_object_path(image_big_path)
     if not object_path:
         return None
-    scheme = "https" if MINIO_SECURE else "http"
-    return f"{scheme}://{MINIO_ENDPOINT}/{MINIO_BUCKET}/{object_path}"
+    return f"/{MINIO_BUCKET}/{object_path}"
 
 
 def _build_image_variant_urls(image_paths: Optional[str]) -> Dict[str, Optional[str]]:
@@ -411,6 +515,9 @@ def search_events(
     page_size: int = 20,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """查询事件记录并返回分页结果。"""
+    # questions_list 会在运营时直接改库，检索前刷新缓存避免下拉问题列表过期
+    refresh_event_dict_cache()
+
     project_ids = [item.strip() for item in (project_ids or []) if item and item.strip()]
     event_type_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
     page = max(page, 1)
@@ -440,16 +547,19 @@ def search_events(
             AND TRIM(IFNULL(segment_statuses_json, '')) <> ''
             AND segment_statuses_json <> '[]'
             AND segment_statuses_json NOT LIKE '%待定%'
+            AND segment_statuses_json NOT LIKE '%待标注%'
             """
         )
     elif processing_status == "unprocessed":
         where_conditions.append(
             """
             (
-                IFNULL(segment_count, 0) <= 0
-                OR TRIM(IFNULL(segment_statuses_json, '')) = ''
-                OR segment_statuses_json = '[]'
-                OR segment_statuses_json LIKE '%待定%'
+                TRIM(IFNULL(segment_statuses_json, '')) <> ''
+                AND segment_statuses_json <> '[]'
+                AND (
+                    segment_statuses_json LIKE '%待定%'
+                    OR segment_statuses_json LIKE '%待标注%'
+                )
             )
             """
         )
@@ -492,6 +602,7 @@ def search_events(
                 segment_paths_json,
                 segment_descriptions_json,
                 segment_statuses_json,
+                questions_answers_list,
                 created_at
             FROM event_records
             WHERE {where_clause}
@@ -512,6 +623,13 @@ def search_events(
         ]
         segment_urls = [_build_video_url(item) for item in normalized_segment_paths]
         image_variants = _build_image_variant_urls(row["image_paths"])
+        segment_count = int(row["segment_count"] or 0)
+        questions_answers_list = _parse_questions_answers_2d(
+            row["questions_answers_list"],
+            segment_count=segment_count,
+            event_type_code=row["event_type_corrected"] or "",
+            event_id=str(row["event_id"]),
+        )
         project_name = get_project_name_by_id(row["project_id"]) or row["project_name"] or row["project_id"]
         event_type_name = (
             get_event_type_name_by_code(row["event_type_corrected"])
@@ -531,11 +649,13 @@ def search_events(
                 "startTime": row["start_time"] or row["created_at"] or "",
                 "videoPath": normalized_video_path,
                 "videoUrl": _build_video_url(row["video_path"]),
-                "segmentCount": int(row["segment_count"] or 0),
+                "segmentCount": segment_count,
                 "segmentPaths": normalized_segment_paths,
                 "segmentUrls": segment_urls,
                 "segmentDescriptions": segment_descriptions,
                 "segmentStatuses": segment_statuses,
+                "questionsAnswersList": questions_answers_list,
+                "eventTypeQuestions": get_event_type_questions_by_code(row["event_type_corrected"] or ""),
                 "imageBigUrl": _build_image_big_url(row["image_paths"]),
                 "imageCompositeUrl": image_variants["composite"],
                 "imageOverlayUrl": image_variants["overlay"],
@@ -608,6 +728,7 @@ def update_event_segmentation_result(
     payload_paths = json.dumps(segment_paths, ensure_ascii=False)
     payload_descriptions = json.dumps(segment_descriptions, ensure_ascii=False)
     payload_statuses = json.dumps(segment_statuses, ensure_ascii=False)
+    payload_questions_answers = json.dumps([[] for _ in range(len(segment_paths))], ensure_ascii=False)
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -617,7 +738,8 @@ def update_event_segmentation_result(
                 segment_count = ?,
                 segment_paths_json = ?,
                 segment_descriptions_json = ?,
-                segment_statuses_json = ?
+                segment_statuses_json = ?,
+                questions_answers_list = ?
             WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
             """,
             (
@@ -625,6 +747,7 @@ def update_event_segmentation_result(
                 payload_paths,
                 payload_descriptions,
                 payload_statuses,
+                payload_questions_answers,
                 event_id,
                 project_id,
                 event_type_corrected,
@@ -638,12 +761,17 @@ def update_event_segment_annotations(
     event_type_corrected: str,
     segment_descriptions: List[str],
     segment_statuses: List[str],
+    questions_answers_list: Optional[List[List[Dict[str, str]]]] = None,
 ) -> None:
     if len(segment_descriptions) != len(segment_statuses):
         raise ValueError("分段描述和分段状态长度不一致")
 
     payload_descriptions = json.dumps(segment_descriptions, ensure_ascii=False)
     payload_statuses = json.dumps(segment_statuses, ensure_ascii=False)
+    payload_questions_answers = json.dumps(
+        questions_answers_list if questions_answers_list is not None else [],
+        ensure_ascii=False,
+    )
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -651,12 +779,14 @@ def update_event_segment_annotations(
             UPDATE event_records
             SET
                 segment_descriptions_json = ?,
-                segment_statuses_json = ?
+                segment_statuses_json = ?,
+                questions_answers_list = ?
             WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
             """,
             (
                 payload_descriptions,
                 payload_statuses,
+                payload_questions_answers,
                 event_id,
                 project_id,
                 event_type_corrected,
