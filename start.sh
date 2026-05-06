@@ -7,6 +7,31 @@ echo "TagLens AI 前端启动脚本"
 echo "=========================================="
 echo ""
 
+# 可选：从前端启动脚本触发 MP4 faststart 后台任务（默认关闭）
+# 用法示例：
+#   RUN_MP4_FASTSTART_ON_START=1 MP4_FASTSTART_PREFIX="event_data/WHJM-9096/" MP4_FASTSTART_LIMIT=100 bash start.sh
+if [ "${RUN_MP4_FASTSTART_ON_START:-0}" = "1" ]; then
+    FASTSTART_SCRIPT="scripts/mp4_faststart_minio_batch.py"
+    FASTSTART_LOG="logs/mp4_faststart_startup.log"
+    FASTSTART_PREFIX="${MP4_FASTSTART_PREFIX:-event_data/}"
+    FASTSTART_LIMIT="${MP4_FASTSTART_LIMIT:-0}"
+    FASTSTART_EXTRA_ARGS="${MP4_FASTSTART_EXTRA_ARGS:-}"
+
+    mkdir -p logs
+    if pgrep -f "mp4_faststart_minio_batch.py" > /dev/null 2>&1; then
+        echo ">> MP4 faststart 任务已在运行，跳过重复启动"
+    elif [ -f "$FASTSTART_SCRIPT" ]; then
+        echo ">> 启动 MP4 faststart 后台任务: prefix=$FASTSTART_PREFIX limit=$FASTSTART_LIMIT"
+        nohup backend/venv/bin/python "$FASTSTART_SCRIPT" \
+            --prefix "$FASTSTART_PREFIX" \
+            --limit "$FASTSTART_LIMIT" \
+            $FASTSTART_EXTRA_ARGS >> "$FASTSTART_LOG" 2>&1 &
+        echo ">> 日志: $FASTSTART_LOG"
+    else
+        echo ">> 未找到 faststart 脚本: $FASTSTART_SCRIPT"
+    fi
+fi
+
 # 检查并重启前端服务
 echo ""
 echo "正在检查前端服务状态..."
