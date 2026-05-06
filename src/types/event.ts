@@ -3,6 +3,7 @@ export interface EventSearchRequest {
   eventTypeCodes?: string[];
   sourceName?: string;
   processingStatus?: 'all' | 'processed' | 'unprocessed';
+  questionAnswerStatus?: 'all' | 'all_answered' | 'all_unanswered' | 'partially_answered';
   startDate?: string;
   endDate?: string;
   page?: number;

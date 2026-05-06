@@ -504,11 +504,63 @@ def _parse_json_string_list(raw_value: Optional[str]) -> List[str]:
         return []
 
 
+def _classify_question_answer_status(
+    questions_answers_list: List[List[Dict[str, str]]],
+    segment_count: int,
+) -> str:
+    if segment_count <= 0 or not questions_answers_list:
+        return "all_unanswered"
+
+    normalized_segments = questions_answers_list[:segment_count]
+    if len(normalized_segments) < segment_count:
+        normalized_segments.extend([[] for _ in range(segment_count - len(normalized_segments))])
+
+    total_questions = 0
+    answered_questions = 0
+    has_question_each_segment = True
+
+    for segment in normalized_segments:
+        question_count_this_segment = 0
+        for qa in (segment or []):
+            question = str((qa or {}).get("question", "")).strip()
+            answer = str((qa or {}).get("answer", "")).strip()
+            if not question:
+                continue
+            question_count_this_segment += 1
+            total_questions += 1
+            if answer:
+                answered_questions += 1
+        if question_count_this_segment == 0:
+            has_question_each_segment = False
+
+    if total_questions == 0 or answered_questions == 0:
+        return "all_unanswered"
+
+    if has_question_each_segment and answered_questions == total_questions:
+        return "all_answered"
+
+    return "partially_answered"
+
+
+def _match_question_answer_status(
+    questions_answers_list: List[List[Dict[str, str]]],
+    segment_count: int,
+    target_status: str,
+) -> bool:
+    if target_status == "all":
+        return True
+    return _classify_question_answer_status(
+        questions_answers_list=questions_answers_list,
+        segment_count=segment_count,
+    ) == target_status
+
+
 def search_events(
     project_ids: Optional[List[str]] = None,
     event_type_codes: Optional[List[str]] = None,
     source_name: Optional[str] = None,
     processing_status: str = "all",
+    question_answer_status: str = "all",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page: int = 1,
@@ -577,42 +629,66 @@ def search_events(
 
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
+        if question_answer_status == "all":
+            count_sql = f"""
+                SELECT COUNT(*)
+                FROM event_records
+                WHERE {where_clause}
+            """
+            cursor.execute(count_sql, params)
+            total_count = int(cursor.fetchone()[0] or 0)
+            search_sql = f"""
+                SELECT
+                    event_id,
+                    project_id,
+                    project_name,
+                    event_type_corrected,
+                    event_name_corrected,
+                    event_name,
+                    source_name,
+                    start_time,
+                    image_paths,
+                    video_path,
+                    segment_count,
+                    segment_paths_json,
+                    segment_descriptions_json,
+                    segment_statuses_json,
+                    questions_answers_list,
+                    created_at
+                FROM event_records
+                WHERE {where_clause}
+                ORDER BY start_time DESC, event_id DESC
+                LIMIT ? OFFSET ?
+            """
+            cursor.execute(search_sql, [*params, page_size, offset])
+            rows = cursor.fetchall()
+        else:
+            search_sql = f"""
+                SELECT
+                    event_id,
+                    project_id,
+                    project_name,
+                    event_type_corrected,
+                    event_name_corrected,
+                    event_name,
+                    source_name,
+                    start_time,
+                    image_paths,
+                    video_path,
+                    segment_count,
+                    segment_paths_json,
+                    segment_descriptions_json,
+                    segment_statuses_json,
+                    questions_answers_list,
+                    created_at
+                FROM event_records
+                WHERE {where_clause}
+                ORDER BY start_time DESC, event_id DESC
+            """
+            cursor.execute(search_sql, params)
+            rows = cursor.fetchall()
 
-        count_sql = f"""
-            SELECT COUNT(*)
-            FROM event_records
-            WHERE {where_clause}
-        """
-        cursor.execute(count_sql, params)
-        total_count = int(cursor.fetchone()[0] or 0)
-
-        search_sql = f"""
-            SELECT
-                event_id,
-                project_id,
-                project_name,
-                event_type_corrected,
-                event_name_corrected,
-                event_name,
-                source_name,
-                start_time,
-                image_paths,
-                video_path,
-                segment_count,
-                segment_paths_json,
-                segment_descriptions_json,
-                segment_statuses_json,
-                questions_answers_list,
-                created_at
-            FROM event_records
-            WHERE {where_clause}
-            ORDER BY start_time DESC, event_id DESC
-            LIMIT ? OFFSET ?
-        """
-        cursor.execute(search_sql, [*params, page_size, offset])
-        rows = cursor.fetchall()
-
-    results: List[Dict[str, Any]] = []
+    raw_results: List[Dict[str, Any]] = []
     for row in rows:
         normalized_video_path = _normalize_video_object_path(row["video_path"])
         segment_paths = _parse_json_string_list(row["segment_paths_json"])
@@ -630,6 +706,13 @@ def search_events(
             event_type_code=row["event_type_corrected"] or "",
             event_id=str(row["event_id"]),
         )
+        if not _match_question_answer_status(
+            questions_answers_list=questions_answers_list,
+            segment_count=segment_count,
+            target_status=question_answer_status,
+        ):
+            continue
+
         project_name = get_project_name_by_id(row["project_id"]) or row["project_name"] or row["project_id"]
         event_type_name = (
             get_event_type_name_by_code(row["event_type_corrected"])
@@ -637,7 +720,7 @@ def search_events(
             or row["event_name"]
             or row["event_type_corrected"]
         )
-        results.append(
+        raw_results.append(
             {
                 "eventId": str(row["event_id"]),
                 "uuid": str(row["event_id"]),
@@ -663,7 +746,13 @@ def search_events(
             }
         )
 
-    return results, total_count
+    if question_answer_status == "all":
+        return raw_results, total_count
+
+    total_count = len(raw_results)
+    start_idx = offset
+    end_idx = offset + page_size
+    return raw_results[start_idx:end_idx], total_count
 
 
 def get_pending_event_videos_for_segmentation(

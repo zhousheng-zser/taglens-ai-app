@@ -47,6 +47,12 @@ const PROCESSING_STATUS_OPTIONS = [
   { value: 'processed', label: '已标注完成' },
   { value: 'unprocessed', label: '待标注' },
 ] as const;
+const QA_STATUS_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'all_answered', label: '全部问题已回答' },
+  { value: 'all_unanswered', label: '全部问题未回答' },
+  { value: 'partially_answered', label: '部分问题已回答' },
+] as const;
 
 type EventStreamPlayerProps = {
   record: EventSearchResult;
@@ -619,6 +625,7 @@ export default function EventQueryPage() {
   const [selectedEventTypes, setSelectedEventTypes] = useState<string[]>([]);
   const [videoSourceFilter, setVideoSourceFilter] = useState('');
   const [processingStatus, setProcessingStatus] = useState<'all' | 'processed' | 'unprocessed'>('all');
+  const [questionAnswerStatus, setQuestionAnswerStatus] = useState<'all' | 'all_answered' | 'all_unanswered' | 'partially_answered'>('all');
   const [selectedRange, setSelectedRange] = useState('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -700,6 +707,7 @@ export default function EventQueryPage() {
     setSelectedEventTypes([]);
     setVideoSourceFilter('');
     setProcessingStatus('all');
+    setQuestionAnswerStatus('all');
     setSelectedRange('all');
     setStartDate('');
     setEndDate('');
@@ -715,6 +723,7 @@ export default function EventQueryPage() {
         eventTypeCodes: selectedEventTypes,
         sourceName: videoSourceFilter.trim() || undefined,
         processingStatus,
+        questionAnswerStatus,
         startDate: startDate ? `${startDate} 00:00:00.000000` : undefined,
         endDate: endDate ? `${endDate} 23:59:59.999999` : undefined,
         page: targetPage,
@@ -912,7 +921,7 @@ export default function EventQueryPage() {
                   </Button>
                 ))}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-[repeat(15,minmax(0,1fr))] gap-3 items-end">
+              <div className="grid grid-cols-1 md:grid-cols-[repeat(17,minmax(0,1fr))] gap-3 items-end">
                 <div className="space-y-2 md:col-span-2">
                   <label className="text-xs font-medium text-muted-foreground">项目分类</label>
                   <DropdownMenu>
@@ -990,6 +999,21 @@ export default function EventQueryPage() {
                     </SelectTrigger>
                     <SelectContent>
                       {PROCESSING_STATUS_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs font-medium text-muted-foreground">问答对状态</label>
+                  <Select value={questionAnswerStatus} onValueChange={(value: 'all' | 'all_answered' | 'all_unanswered' | 'partially_answered') => setQuestionAnswerStatus(value)}>
+                    <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {QA_STATUS_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           {option.label}
                         </SelectItem>

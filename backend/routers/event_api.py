@@ -25,6 +25,7 @@ class EventSearchRequest(BaseModel):
     eventTypeCodes: List[str] = []
     sourceName: Optional[str] = None
     processingStatus: str = "all"
+    questionAnswerStatus: str = "all"
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     page: int = 1
@@ -135,6 +136,8 @@ async def search_events_api(request: EventSearchRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="pageSize 必须大于等于 1")
     if request.processingStatus not in {"all", "processed", "unprocessed"}:
         raise HTTPException(status_code=400, detail="processingStatus 取值非法")
+    if request.questionAnswerStatus not in {"all", "all_answered", "all_unanswered", "partially_answered"}:
+        raise HTTPException(status_code=400, detail="questionAnswerStatus 取值非法")
 
     try:
         results, total = search_events(
@@ -142,6 +145,7 @@ async def search_events_api(request: EventSearchRequest) -> Dict[str, Any]:
             event_type_codes=request.eventTypeCodes,
             source_name=request.sourceName,
             processing_status=request.processingStatus,
+            question_answer_status=request.questionAnswerStatus,
             start_date=request.startDate,
             end_date=request.endDate,
             page=request.page,
