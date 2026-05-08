@@ -555,12 +555,45 @@ def _match_question_answer_status(
     ) == target_status
 
 
+def _classify_description_status(
+    segment_descriptions: List[str],
+    segment_count: int,
+) -> str:
+    if segment_count <= 0:
+        return "all_unedited"
+
+    normalized_descriptions = segment_descriptions[:segment_count]
+    if len(normalized_descriptions) < segment_count:
+        normalized_descriptions.extend(["" for _ in range(segment_count - len(normalized_descriptions))])
+
+    edited_count = sum(1 for item in normalized_descriptions if str(item or "").strip())
+    if edited_count == 0:
+        return "all_unedited"
+    if edited_count == segment_count:
+        return "all_edited"
+    return "partially_edited"
+
+
+def _match_description_status(
+    segment_descriptions: List[str],
+    segment_count: int,
+    target_status: str,
+) -> bool:
+    if target_status == "all":
+        return True
+    return _classify_description_status(
+        segment_descriptions=segment_descriptions,
+        segment_count=segment_count,
+    ) == target_status
+
+
 def search_events(
     project_ids: Optional[List[str]] = None,
     event_type_codes: Optional[List[str]] = None,
     source_name: Optional[str] = None,
     processing_status: str = "all",
     question_answer_status: str = "all",
+    description_status: str = "all",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page: int = 1,
@@ -629,7 +662,8 @@ def search_events(
 
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
-        if question_answer_status == "all":
+        needs_python_filter = question_answer_status != "all" or description_status != "all"
+        if not needs_python_filter:
             count_sql = f"""
                 SELECT COUNT(*)
                 FROM event_records
@@ -712,6 +746,12 @@ def search_events(
             target_status=question_answer_status,
         ):
             continue
+        if not _match_description_status(
+            segment_descriptions=segment_descriptions,
+            segment_count=segment_count,
+            target_status=description_status,
+        ):
+            continue
 
         project_name = get_project_name_by_id(row["project_id"]) or row["project_name"] or row["project_id"]
         event_type_name = (
@@ -746,7 +786,7 @@ def search_events(
             }
         )
 
-    if question_answer_status == "all":
+    if question_answer_status == "all" and description_status == "all":
         return raw_results, total_count
 
     total_count = len(raw_results)

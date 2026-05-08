@@ -13,6 +13,7 @@ import { zhCN } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
 import { handleSearch } from '@/app/actions';
 import type { ImageSearchResult } from '@/types/analysis';
+import { getCurrentUser, type CurrentUser } from '@/lib/auth';
 import {
     Select,
     SelectContent,
@@ -40,6 +41,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500];
 
 export default function TagQueryPage() {
     // 状态定义
+    const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
     const [startDate, setStartDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
     const [endDate, setEndDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
     const [startTime, setStartTime] = useState<string>('00:00:00');
@@ -71,6 +73,7 @@ export default function TagQueryPage() {
     const { toast } = useToast();
 
     const DELETE_API_ENDPOINT = '/api/backend/images/delete';
+    const isAdmin = currentUser?.role === 'admin';
 
     const openDatePicker = (inputRef: React.RefObject<HTMLInputElement | null>) => {
         const input = inputRef.current;
@@ -175,6 +178,7 @@ export default function TagQueryPage() {
 
     // 初始加载：今天
     useEffect(() => {
+        getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null));
         handleQuickRangeSelect('today');
         // useEffect 依赖项处理，这里手动调用一次
         const start = startOfDay(new Date());
@@ -588,19 +592,21 @@ export default function TagQueryPage() {
                                             >
                                                 <TableCell className="pl-6">
                                                     <div className="relative h-12 w-20 rounded shadow-md overflow-hidden bg-muted transition-transform group-hover:scale-105">
-                                                        <button
-                                                            type="button"
-                                                            className="absolute right-1 top-1 z-20 inline-flex h-5 w-5 items-center justify-center rounded bg-black/55 text-white/90 hover:bg-red-600 transition-colors"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                handleDeleteImage(item);
-                                                            }}
-                                                            disabled={deletingUuid === item.uuid}
-                                                            aria-label="删除图片"
-                                                            title="删除图片"
-                                                        >
-                                                            <Trash2 className="h-3 w-3" />
-                                                        </button>
+                                                        {isAdmin ? (
+                                                            <button
+                                                                type="button"
+                                                                className="absolute right-1 top-1 z-20 inline-flex h-5 w-5 items-center justify-center rounded bg-black/55 text-white/90 hover:bg-red-600 transition-colors"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    handleDeleteImage(item);
+                                                                }}
+                                                                disabled={deletingUuid === item.uuid}
+                                                                aria-label="删除图片"
+                                                                title="删除图片"
+                                                            >
+                                                                <Trash2 className="h-3 w-3" />
+                                                            </button>
+                                                        ) : null}
                                                         <img
                                                             src={getImageUrl(item.filePath)}
                                                             alt={item.fileName || 'Image'}
@@ -684,19 +690,21 @@ export default function TagQueryPage() {
                                                     onClick={() => handleRowClick(item)}
                                                 >
                                                     <div className="relative aspect-video w-full overflow-hidden bg-muted">
-                                                        <button
-                                                            type="button"
-                                                            className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded bg-black/55 text-white/90 hover:bg-red-600 transition-colors"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                handleDeleteImage(item);
-                                                            }}
-                                                            disabled={deletingUuid === item.uuid}
-                                                            aria-label="删除图片"
-                                                            title="删除图片"
-                                                        >
-                                                            <Trash2 className="h-3.5 w-3.5" />
-                                                        </button>
+                                                        {isAdmin ? (
+                                                            <button
+                                                                type="button"
+                                                                className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded bg-black/55 text-white/90 hover:bg-red-600 transition-colors"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    handleDeleteImage(item);
+                                                                }}
+                                                                disabled={deletingUuid === item.uuid}
+                                                                aria-label="删除图片"
+                                                                title="删除图片"
+                                                            >
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </button>
+                                                        ) : null}
                                                         <img
                                                             src={getImageUrl(item.filePath)}
                                                             alt={item.fileName || 'Image'}

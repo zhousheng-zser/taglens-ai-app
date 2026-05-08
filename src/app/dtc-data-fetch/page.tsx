@@ -8,6 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
+import { AuthGate } from '@/components/AuthGate';
 import {
   runDtcFetch,
   listDtcTasks,
@@ -23,7 +24,7 @@ import {
 import type { DtcResultItem } from '@/types/analysis';
 import { Loader2, Upload, FolderOpen, Copy, Check, Download } from 'lucide-react';
 
-export default function DtcDataFetchPage() {
+function DtcDataFetchContent() {
   const { toast } = useToast();
   const [mode, setMode] = useState<DtcFetchMode>('upload');
   const [files, setFiles] = useState<File[]>([]);
@@ -663,5 +664,13 @@ export default function DtcDataFetchPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function DtcDataFetchPage() {
+  return (
+    <AuthGate adminOnly>
+      <DtcDataFetchContent />
+    </AuthGate>
   );
 }

@@ -13,6 +13,7 @@ import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useToast } from '@/hooks/use-toast';
+import { AuthGate } from '@/components/AuthGate';
 import {
   createBulkImportJob,
   resumeBulkImport,
@@ -44,7 +45,7 @@ const STATUS_LABELS: Record<string, string> = {
   error: '错误',
 };
 
-export default function BulkImportPage() {
+function BulkImportContent() {
   const [threshold, setThreshold] = useState(0.7409);
   const [importDirectory, setImportDirectory] = useState('./data/local/img');
   const [allJobs, setAllJobs] = useState<BulkImportJob[]>([]);
@@ -669,5 +670,13 @@ export default function BulkImportPage() {
         </Card>
       )}
     </div>
+  );
+}
+
+export default function BulkImportPage() {
+  return (
+    <AuthGate adminOnly>
+      <BulkImportContent />
+    </AuthGate>
   );
 }

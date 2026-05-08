@@ -17,6 +17,7 @@ export async function GET(
       headers: {
         // 透传 Range，支持视频分段播放
         ...(request.headers.get('range') ? { Range: request.headers.get('range') as string } : {}),
+        ...(request.headers.get('cookie') ? { Cookie: request.headers.get('cookie') as string } : {}),
       },
       // 增加超时时间到10分钟（600秒）
       signal: AbortSignal.timeout(600000),
@@ -50,7 +51,12 @@ export async function GET(
 
     // 否则返回 JSON 响应
     const data = await response.json();
-    return NextResponse.json(data);
+    const nextResponse = NextResponse.json(data);
+    const setCookie = response.headers.get('set-cookie');
+    if (setCookie) {
+      nextResponse.headers.set('set-cookie', setCookie);
+    }
+    return nextResponse;
   } catch (error: any) {
     console.error('代理请求失败:', error);
     return NextResponse.json(
@@ -77,6 +83,7 @@ export async function POST(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...(request.headers.get('cookie') ? { Cookie: request.headers.get('cookie') as string } : {}),
       },
       body: JSON.stringify(body),
     });
@@ -92,7 +99,52 @@ export async function POST(
     }
 
     const data = await response.json();
-    return NextResponse.json(data);
+    const nextResponse = NextResponse.json(data);
+    const setCookie = response.headers.get('set-cookie');
+    if (setCookie) {
+      nextResponse.headers.set('set-cookie', setCookie);
+    }
+    return nextResponse;
+  } catch (error: any) {
+    console.error('代理请求失败:', error);
+    return NextResponse.json(
+      { error: '无法连接到后端服务' },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  try {
+    const { path } = await params;
+    const pathStr = path.join('/');
+    const url = `${BACKEND_URL}/${pathStr}`;
+
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        ...(request.headers.get('cookie') ? { Cookie: request.headers.get('cookie') as string } : {}),
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return NextResponse.json(
+        { error: `后端服务错误: ${response.status}`, details: errorText },
+        { status: response.status }
+      );
+    }
+
+    const data = await response.json();
+    const nextResponse = NextResponse.json(data);
+    const setCookie = response.headers.get('set-cookie');
+    if (setCookie) {
+      nextResponse.headers.set('set-cookie', setCookie);
+    }
+    return nextResponse;
   } catch (error: any) {
     console.error('代理请求失败:', error);
     return NextResponse.json(

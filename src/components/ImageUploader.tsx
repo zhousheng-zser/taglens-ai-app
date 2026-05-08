@@ -41,7 +41,7 @@ export function ImageUploader({ onImageUpload, onFilesSelected, imagePreview, on
         target: {
           files: [imageFiles[0]]
         }
-      } as React.ChangeEvent<HTMLInputElement>;
+      } as unknown as React.ChangeEvent<HTMLInputElement>;
       onImageUpload(fakeEvent);
     }
   };

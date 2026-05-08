@@ -1,8 +1,38 @@
-import { Tags, Home, Image as ImageIcon, Info, Search, Upload, Cloud, Database, Video } from 'lucide-react';
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Tags, Home, Image as ImageIcon, Info, Search, Upload, Cloud, Database, Video, Users, LogOut } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
+import { AUTH_STATE_CHANGED_EVENT, getCurrentUser, logout, type CurrentUser } from '@/lib/auth';
 
 export function Header() {
+  const router = useRouter();
+  const [user, setUser] = useState<CurrentUser | null>(null);
+
+  useEffect(() => {
+    const refreshUser = () => {
+      getCurrentUser().then(setUser).catch(() => setUser(null));
+    };
+    refreshUser();
+    window.addEventListener(AUTH_STATE_CHANGED_EVENT, refreshUser);
+    window.addEventListener('focus', refreshUser);
+    return () => {
+      window.removeEventListener(AUTH_STATE_CHANGED_EVENT, refreshUser);
+      window.removeEventListener('focus', refreshUser);
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    await logout().catch(() => undefined);
+    setUser(null);
+    router.replace('/login');
+    router.refresh();
+  };
+
+  const isAdmin = user?.role === 'admin';
+
   return (
     <header className="py-4 px-4 sm:px-6 lg:px-8 border-b border-border/40 bg-background/95 backdrop-blur-sm sticky top-0 z-50">
       <div className="container mx-auto flex items-center justify-between gap-4">
@@ -36,31 +66,50 @@ export function Header() {
               <Search className="h-4 w-4" /> 标签搜索
             </Button>
           </Link>
-          <Link href="/bulk-import" passHref>
-            <Button variant="ghost" className="flex items-center gap-2">
-              <Upload className="h-4 w-4" /> 批量导入
-            </Button>
-          </Link>
-          <Link href="/project-sync" passHref>
-            <Button variant="ghost" className="flex items-center gap-2">
-              <Cloud className="h-4 w-4" /> 项目同步
-            </Button>
-          </Link>
-          <Link href="/data-management" passHref>
-            <Button variant="ghost" className="flex items-center gap-2">
-              <Database className="h-4 w-4" /> 数据管理
-            </Button>
-          </Link>
-          <Link href="/dtc-data-fetch" passHref>
-            <Button variant="ghost" className="flex items-center gap-2">
-              <Database className="h-4 w-4" /> DTC数据获取
-            </Button>
-          </Link>
+          {isAdmin ? (
+            <>
+              <Link href="/bulk-import" passHref>
+                <Button variant="ghost" className="flex items-center gap-2">
+                  <Upload className="h-4 w-4" /> 批量导入
+                </Button>
+              </Link>
+              <Link href="/project-sync" passHref>
+                <Button variant="ghost" className="flex items-center gap-2">
+                  <Cloud className="h-4 w-4" /> 项目同步
+                </Button>
+              </Link>
+              <Link href="/data-management" passHref>
+                <Button variant="ghost" className="flex items-center gap-2">
+                  <Database className="h-4 w-4" /> 数据管理
+                </Button>
+              </Link>
+              <Link href="/dtc-data-fetch" passHref>
+                <Button variant="ghost" className="flex items-center gap-2">
+                  <Database className="h-4 w-4" /> DTC数据获取
+                </Button>
+              </Link>
+              <Link href="/user-management" passHref>
+                <Button variant="ghost" className="flex items-center gap-2">
+                  <Users className="h-4 w-4" /> 用户管理
+                </Button>
+              </Link>
+            </>
+          ) : null}
           <Link href="/about" passHref>
             <Button variant="ghost" className="flex items-center gap-2">
               <Info className="h-4 w-4" /> 关于
             </Button>
           </Link>
+          {user ? (
+            <Button variant="outline" className="flex items-center gap-2" onClick={handleLogout}>
+              <LogOut className="h-4 w-4" />
+              {user.displayName}
+            </Button>
+          ) : (
+            <Link href="/login" passHref>
+              <Button variant="outline">登录</Button>
+            </Link>
+          )}
         </nav>
       </div>
     </header>

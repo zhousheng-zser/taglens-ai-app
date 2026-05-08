@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 
 import { useToast } from '@/hooks/use-toast';
+import { AuthGate } from '@/components/AuthGate';
 import {
     getProjects,
     runProjectScript,
@@ -52,7 +53,7 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 
-export default function ProjectSyncPage() {
+function ProjectSyncContent() {
     const [projects, setProjects] = useState<ProjectParams[]>([]);
     const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -696,5 +697,13 @@ export default function ProjectSyncPage() {
                 </DialogContent>
             </Dialog>
         </div >
+    );
+}
+
+export default function ProjectSyncPage() {
+    return (
+        <AuthGate adminOnly>
+            <ProjectSyncContent />
+        </AuthGate>
     );
 }

@@ -2,6 +2,7 @@
 
 import type { TrafficAnalysisOutput } from '@/types/analysis';
 import type { EventMetaResponse, EventSearchRequest, EventSearchResponse } from '@/types/event';
+import { cookies } from 'next/headers';
 
 interface DualAnalysisResult {
   qwen: TrafficAnalysisOutput | null;
@@ -731,12 +732,14 @@ export async function deleteTagQueryImage(uuid: string): Promise<{ success: bool
 export async function searchEvents(request: EventSearchRequest): Promise<EventSearchResponse> {
   const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
   const url = `${backendUrl}/events/search`;
+  const cookieHeader = (await cookies()).toString();
 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
       body: JSON.stringify(request),
     });
@@ -762,12 +765,14 @@ export async function searchEvents(request: EventSearchRequest): Promise<EventSe
 export async function getEventMeta(): Promise<EventMetaResponse> {
   const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
   const url = `${backendUrl}/events/meta`;
+  const cookieHeader = (await cookies()).toString();
 
   try {
     const response = await fetch(url, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
     });
 

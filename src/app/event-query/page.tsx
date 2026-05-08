@@ -1,16 +1,19 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AuthGate } from '@/components/AuthGate';
 import { ParticleBackground } from '@/components/ParticleBackground';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Search, RotateCcw, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2 } from 'lucide-react';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { getEventMeta, searchEvents } from '@/app/actions';
 import type { EventOptionItem, EventSearchResult } from '@/types/event';
+import type { CurrentUser } from '@/lib/auth';
 import {
   Select,
   SelectContent,
@@ -52,6 +55,12 @@ const QA_STATUS_OPTIONS = [
   { value: 'all_answered', label: '全部问题已回答' },
   { value: 'all_unanswered', label: '全部问题未回答' },
   { value: 'partially_answered', label: '部分问题已回答' },
+] as const;
+const DESCRIPTION_STATUS_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'all_edited', label: '全部已编辑' },
+  { value: 'all_unedited', label: '全部未编辑' },
+  { value: 'partially_edited', label: '部分已编辑' },
 ] as const;
 
 type EventStreamPlayerProps = {
@@ -214,9 +223,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     statuses: string[],
     questionsAnswersList: Array<Array<{ question: string; answer: string }>>,
   ) => {
-    const endpoint = process.env.NEXT_PUBLIC_API_URL
-      ? `${process.env.NEXT_PUBLIC_API_URL}/events/segment-annotations`
-      : '/api/backend/events/segment-annotations';
+    const endpoint = '/api/backend/events/segment-annotations';
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -620,13 +627,15 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
   );
 });
 
-export default function EventQueryPage() {
+function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const [selectedProjectCategories, setSelectedProjectCategories] = useState<string[]>([]);
   const [selectedEventTypes, setSelectedEventTypes] = useState<string[]>([]);
   const [videoSourceFilter, setVideoSourceFilter] = useState('');
   const [processingStatus, setProcessingStatus] = useState<'all' | 'processed' | 'unprocessed'>('all');
   const [questionAnswerStatus, setQuestionAnswerStatus] = useState<'all' | 'all_answered' | 'all_unanswered' | 'partially_answered'>('all');
+  const [descriptionStatus, setDescriptionStatus] = useState<'all' | 'all_edited' | 'all_unedited' | 'partially_edited'>('all');
   const [selectedRange, setSelectedRange] = useState('all');
+  const [selectedAssignedRangeId, setSelectedAssignedRangeId] = useState<string>('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [page, setPage] = useState(1);
@@ -646,8 +655,12 @@ export default function EventQueryPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, totalPages);
   const pageData = results;
+  const isReviewer = currentUser?.role === 'reviewer';
+  const assignedRanges = currentUser?.timeRanges || [];
+  const selectedAssignedRange = assignedRanges.find((item) => String(item.id) === selectedAssignedRangeId);
 
   const handleQuickRangeSelect = (range: string) => {
+    setSelectedAssignedRangeId('');
     setSelectedRange(range);
     const now = new Date();
     let start = now;
@@ -708,24 +721,43 @@ export default function EventQueryPage() {
     setVideoSourceFilter('');
     setProcessingStatus('all');
     setQuestionAnswerStatus('all');
+    setDescriptionStatus('all');
     setSelectedRange('all');
+    setSelectedAssignedRangeId('');
     setStartDate('');
     setEndDate('');
     setSelectedRecord(null);
     setPage(1);
   };
 
+  const handleAssignedRangeSelect = (rangeId: string) => {
+    setSelectedAssignedRangeId(rangeId);
+    setSelectedRange('assigned');
+    const matched = assignedRanges.find((item) => String(item.id) === rangeId);
+    if (!matched) return;
+    setStartDate(matched.startTime.slice(0, 10));
+    setEndDate(matched.endTime.slice(0, 10));
+    setPage(1);
+  };
+
   const fetchResults = async (targetPage: number = page) => {
     setIsLoading(true);
     try {
+      const queryStartDate = isReviewer && selectedAssignedRange
+        ? selectedAssignedRange.startTime.replace('T', ' ')
+        : startDate ? `${startDate} 00:00:00.000000` : undefined;
+      const queryEndDate = isReviewer && selectedAssignedRange
+        ? selectedAssignedRange.endTime.replace('T', ' ')
+        : endDate ? `${endDate} 23:59:59.999999` : undefined;
       const response = await searchEvents({
         projectIds: selectedProjectCategories,
         eventTypeCodes: selectedEventTypes,
         sourceName: videoSourceFilter.trim() || undefined,
         processingStatus,
         questionAnswerStatus,
-        startDate: startDate ? `${startDate} 00:00:00.000000` : undefined,
-        endDate: endDate ? `${endDate} 23:59:59.999999` : undefined,
+        descriptionStatus,
+        startDate: queryStartDate,
+        endDate: queryEndDate,
         page: targetPage,
         pageSize,
       });
@@ -753,6 +785,7 @@ export default function EventQueryPage() {
   }, [pageSize]);
 
   useEffect(() => {
+    if (!currentUser) return;
     const initPage = async () => {
       setIsMetaLoading(true);
       try {
@@ -767,12 +800,28 @@ export default function EventQueryPage() {
       await fetchResults(1);
     };
 
+    if (isReviewer && assignedRanges.length > 0 && !selectedAssignedRangeId) {
+      const firstRange = assignedRanges[0];
+      setSelectedAssignedRangeId(String(firstRange.id));
+      setSelectedRange('assigned');
+      setStartDate(firstRange.startTime.slice(0, 10));
+      setEndDate(firstRange.endTime.slice(0, 10));
+    }
+
     initPage();
-  }, []);
+  }, [currentUser?.id]);
 
   const handleSearch = () => {
     fetchResults(1);
   };
+
+  const renderReviewBadges = (item: EventSearchResult) => (
+    <div className="flex flex-wrap gap-1">
+      <Badge variant={item.statusReviewDone ? 'default' : 'secondary'} className="text-[10px]">样本</Badge>
+      <Badge variant={item.qaReviewDone ? 'default' : 'secondary'} className="text-[10px]">问答</Badge>
+      <Badge variant={item.descriptionReviewDone ? 'default' : 'secondary'} className="text-[10px]">描述</Badge>
+    </div>
+  );
 
   const eventTypeLabel = selectedEventTypes.length > 0
     ? eventTypeOptions.filter((item) => selectedEventTypes.includes(item.code)).map((item) => item.name).join(' / ')
@@ -827,6 +876,9 @@ export default function EventQueryPage() {
           segmentDescriptions: payload.segmentDescriptions,
           segmentStatuses: payload.segmentStatuses,
           questionsAnswersList: payload.questionsAnswersList,
+          statusReviewDone: payload.segmentStatuses.every((status) => status === '正样本' || status === '负样本'),
+          qaReviewDone: payload.questionsAnswersList.every((items) => items.length > 0 && items.every((qa) => qa.question.trim() && qa.answer.trim())),
+          descriptionReviewDone: payload.segmentDescriptions.every((description) => description.trim()),
         };
       }
       return item;
@@ -843,6 +895,9 @@ export default function EventQueryPage() {
           segmentDescriptions: payload.segmentDescriptions,
           segmentStatuses: payload.segmentStatuses,
           questionsAnswersList: payload.questionsAnswersList,
+          statusReviewDone: payload.segmentStatuses.every((status) => status === '正样本' || status === '负样本'),
+          qaReviewDone: payload.questionsAnswersList.every((items) => items.length > 0 && items.every((qa) => qa.question.trim() && qa.answer.trim())),
+          descriptionReviewDone: payload.segmentDescriptions.every((description) => description.trim()),
         };
       }
       return prev;
@@ -858,9 +913,7 @@ export default function EventQueryPage() {
     if (!confirmed) return;
     try {
       setDeletingEventKey(eventKey);
-      const endpoint = process.env.NEXT_PUBLIC_API_URL
-        ? `${process.env.NEXT_PUBLIC_API_URL}/events/delete`
-        : '/api/backend/events/delete';
+      const endpoint = '/api/backend/events/delete';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -905,7 +958,7 @@ export default function EventQueryPage() {
             <div className="space-y-3 bg-background/20 p-4 rounded-lg border border-border/20">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-sm font-medium text-muted-foreground mr-2">事件开始时间</span>
-                {QUICK_TIME_RANGES.map((range) => (
+                {!isReviewer ? QUICK_TIME_RANGES.map((range) => (
                   <Button
                     key={range.value}
                     variant={selectedRange === range.value ? 'default' : 'outline'}
@@ -919,8 +972,27 @@ export default function EventQueryPage() {
                   >
                     {range.label}
                   </Button>
-                ))}
+                )) : null}
+                {isReviewer ? (
+                  <Select value={selectedAssignedRangeId} onValueChange={handleAssignedRangeSelect}>
+                    <SelectTrigger className="h-8 w-[260px] bg-background/40 border-border/40 text-xs">
+                      <SelectValue placeholder="选择我的任务时间段" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {assignedRanges.map((range) => (
+                        <SelectItem key={range.id} value={String(range.id)}>
+                          {range.rangeName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : null}
               </div>
+              {isReviewer && assignedRanges.length === 0 ? (
+                <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200">
+                  当前账号还没有分配事件任务时间段，请联系管理员。
+                </div>
+              ) : null}
               <div className="grid grid-cols-1 md:grid-cols-[repeat(17,minmax(0,1fr))] gap-3 items-end">
                 <div className="space-y-2 md:col-span-2">
                   <label className="text-xs font-medium text-muted-foreground">项目分类</label>
@@ -1014,6 +1086,21 @@ export default function EventQueryPage() {
                     </SelectTrigger>
                     <SelectContent>
                       {QA_STATUS_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs font-medium text-muted-foreground">分段描述状态</label>
+                  <Select value={descriptionStatus} onValueChange={(value: 'all' | 'all_edited' | 'all_unedited' | 'partially_edited') => setDescriptionStatus(value)}>
+                    <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DESCRIPTION_STATUS_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           {option.label}
                         </SelectItem>
@@ -1167,8 +1254,9 @@ export default function EventQueryPage() {
                     <TableHead className="font-semibold">项目分类</TableHead>
                     <TableHead className="font-semibold">事件类型</TableHead>
                     <TableHead className="font-semibold">描述语料</TableHead>
+                    <TableHead className="w-[150px] font-semibold">审核状态</TableHead>
                     <TableHead className="w-[220px] pr-6 font-semibold">文件名</TableHead>
-                    <TableHead className="w-[100px] pr-6 font-semibold text-right">操作</TableHead>
+                    {currentUser?.role === 'admin' ? <TableHead className="w-[100px] pr-6 font-semibold text-right">操作</TableHead> : null}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1205,29 +1293,34 @@ export default function EventQueryPage() {
                           </div>
                         </TableCell>
                         <TableCell className="pr-6 text-xs text-muted-foreground/70 truncate max-w-[220px]" title={item.fileName || '-'}>
+                          {renderReviewBadges(item)}
+                        </TableCell>
+                        <TableCell className="pr-6 text-xs text-muted-foreground/70 truncate max-w-[220px]" title={item.fileName || '-'}>
                           {item.fileName || '-'}
                         </TableCell>
-                        <TableCell className="pr-6 text-right">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10"
-                            disabled={deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteEvent(item);
-                            }}
-                          >
-                            <Trash2 className="h-3.5 w-3.5 mr-1" />
-                            {deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}` ? '删除中' : '删除'}
-                          </Button>
-                        </TableCell>
+                        {currentUser?.role === 'admin' ? (
+                          <TableCell className="pr-6 text-right">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                              disabled={deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteEvent(item);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 mr-1" />
+                              {deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}` ? '删除中' : '删除'}
+                            </Button>
+                          </TableCell>
+                        ) : null}
                       </TableRow>
                     ))
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={7} className="h-40 text-center text-muted-foreground">
+                      <TableCell colSpan={currentUser?.role === 'admin' ? 8 : 7} className="h-40 text-center text-muted-foreground">
                         {isLoading ? '正在查询事件记录...' : '没有找到匹配的事件记录'}
                       </TableCell>
                     </TableRow>
@@ -1261,6 +1354,7 @@ export default function EventQueryPage() {
                           <div className="text-xs text-muted-foreground truncate">项目分类：{item.projectName}</div>
                           <div className="text-sm font-medium truncate">{item.eventTypeName}</div>
                           <div className="text-xs text-muted-foreground truncate">{item.sourceName}</div>
+                          {renderReviewBadges(item)}
                           <TooltipProvider delayDuration={800}>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -1278,6 +1372,7 @@ export default function EventQueryPage() {
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
+                          {currentUser?.role === 'admin' ? (
                           <div className="flex justify-end pt-1">
                             <Button
                               type="button"
@@ -1294,6 +1389,7 @@ export default function EventQueryPage() {
                               {deletingEventKey === `${item.eventId}|${item.projectId}|${item.eventTypeCode}` ? '删除中' : '删除'}
                             </Button>
                           </div>
+                          ) : null}
                         </div>
                       </div>
                     ))}
@@ -1371,5 +1467,15 @@ export default function EventQueryPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function EventQueryPage() {
+  const [user, setUser] = useState<CurrentUser | null>(null);
+
+  return (
+    <AuthGate onUser={setUser}>
+      {user ? <EventQueryContent currentUser={user} /> : null}
+    </AuthGate>
   );
 }

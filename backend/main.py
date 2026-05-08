@@ -45,6 +45,7 @@ from core.database import (
     delete_image_by_uuid,
 )
 from core.event_database import init_event_database
+from core.manage_database import init_manage_database
 from services.bulk_import_storage import (
     create_bulk_import_job,
     update_bulk_import_job_status,
@@ -64,6 +65,7 @@ from core.minio_storage_client import get_storage_client
 from routers import management_api
 from routers import dtc_api
 from routers import event_api
+from routers import auth_api
 from services.business_structure_manager import get_business_manager_for_project
 
 # 加载环境变量
@@ -401,6 +403,8 @@ async def lifespan(app: FastAPI):
     print("数据库初始化完成")
     init_event_database()
     print("事件数据库初始化完成")
+    init_manage_database()
+    print("管理数据库初始化完成")
 
     # 初始化Faiss索引管理器
     print("正在初始化Faiss LSH索引...")
@@ -442,6 +446,7 @@ app.add_middleware(
 app.include_router(management_api.router)
 app.include_router(dtc_api.router)
 app.include_router(event_api.router)
+app.include_router(auth_api.router)
 
 # --- 批量导入相关常量与工具 ---
 BULK_IMPORT_DEFAULT_DIR = Path(__file__).parent.parent / "data" / "local" / "img"
@@ -2719,6 +2724,7 @@ async def update_project_api(
 if __name__ == "__main__":
     # 初始化数据库
     init_database()
+    init_manage_database()
     
     test_qwen_connection()
     

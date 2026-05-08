@@ -4,6 +4,7 @@ export interface EventSearchRequest {
   sourceName?: string;
   processingStatus?: 'all' | 'processed' | 'unprocessed';
   questionAnswerStatus?: 'all' | 'all_answered' | 'all_unanswered' | 'partially_answered';
+  descriptionStatus?: 'all' | 'all_edited' | 'all_unedited' | 'partially_edited';
   startDate?: string;
   endDate?: string;
   page?: number;
@@ -32,6 +33,13 @@ export interface EventSearchResult {
   imageCompositeUrl?: string | null;
   imageOverlayUrl?: string | null;
   fileName?: string | null;
+  reviewerId?: number | null;
+  reviewerUsername?: string | null;
+  reviewerDisplayName?: string | null;
+  reviewTime?: string | null;
+  statusReviewDone?: boolean;
+  qaReviewDone?: boolean;
+  descriptionReviewDone?: boolean;
 }
 
 export interface EventSearchResponse {

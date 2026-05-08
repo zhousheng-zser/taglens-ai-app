@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { AuthGate } from '@/components/AuthGate';
 import {
     DropdownMenu,
     DropdownMenuCheckboxItem,
@@ -27,7 +28,7 @@ interface LogEntry {
     timestamp: string;
 }
 
-export default function DataManagementPage() {
+function DataManagementContent() {
     const { toast } = useToast();
 
     // Input States
@@ -726,5 +727,13 @@ export default function DataManagementPage() {
                 )}
             </div>
         </div>
+    );
+}
+
+export default function DataManagementPage() {
+    return (
+        <AuthGate adminOnly>
+            <DataManagementContent />
+        </AuthGate>
     );
 }

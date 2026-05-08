@@ -34,4 +34,5 @@ fi
 
 echo "正在启动前端开发服务器..."
 echo ""
-npm run dev
+# 过滤高频媒体请求日志，避免控制台被 /bucket-taglens 打爆
+npm run dev 2>&1 | sed -u '/GET \/bucket-taglens\//d'
