@@ -1,0 +1,22 @@
+[Unit]
+Description=TagLens AI 后端 (start-backend.sh)
+Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
+ExecStart=/bin/bash /opt/Traffic-LLM/zser/taglens-ai-app/start-backend.sh
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+TimeoutStopSec=45
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taglens-backend
+
+[Install]
+WantedBy=taglens.target

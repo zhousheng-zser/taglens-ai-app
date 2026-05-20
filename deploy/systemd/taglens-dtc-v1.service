@@ -1,0 +1,23 @@
+[Unit]
+Description=TagLens DTC_v1 分割服务 (SAM3, 端口 8011)
+Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/deploy/SEGMENT_SERVERS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
+Environment=SAM3_SERVER_PORT=8011
+ExecStart=/bin/bash /opt/Traffic-LLM/zser/taglens-ai-app/sam3/start_sam3_server.sh
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taglens-dtc-v1
+
+[Install]
+WantedBy=taglens.target

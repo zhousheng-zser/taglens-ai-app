@@ -182,6 +182,7 @@ def save_labelme_json(image_path: Path, image_np: np.ndarray, masks, text_prompt
         "flags": {},
         "shapes": shapes,
         "imagePath": image_path.name,
+        "Path": str(image_path.resolve()),
         "imageData": image_b64,
         "imageHeight": image_height,
         "imageWidth": image_width,
@@ -269,9 +270,7 @@ def main():
                 masks = masks.cpu().numpy()
             num_masks = len(masks)
             
-            # 构建带数量的文件名: {base_name}_{num_masks}_comparison.png
-            # 例如: photo_3_comparison.png 或 photo_0_comparison.png
-            save_filename = f"{base_name}_{num_masks}_comparison.png"
+            save_filename = f"{base_name}_comparison.png"
             save_path = Path(output_dir) / save_filename
             
             # 保存三图对比

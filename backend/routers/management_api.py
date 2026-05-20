@@ -351,6 +351,21 @@ class EventVideoSegmentRequest(BaseModel):
     eventTypeCodes: List[str] = []
 
 
+def _segment_and_persist_one_event(minio_client, row: Dict[str, Any]) -> Dict[str, Any]:
+    """单条事件视频分块并写库（同步，在线程池中执行，避免阻塞 asyncio 事件循环）。"""
+    video_path = str(row["video_path"] or "").strip()
+    result = process_event_video_segmentation(minio_client=minio_client, video_path=video_path)
+    update_event_segmentation_result(
+        event_id=str(row["event_id"]),
+        project_id=str(row["project_id"]),
+        event_type_corrected=str(row.get("event_type_corrected") or ""),
+        segment_paths=result["segment_paths"],
+        segment_descriptions=result["segment_descriptions"],
+        segment_statuses=result["segment_statuses"],
+    )
+    return result
+
+
 async def event_video_segment_generator(limit: int, event_type_codes: Optional[List[str]] = None):
     safe_limit = max(int(limit or 0), 1)
     normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
@@ -359,7 +374,7 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
     await asyncio.sleep(0.01)
 
     try:
-        ensure_ffmpeg_available()
+        await asyncio.to_thread(ensure_ffmpeg_available)
         yield format_log("FFmpeg 环境检查通过", "success")
     except Exception as exc:
         yield format_log(f"FFmpeg 环境检查失败: {exc}", "error")
@@ -375,9 +390,10 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
         yield format_log("任务结束", "done")
         return
 
-    rows = get_pending_event_videos_for_segmentation(
+    rows = await asyncio.to_thread(
+        get_pending_event_videos_for_segmentation,
         safe_limit,
-        event_type_codes=normalized_codes,
+        normalized_codes,
     )
     total = len(rows)
     if total <= 0:
@@ -404,23 +420,12 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
 
         yield format_log(f"[{idx}/{total}] 开始处理 event_id={event_id}", "info")
         yield format_log(f"  -> 源视频: {video_path}", "progress")
+        yield format_log("  -> 后台执行: 下载 / FFmpeg 分块 / 上传 MinIO ...", "progress")
         await asyncio.sleep(0.01)
         try:
-            result = process_event_video_segmentation(minio_client=minio_client, video_path=video_path)
-            segment_paths = result["segment_paths"]
-            segment_descriptions = result["segment_descriptions"]
-            segment_statuses = result["segment_statuses"]
-
-            update_event_segmentation_result(
-                event_id=event_id,
-                project_id=project_id,
-                event_type_corrected=str(row.get("event_type_corrected") or ""),
-                segment_paths=segment_paths,
-                segment_descriptions=segment_descriptions,
-                segment_statuses=segment_statuses,
-            )
+            result = await asyncio.to_thread(_segment_and_persist_one_event, minio_client, row)
             success_count += 1
-            yield format_log(f"  -> 分块成功: 共 {len(segment_paths)} 段", "success")
+            yield format_log(f"  -> 分块成功: 共 {len(result['segment_paths'])} 段", "success")
         except Exception as exc:
             failed_count += 1
             yield format_log(f"  -> 分块失败: {exc}", "error")

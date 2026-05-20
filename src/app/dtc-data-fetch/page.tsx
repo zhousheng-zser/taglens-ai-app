@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useToast } from '@/hooks/use-toast';
 import { AuthGate } from '@/components/AuthGate';
 import {
@@ -17,20 +18,36 @@ import {
   uploadDtcImageSetChunk,
   listDtcImageSets,
   deleteDtcImageSet,
-  type DtcFetchMode,
-  type DtcTaskItem,
-  type DtcImageSetItem,
-} from '@/app/actions';
-import type { DtcResultItem } from '@/types/analysis';
-import { Loader2, Upload, FolderOpen, Copy, Check, Download } from 'lucide-react';
+} from '@/app/dtc-actions';
+import type {
+  DtcAlgorithm,
+  DtcFetchMode,
+  DtcImageSetItem,
+  DtcResultItem,
+  DtcTaskItem,
+} from '@/types/dtc';
+import { getDisplayFileName, mergeResultItems } from '@/lib/dtc-result-utils';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Loader2, Upload, FolderOpen, Copy, Check, Download, X, ImageIcon } from 'lucide-react';
+
+const DTC_CATEGORIES = ['concept', 'simple', 'complex'] as const;
 
 function DtcDataFetchContent() {
   const { toast } = useToast();
+  const [algorithm, setAlgorithm] = useState<DtcAlgorithm>('dtc_v2');
   const [mode, setMode] = useState<DtcFetchMode>('upload');
   const [files, setFiles] = useState<File[]>([]);
   const [backendPath, setBackendPath] = useState('');
   const [prompt, setPrompt] = useState('');
   const [thresholdText, setThresholdText] = useState('0.3');
+  const [category, setCategory] = useState<string>('simple');
+  const [adapterScaleText, setAdapterScaleText] = useState('0.5');
   const [isRunning, setIsRunning] = useState(false);
   const [isUploadingSet, setIsUploadingSet] = useState(false);
   const [tasks, setTasks] = useState<DtcTaskItem[]>([]);
@@ -42,20 +59,28 @@ function DtcDataFetchContent() {
   const [visibleCount, setVisibleCount] = useState(30);
   const [errorMessage, setErrorMessage] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   const parsedThreshold = Number.parseFloat(thresholdText);
   const thresholdValid = Number.isFinite(parsedThreshold) && parsedThreshold > 0 && parsedThreshold < 1;
+  const parsedAdapterScale = Number.parseFloat(adapterScaleText);
+  const adapterScaleValid =
+    algorithm !== 'dtc_v2' || (Number.isFinite(parsedAdapterScale) && parsedAdapterScale > 0);
 
-  const backendUrl = useMemo(() => {
-    if (process.env.NEXT_PUBLIC_BACKEND_URL) {
-      return process.env.NEXT_PUBLIC_BACKEND_URL;
+  const segmentBaseUrl = useMemo(() => {
+    const hostname = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
+    if (algorithm === 'dtc_v2') {
+      return process.env.NEXT_PUBLIC_DTC_V2_SERVER_URL || `http://${hostname}:8010`;
     }
-    if (typeof window !== 'undefined') {
-      return `http://${window.location.hostname}:8000`;
-    }
-    return 'http://127.0.0.1:8000';
-  }, []);
+    return process.env.NEXT_PUBLIC_DTC_V1_SERVER_URL || `http://${hostname}:8011`;
+  }, [algorithm]);
+
+  const zipApiPrefix = algorithm === 'dtc_v2' ? '/dtc' : '/sam3';
+  const algorithmLabel = algorithm === 'dtc_v2' ? 'DTC_v2' : 'DTC_v1';
   const artifactProxyBase = '/api/dtc/tasks';
+
+  const buildArtifactUrl = (taskId: string, filePath: string) =>
+    `${artifactProxyBase}/${taskId}/artifact?file_path=${encodeURIComponent(filePath)}&algorithm=${algorithm}`;
   const selectedTaskIdRef = useRef('');
   const resultsRequestSeqRef = useRef(0);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -63,16 +88,19 @@ function DtcDataFetchContent() {
   const canSubmit = useMemo(() => {
     if (!prompt.trim()) return false;
     if (!thresholdValid) return false;
+    if (!adapterScaleValid) return false;
     if (mode === 'upload') return selectedImageSetId.trim().length > 0;
     return backendPath.trim().length > 0;
-  }, [prompt, mode, selectedImageSetId, backendPath, thresholdValid]);
+  }, [prompt, mode, selectedImageSetId, backendPath, thresholdValid, adapterScaleValid]);
+
+  const mergedResults = useMemo(() => mergeResultItems(results), [results]);
 
   const visibleResults = useMemo(() => {
-    return results.slice(0, visibleCount);
-  }, [results, visibleCount]);
+    return mergedResults.slice(0, visibleCount);
+  }, [mergedResults, visibleCount]);
 
   const refreshTasks = async (preferTaskId?: string) => {
-    const resp = await listDtcTasks();
+    const resp = await listDtcTasks(algorithm);
     if (!resp.success) return;
     setTasks(resp.tasks);
     setSelectedTaskId((prev) => {
@@ -84,7 +112,7 @@ function DtcDataFetchContent() {
   };
 
   const refreshImageSets = async (preferImageSetId?: string) => {
-    const resp = await listDtcImageSets();
+    const resp = await listDtcImageSets(algorithm);
     if (!resp.success) return;
     setImageSets(resp.imageSets);
     setSelectedImageSetId((prev) => {
@@ -97,7 +125,7 @@ function DtcDataFetchContent() {
 
   const refreshSelectedResults = async (taskId: string) => {
     const reqSeq = ++resultsRequestSeqRef.current;
-    const resp = await getDtcTaskResults(taskId);
+    const resp = await getDtcTaskResults(algorithm, taskId);
     if (!resp.success) return;
     // 仅允许“最新请求 + 当前选中任务”写回，避免切换任务时旧请求覆盖新任务结果
     if (reqSeq !== resultsRequestSeqRef.current) return;
@@ -107,16 +135,22 @@ function DtcDataFetchContent() {
   };
 
   useEffect(() => {
+    setSelectedTaskId('');
+    setSelectedTask(null);
+    setResults([]);
+    setPreviewIndex(null);
+    setSelectedImageSetId('');
     refreshTasks();
     refreshImageSets();
-  }, []);
+  }, [algorithm]);
 
   useEffect(() => {
     selectedTaskIdRef.current = selectedTaskId;
     setVisibleCount(30);
     if (!selectedTaskId) return;
+    setPreviewIndex(null);
     refreshSelectedResults(selectedTaskId);
-  }, [selectedTaskId]);
+  }, [selectedTaskId, algorithm]);
 
   useEffect(() => {
     if (!loadMoreRef.current) return;
@@ -125,15 +159,15 @@ function DtcDataFetchContent() {
         const first = entries[0];
         if (!first?.isIntersecting) return;
         setVisibleCount((prev) => {
-          if (prev >= results.length) return prev;
-          return Math.min(prev + 30, results.length);
+          if (prev >= mergedResults.length) return prev;
+          return Math.min(prev + 30, mergedResults.length);
         });
       },
       { rootMargin: '240px' }
     );
     observer.observe(loadMoreRef.current);
     return () => observer.disconnect();
-  }, [results.length]);
+  }, [mergedResults.length]);
 
   useEffect(() => {
     const timer = setInterval(async () => {
@@ -150,7 +184,7 @@ function DtcDataFetchContent() {
       }
     }, 3000);
     return () => clearInterval(timer);
-  }, [selectedTaskId, mode, selectedTask, results.length]);
+  }, [selectedTaskId, mode, selectedTask, results.length, algorithm]);
 
   const clampThreshold = (value: number): number => {
     if (!Number.isFinite(value)) return 0.3;
@@ -165,6 +199,15 @@ function DtcDataFetchContent() {
     const base = thresholdValid ? parsedThreshold : 0.3;
     const next = clampThreshold(base + delta);
     setThresholdText(formatThreshold(next));
+  };
+
+  const getResultSummary = (item: DtcResultItem): string => {
+    const shapes = Array.isArray(item.resultJson?.shapes) ? item.resultJson.shapes.length : 0;
+    const parts: string[] = [];
+    if (selectedTask?.prompt) parts.push(`Prompt: ${selectedTask.prompt}`);
+    if (selectedTask?.threshold != null) parts.push(`Threshold: ${selectedTask.threshold}`);
+    parts.push(`Masks: ${shapes}`);
+    return parts.join(' | ');
   };
 
   const shortId = (id?: string): string => {
@@ -195,7 +238,7 @@ function DtcDataFetchContent() {
       const chunks = splitFiles(files, 10);
       let imageSetId = '';
       for (const batch of chunks) {
-        const resp = await uploadDtcImageSetChunk(batch, imageSetId || undefined);
+        const resp = await uploadDtcImageSetChunk(algorithm, batch, imageSetId || undefined);
         if (!resp.success || !resp.imageSet) {
           const err = resp.error || '上传图片集失败';
           toast({ variant: 'destructive', title: '上传失败', description: err });
@@ -225,12 +268,22 @@ function DtcDataFetchContent() {
     try {
       const effectiveThreshold = thresholdValid ? parsedThreshold : 0.3;
       const effectivePrompt = prompt.trim();
+      const fetchBase = {
+        algorithm,
+        prompt: effectivePrompt,
+        threshold: effectiveThreshold,
+        ...(algorithm === 'dtc_v2'
+          ? {
+              category,
+              adapter_scale: adapterScaleValid ? parsedAdapterScale : 0.5,
+            }
+          : {}),
+      };
 
       if (mode === 'upload') {
         const response = await runDtcFetch({
+          ...fetchBase,
           mode: 'upload',
-          prompt: effectivePrompt,
-          threshold: effectiveThreshold,
           imageSetId: selectedImageSetId,
         });
         if (!response.success || !response.task) {
@@ -251,9 +304,8 @@ function DtcDataFetchContent() {
         });
       } else {
         const response = await runDtcFetch({
+          ...fetchBase,
           mode: 'path',
-          prompt: effectivePrompt,
-          threshold: effectiveThreshold,
           backendPath: backendPath.trim(),
         });
 
@@ -284,7 +336,7 @@ function DtcDataFetchContent() {
     try {
       let content = '';
       if (item.jsonPath) {
-        const url = `${artifactProxyBase}/${selectedTaskId}/artifact?file_path=${encodeURIComponent(item.jsonPath)}`;
+        const url = buildArtifactUrl(selectedTaskId, item.jsonPath);
         const resp = await fetch(url);
         if (!resp.ok) throw new Error('读取 JSON 失败');
         content = await resp.text();
@@ -307,23 +359,20 @@ function DtcDataFetchContent() {
     }
   };
 
-  const getJsonFileName = (sourceName: string, index: number): string => {
-    const rawName = (sourceName || '').split(/[\\/]/).pop() || `result_${index + 1}.jpg`;
-    if (/\.(jpg|jpeg|png|bmp)$/i.test(rawName)) {
-      return rawName.replace(/\.(jpg|jpeg|png|bmp)$/i, '.json');
+  const getJsonFileName = (item: DtcResultItem, index: number): string => {
+    const base = getDisplayFileName(item);
+    if (/\.(jpg|jpeg|png|bmp|webp)$/i.test(base)) {
+      return base.replace(/\.(jpg|jpeg|png|bmp|webp)$/i, '.json');
     }
-    if (rawName.includes('.')) {
-      return rawName.replace(/\.[^/.]+$/, '.json');
+    if (base.includes('.')) {
+      return base.replace(/\.[^/.]+$/, '.json');
     }
-    return `${rawName}.json`;
+    return base ? `${base}.json` : `result_${index + 1}.json`;
   };
 
   const downloadJson = async (item: DtcResultItem, fileName: string) => {
     if (item.jsonPath) {
-      window.open(
-        `${artifactProxyBase}/${selectedTaskId}/artifact?file_path=${encodeURIComponent(item.jsonPath)}`,
-        '_blank'
-      );
+      window.open(buildArtifactUrl(selectedTaskId, item.jsonPath), '_blank');
       return;
     }
     const blob = new Blob([JSON.stringify(item.resultJson || {}, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -339,7 +388,10 @@ function DtcDataFetchContent() {
 
   const handleDownloadAllJson = () => {
     if (!selectedTaskId) return;
-    window.open(`${backendUrl}/dtc/tasks/${selectedTaskId}/zip`, '_blank');
+    window.open(
+      `${segmentBaseUrl.replace(/\/$/, '')}${zipApiPrefix}/tasks/${selectedTaskId}/zip`,
+      '_blank'
+    );
   };
 
   const handleDeleteTask = async () => {
@@ -347,7 +399,7 @@ function DtcDataFetchContent() {
     const ok = window.confirm('确认删除该任务及其输出文件吗？删除任务不会删除 input 下的图片集。');
     if (!ok) return;
 
-    const resp = await deleteDtcTask(selectedTaskId);
+    const resp = await deleteDtcTask(algorithm, selectedTaskId);
     if (!resp.success) {
       toast({
         variant: 'destructive',
@@ -372,7 +424,7 @@ function DtcDataFetchContent() {
     if (!selectedImageSetId) return;
     const ok = window.confirm('确认删除该图片集吗？将删除 input 下对应目录。');
     if (!ok) return;
-    const resp = await deleteDtcImageSet(selectedImageSetId);
+    const resp = await deleteDtcImageSet(algorithm, selectedImageSetId);
     if (!resp.success) {
       toast({
         variant: 'destructive',
@@ -393,13 +445,26 @@ function DtcDataFetchContent() {
       <div>
         <h1 className="text-2xl font-bold">DTC数据获取</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          支持上传图片或指定后端目录，并结合提示词调用 DTC 接口获取结果图与 JSON。
+          支持上传图片或指定后端目录，选择 DTC_v1（SAM3）或 DTC_v2（DTC）分割服务获取结果图与 JSON。
         </p>
       </div>
 
       <Card>
         <CardContent className="space-y-2 pt-4">
           <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
+            <div className="md:col-span-2">
+              <Label className="text-xs text-muted-foreground mb-1 block">算法</Label>
+              <Select value={algorithm} onValueChange={(v) => setAlgorithm(v as DtcAlgorithm)}>
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="dtc_v2">DTC_v2</SelectItem>
+                  <SelectItem value="dtc_v1">DTC_v1</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
             <div className="md:col-span-2 flex items-center gap-2">
               <Button
                 type="button"
@@ -494,7 +559,40 @@ function DtcDataFetchContent() {
             </div>
           </div>
 
+          {algorithm === 'dtc_v2' ? (
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
+              <div className="md:col-span-2">
+                <Label className="text-xs text-muted-foreground mb-1 block">Category</Label>
+                <Select value={category} onValueChange={setCategory}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DTC_CATEGORIES.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {c}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="md:col-span-2">
+                <Label className="text-xs text-muted-foreground mb-1 block">Adapter Scale</Label>
+                <Input
+                  value={adapterScaleText}
+                  onChange={(e) => setAdapterScaleText(e.target.value)}
+                  className="h-8 text-xs"
+                  inputMode="decimal"
+                />
+              </div>
+              <div className="md:col-span-8 text-xs text-muted-foreground flex items-center">
+                DTC_v2 专用参数（默认 category=simple，adapter_scale=0.5）
+              </div>
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>当前算法: {algorithmLabel}</span>
             <span>
               {mode === 'upload'
                 ? `已选择 ${files.length} 张图片，已上传图片集 ${imageSets.length} 个`
@@ -503,6 +601,9 @@ function DtcDataFetchContent() {
             <span className={thresholdValid ? 'text-muted-foreground' : 'text-destructive'}>
               阈值需大于0且小于1（默认0.3，每次+0.1，可手动输入）
             </span>
+            {algorithm === 'dtc_v2' && !adapterScaleValid ? (
+              <span className="text-destructive">adapter_scale 需大于 0</span>
+            ) : null}
             {!canSubmit && (
               <span>请完善输入参数（提示词 + {mode === 'upload' ? '上传图片' : '后端路径'}）</span>
             )}
@@ -534,7 +635,7 @@ function DtcDataFetchContent() {
                 <option value="">请选择任务</option>
                 {tasks.map((t) => (
                   <option key={t.task_id} value={t.task_id} title={t.task_id}>
-                    {shortId(t.task_id)} | {t.status} | {t.prompt}
+                    {algorithmLabel} | {shortId(t.task_id)} | {t.status} | {t.prompt}
                   </option>
                 ))}
               </select>
@@ -594,9 +695,9 @@ function DtcDataFetchContent() {
           <div className="flex items-center justify-between gap-2">
             <CardTitle className="text-lg flex items-center gap-2">
               处理结果
-              <Badge variant="secondary">{results.length}</Badge>
+              <Badge variant="secondary">{mergedResults.length}</Badge>
             </CardTitle>
-            {results.length > 0 ? (
+            {mergedResults.length > 0 ? (
               <Button size="sm" variant="outline" className="gap-1.5" onClick={handleDownloadAllJson}>
                 <Download className="h-3.5 w-3.5" />
                 下载ZIP
@@ -604,65 +705,176 @@ function DtcDataFetchContent() {
             ) : null}
           </div>
         </CardHeader>
-        <CardContent>
-          {results.length === 0 ? (
-            <div className="text-sm text-muted-foreground">暂无结果。执行后将在此展示结果图与 JSON。</div>
+        <CardContent className="p-0">
+          {mergedResults.length === 0 ? (
+            <div className="p-6 text-sm text-muted-foreground">暂无结果。执行后将在此展示结果列表，点击行可预览大图。</div>
           ) : (
-            <div className="space-y-4">
-              {visibleResults.map((item, index) => {
-                return (
-                  <div key={`${item.sourceName}-${index}`} className="rounded-lg border border-border/50 p-3 space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium break-all">{item.sourceName || `结果 #${index + 1}`}</div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-8 gap-1.5"
-                          onClick={() =>
-                            downloadJson(item, getJsonFileName(item.sourceName, index))
-                          }
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          下载JSON
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-8 gap-1.5"
-                          onClick={() => handleCopyJson(index, item)}
-                        >
-                          {copiedIndex === index ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                          {copiedIndex === index ? '已复制' : '复制JSON'}
-                        </Button>
-                      </div>
-                    </div>
-
-                    {item.imagePath ? (
-                      <img
-                        src={`${artifactProxyBase}/${selectedTaskId}/artifact?file_path=${encodeURIComponent(item.imagePath)}`}
-                        alt={item.sourceName || `result-${index}`}
-                        className="w-full rounded-md border border-border/30 bg-muted/30"
-                        loading="lazy"
-                      />
-                    ) : null}
-
-                  </div>
-                );
-              })}
-              {visibleCount < results.length ? (
+            <>
+              <Table>
+                <TableHeader className="bg-muted/30">
+                  <TableRow className="hover:bg-transparent border-b border-border/40">
+                    <TableHead className="w-[120px] pl-6 font-semibold">预览</TableHead>
+                    <TableHead className="w-[220px] font-semibold">文件名</TableHead>
+                    <TableHead className="font-semibold">摘要</TableHead>
+                    <TableHead className="w-[200px] pr-6 font-semibold text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {visibleResults.map((item, index) => {
+                    const fileName = getDisplayFileName(item);
+                    return (
+                      <TableRow
+                        key={`${item.sourceName}-${index}`}
+                        className="hover:bg-primary/5 transition-colors border-b border-border/10 cursor-pointer"
+                        onClick={() => setPreviewIndex(index)}
+                      >
+                        <TableCell className="pl-6">
+                          <div className="relative h-12 w-20 rounded shadow-md overflow-hidden bg-black/40 flex items-center justify-center">
+                            {item.imagePath && selectedTaskId ? (
+                              <img
+                                src={buildArtifactUrl(selectedTaskId, item.imagePath)}
+                                alt={fileName}
+                                className="absolute inset-0 h-full w-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <ImageIcon className="h-5 w-5 text-muted-foreground" />
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs font-medium break-all">{fileName}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{getResultSummary(item)}</TableCell>
+                        <TableCell className="pr-6 text-right">
+                          <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs gap-1"
+                              onClick={() => downloadJson(item, getJsonFileName(item, index))}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              JSON
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs gap-1"
+                              onClick={() => handleCopyJson(index, item)}
+                            >
+                              {copiedIndex === index ? (
+                                <Check className="h-3.5 w-3.5" />
+                              ) : (
+                                <Copy className="h-3.5 w-3.5" />
+                              )}
+                              {copiedIndex === index ? '已复制' : '复制'}
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+              {visibleCount < mergedResults.length ? (
                 <div ref={loadMoreRef} className="py-2 text-center text-xs text-muted-foreground">
-                  正在加载更多结果...（{visibleCount}/{results.length}）
+                  正在加载更多结果...（{visibleCount}/{mergedResults.length}）
                 </div>
               ) : (
-                <div className="py-1 text-center text-xs text-muted-foreground">
-                  已显示全部结果（{results.length}）
+                <div className="py-2 text-center text-xs text-muted-foreground border-t border-border/20">
+                  已显示全部结果（{mergedResults.length}），点击行预览大图
                 </div>
               )}
-            </div>
+            </>
           )}
         </CardContent>
       </Card>
+
+      {previewIndex != null && mergedResults[previewIndex] ? (
+        <div
+          className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
+          onClick={() => setPreviewIndex(null)}
+        >
+          <div
+            className="bg-background rounded-lg w-[94vw] max-w-[1200px] max-h-[90vh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 bg-background border-b p-4 flex justify-between items-center z-10">
+              <div>
+                <h2 className="text-lg font-bold">结果预览</h2>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {getDisplayFileName(mergedResults[previewIndex])}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs"
+                  disabled={previewIndex <= 0}
+                  onClick={() => setPreviewIndex((i) => (i != null && i > 0 ? i - 1 : i))}
+                >
+                  上一条
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs"
+                  disabled={previewIndex >= mergedResults.length - 1}
+                  onClick={() =>
+                    setPreviewIndex((i) => (i != null && i < mergedResults.length - 1 ? i + 1 : i))
+                  }
+                >
+                  下一条
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setPreviewIndex(null)}>
+                  <X className="h-5 w-5" />
+                </Button>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-muted-foreground">{getResultSummary(mergedResults[previewIndex])}</p>
+              {mergedResults[previewIndex].imagePath && selectedTaskId ? (
+                <div className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video max-h-[70vh]">
+                  <img
+                    src={buildArtifactUrl(selectedTaskId, mergedResults[previewIndex].imagePath!)}
+                    alt={getDisplayFileName(mergedResults[previewIndex])}
+                    className="absolute inset-0 h-full w-full object-contain"
+                  />
+                </div>
+              ) : (
+                <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
+                  无预览图
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  onClick={() =>
+                    downloadJson(
+                      mergedResults[previewIndex],
+                      getJsonFileName(mergedResults[previewIndex], previewIndex)
+                    )
+                  }
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  下载JSON
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  onClick={() => handleCopyJson(previewIndex, mergedResults[previewIndex])}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  复制JSON
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

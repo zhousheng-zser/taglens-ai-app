@@ -1,0 +1,8 @@
+sudo systemctl daemon-reload
+sudo systemctl enable taglens-dtc-v1.service taglens-dtc-v2.service
+sudo systemctl enable taglens.target
+sudo systemctl restart taglens.target
+
+systemctl status taglens.target taglens-backend.service taglens-frontend.service taglens-dtc-v1.service taglens-dtc-v2.service
+curl -s http://127.0.0.1:8010/health
+curl -s http://127.0.0.1:8011/health

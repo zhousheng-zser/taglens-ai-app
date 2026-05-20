@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SAM3 本地分割服务：启动时加载模型，HTTP 接口前缀 /sam3/*
+
+启动: cd sam3 && ./start_sam3_server.sh
+健康检查: GET http://127.0.0.1:8011/health
+"""
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from infer_engine import DEFAULT_MODEL_DIR, engine
+import server_task_service as task_svc
+
+SAM3_ROOT = Path(__file__).resolve().parent
+
+
+class CreatePathTaskRequest(BaseModel):
+    backendPath: str
+    prompt: str
+    threshold: float = 0.3
+
+
+class CreateUploadRunTaskRequest(BaseModel):
+    imageSetId: str
+    prompt: str
+    threshold: float = 0.3
+
+
+class SegmentPathSyncRequest(BaseModel):
+    backendPath: str
+    prompt: str
+    threshold: float = 0.3
+    output: Optional[str] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    model_dir = os.environ.get("SAM3_MODEL_DIR", str(DEFAULT_MODEL_DIR))
+    print(f"[SAM3 Server] 正在加载模型 model_dir={model_dir} ...")
+    try:
+        engine.load(model_dir=model_dir)
+        print("[SAM3 Server] 模型加载完成，可接收请求")
+    except Exception as exc:
+        print(f"[SAM3 Server] 模型加载失败: {exc}")
+        raise
+    yield
+    print("[SAM3 Server] 服务关闭")
+
+
+app = FastAPI(
+    title="SAM3 Segmentation Server",
+    description="本地 SAM3 分割服务（模型常驻 GPU）",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    return {
+        "success": engine.loaded,
+        "algorithm": "sam3",
+        "model_loaded": engine.loaded,
+        "load_error": engine.load_error,
+        "model_dir": engine._model_dir if engine.loaded else None,
+        "port_hint": int(os.environ.get("SAM3_SERVER_PORT", "8011")),
+    }
+
+
+@app.post("/sam3/image-sets/upload")
+async def upload_image_set_chunk(
+    files: List[UploadFile] = File(...),
+    imageSetId: str = Form(""),
+) -> Dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=400, detail="请上传至少一张图片")
+    try:
+        image_set = task_svc.upload_chunk_to_image_set(files=files, image_set_id=imageSetId.strip() or None)
+        return {"success": True, "imageSet": image_set}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/sam3/image-sets")
+async def list_image_sets() -> Dict[str, Any]:
+    return {"success": True, "imageSets": task_svc.list_image_sets()}
+
+
+@app.delete("/sam3/image-sets/{image_set_id}")
+async def delete_image_set(image_set_id: str) -> Dict[str, Any]:
+    try:
+        return {"success": True, **task_svc.delete_image_set(image_set_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sam3/tasks/upload-run")
+async def create_upload_run_task(req: CreateUploadRunTaskRequest) -> Dict[str, Any]:
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt 不能为空")
+    if not req.imageSetId.strip():
+        raise HTTPException(status_code=400, detail="imageSetId 不能为空")
+    if not (0 < float(req.threshold) < 1):
+        raise HTTPException(status_code=400, detail="threshold 必须在 (0,1) 之间")
+    if not engine.loaded:
+        raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
+    try:
+        task = task_svc.create_upload_task_from_image_set(
+            req.imageSetId.strip(), req.prompt.strip(), float(req.threshold)
+        )
+        return {"success": True, "task": task}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sam3/tasks/path")
+async def create_path_task(req: CreatePathTaskRequest) -> Dict[str, Any]:
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt 不能为空")
+    if not (0 < float(req.threshold) < 1):
+        raise HTTPException(status_code=400, detail="threshold 必须在 (0,1) 之间")
+    if not engine.loaded:
+        raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
+    try:
+        task = task_svc.create_path_task(req.backendPath.strip(), req.prompt.strip(), float(req.threshold))
+        return {"success": True, "task": task}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sam3/segment/sync")
+async def segment_path_sync(req: SegmentPathSyncRequest) -> Dict[str, Any]:
+    if not engine.loaded:
+        return {"success": False, "error": engine.load_error or "模型未就绪"}
+    if not req.prompt.strip():
+        return {"success": False, "error": "prompt 不能为空"}
+    backend = req.backendPath.strip()
+    if not backend or not Path(backend).exists():
+        return {"success": False, "error": "backendPath 不存在"}
+    import uuid
+    from datetime import datetime
+
+    task_id = uuid.uuid4().hex[:12]
+    date = datetime.now().strftime("%y%m%d")
+    output_base = req.output or str(SAM3_ROOT / "output" / date / f"sync_{task_id}")
+    try:
+        summary = engine.run_batch(backend, output_base, req.prompt.strip(), float(req.threshold))
+        return {"success": True, "algorithm": "sam3", **summary}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/sam3/tasks")
+async def list_tasks() -> Dict[str, Any]:
+    return {"success": True, "tasks": task_svc.list_tasks()}
+
+
+@app.get("/sam3/tasks/{task_id}")
+async def get_task(task_id: str) -> Dict[str, Any]:
+    task = task_svc.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"success": True, "task": task}
+
+
+@app.get("/sam3/tasks/{task_id}/results")
+async def get_task_results(task_id: str) -> Dict[str, Any]:
+    task = task_svc.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"success": True, "task": task, "results": task_svc.get_task_results(task_id)}
+
+
+@app.get("/sam3/tasks/{task_id}/zip")
+async def download_task_zip(task_id: str):
+    zip_path = task_svc.get_task_zip_path(task_id)
+    if not zip_path or not zip_path.exists():
+        raise HTTPException(status_code=404, detail="结果 ZIP 不存在")
+    return FileResponse(path=str(zip_path), filename=zip_path.name, media_type="application/zip")
+
+
+@app.get("/sam3/tasks/{task_id}/artifact")
+async def download_artifact(task_id: str, file_path: str):
+    task = task_svc.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    fp = Path(file_path)
+    if not fp.exists() or not fp.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    allowed_root = Path(task["output_base"]).resolve()
+    try:
+        fp.resolve().relative_to(allowed_root)
+    except Exception:
+        raise HTTPException(status_code=400, detail="非法文件路径")
+    return FileResponse(path=str(fp.resolve()), filename=fp.name)
+
+
+@app.delete("/sam3/tasks/{task_id}")
+async def delete_task(task_id: str) -> Dict[str, Any]:
+    try:
+        return {"success": True, **task_svc.delete_task(task_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("SAM3_SERVER_PORT", "8011"))
+    uvicorn.run("sam3_server:app", host="0.0.0.0", port=port, reload=False)

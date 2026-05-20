@@ -158,6 +158,16 @@ def create_path_task(backend_path: str, prompt: str, threshold: float) -> Dict[s
     return created
 
 
+def _normalize_comparison_source(stem: str, json_map: Dict[str, Dict[str, Any]]) -> str:
+    if stem in json_map:
+        return stem
+    if "_" in stem:
+        parent, suffix = stem.rsplit("_", 1)
+        if suffix.isdigit() and parent in json_map:
+            return parent
+    return stem
+
+
 def _collect_results(task: Dict[str, Any]) -> List[Dict[str, Any]]:
     out_dir = Path(task["output_base"]) / f"{_safe_text(task['prompt'])}_{task['threshold']}"
     if not out_dir.exists():
@@ -172,18 +182,20 @@ def _collect_results(task: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
 
     results: List[Dict[str, Any]] = []
+    seen: set[str] = set()
     for img in sorted(out_dir.glob("*_comparison.png")):
-        source = img.name.rsplit("_comparison.png", 1)[0]
-        item = json_map.get(source, {"sourceName": source})
+        stem = img.name.rsplit("_comparison.png", 1)[0]
+        source = _normalize_comparison_source(stem, json_map)
+        item = dict(json_map.get(source, {"sourceName": source}))
+        item["sourceName"] = source
         item["imageName"] = img.name
         item["imagePath"] = str(img)
         results.append(item)
+        seen.add(source)
 
-    # 兜底：若只有 json 没图，也返回
-    seen = {r.get("sourceName") for r in results}
     for s, it in json_map.items():
         if s not in seen:
-            results.append(it)
+            results.append(dict(it))
     return results
 
 

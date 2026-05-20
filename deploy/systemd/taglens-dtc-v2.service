@@ -1,0 +1,23 @@
+[Unit]
+Description=TagLens DTC_v2 分割服务 (DTC, 端口 8010)
+Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/deploy/SEGMENT_SERVERS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
+Environment=DTC_SERVER_PORT=8010
+ExecStart=/bin/bash /opt/Traffic-LLM/zser/taglens-ai-app/DTC/start_dtc_server.sh
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taglens-dtc-v2
+
+[Install]
+WantedBy=taglens.target

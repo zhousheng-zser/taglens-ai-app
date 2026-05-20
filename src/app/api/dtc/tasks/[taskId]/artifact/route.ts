@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+type DtcAlgorithm = 'dtc_v1' | 'dtc_v2';
+
+function getSegmentArtifactUrl(algorithm: DtcAlgorithm, taskId: string, filePath: string): string {
+  if (algorithm === 'dtc_v2') {
+    const base = process.env.DTC_V2_SERVER_URL || 'http://127.0.0.1:8010';
+    return `${base.replace(/\/$/, '')}/dtc/tasks/${encodeURIComponent(taskId)}/artifact?file_path=${encodeURIComponent(filePath)}`;
+  }
+  const base = process.env.DTC_V1_SERVER_URL || 'http://127.0.0.1:8011';
+  return `${base.replace(/\/$/, '')}/sam3/tasks/${encodeURIComponent(taskId)}/artifact?file_path=${encodeURIComponent(filePath)}`;
+}
 
 export async function GET(
   request: NextRequest,
@@ -9,11 +18,14 @@ export async function GET(
   try {
     const { taskId } = await params;
     const filePath = request.nextUrl.searchParams.get('file_path') || '';
+    const algorithmParam = request.nextUrl.searchParams.get('algorithm') || 'dtc_v2';
+    const algorithm: DtcAlgorithm = algorithmParam === 'dtc_v1' ? 'dtc_v1' : 'dtc_v2';
+
     if (!filePath) {
       return NextResponse.json({ error: 'missing file_path' }, { status: 400 });
     }
 
-    const url = `${BACKEND_URL}/dtc/tasks/${encodeURIComponent(taskId)}/artifact?file_path=${encodeURIComponent(filePath)}`;
+    const url = getSegmentArtifactUrl(algorithm, taskId, filePath);
     const response = await fetch(url, { method: 'GET' });
 
     if (!response.ok) {
@@ -31,8 +43,8 @@ export async function GET(
         'Cache-Control': 'public, max-age=3600',
       },
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message || 'proxy error' }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'proxy error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-

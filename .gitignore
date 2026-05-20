@@ -67,3 +67,8 @@ tmp*
 /sam3/input
 /sam3/output
 /sam3/sam3_pt
+
+reid_tmp*
+/DTC/input
+/DTC/output
+/DTC/ckpt

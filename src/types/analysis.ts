@@ -69,37 +69,10 @@ export interface ImageSearchResult {
   similarity?: number;
 }
 
-export type DtcFetchMode = 'upload' | 'path';
-
-export interface DtcTaskItem {
-  task_id: string;
-  mode: DtcFetchMode;
-  status: 'queued' | 'running' | 'success' | 'failed';
-  queue_index?: number;
-  prompt: string;
-  threshold: number;
-  input_path: string;
-  output_base: string;
-  error?: string | null;
-  created_at?: string;
-  updated_at?: string;
-  started_at?: string | null;
-  finished_at?: string | null;
-  result_count?: number;
-}
-
-export interface DtcResultItem {
-  sourceName: string;
-  imageName?: string;
-  imagePath?: string;
-  jsonName?: string;
-  jsonPath?: string;
-  resultJson: Record<string, any>;
-}
-
-export interface DtcFetchResponse {
-  success: boolean;
-  task?: DtcTaskItem;
-  results: DtcResultItem[];
-  error?: string;
-}
+export type {
+  DtcAlgorithm,
+  DtcFetchMode,
+  DtcFetchResponse,
+  DtcResultItem,
+  DtcTaskItem,
+} from './dtc';
