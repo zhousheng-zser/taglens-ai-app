@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
+import httpx
 import requests
 import numpy as np
 import torch
@@ -222,11 +223,21 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 TEXT_MODEL = os.getenv("QWEN_TEXT_MODEL", "qwen-plus")  # 用于文本模型测试
 # 北京地域的兼容Endpoint
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2-omni")
+MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+
+
+def _resolve_mimo_endpoint(api_key: str) -> tuple[str, str, str]:
+    """返回 (api_key, base_url, model)。"""
+    mimo_key = (api_key or os.getenv("MIMO_API_KEY") or "").strip()
+    if not mimo_key:
+        raise HTTPException(status_code=500, detail="未配置 MIMO_API_KEY")
+    return mimo_key, MIMO_BASE_URL, MIMO_MODEL
 
 # --- Pydantic 模型定义 ---
 class ImageAnalysisRequest(BaseModel):
     image: str # Base64 data URI
-    model: str = "qwen"  # 可选值: "qwen", "gemini", "codex", "both"
+    model: str = "qwen"  # 可选值: "qwen", "gemini", "codex", "mimo", "both"
 
 class SemanticSearch(BaseModel):
     description: str
@@ -908,6 +919,68 @@ def call_qwen_vision_api(api_key: str, data_uri: str, prompt: str):
     except Exception as e:
         print(f"Error calling Qwen Vision API: {e}")
         raise HTTPException(status_code=500, detail=f"调用AI视觉模型时出错: {e}")
+
+# --- MiMo 图片理解 API（token-plan: mimo-v2-omni；开放平台: mimo-v2.5）---
+def call_mimo_vision_api(api_key: str, data_uri: str, prompt: str):
+    vision_key, base_url, vision_model = _resolve_mimo_endpoint(api_key)
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                ],
+            }
+        ],
+        "max_completion_tokens": 4096,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "stream": False,
+        "stop": None,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+    }
+    headers = {
+        "api-key": vision_key,
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(trust_env=False, timeout=120.0) as client:
+            response = client.post(url, headers=headers, json=payload)
+        if response.status_code != 200:
+            try:
+                err_body = response.json()
+                err_msg = err_body.get("error", {}).get("message", response.text)
+            except Exception:
+                err_msg = response.text
+            raise HTTPException(
+                status_code=500,
+                detail=f"MiMo API 错误 ({response.status_code}): {err_msg}",
+            )
+        result = response.json()
+        choices = result.get("choices") or []
+        if not choices:
+            raise HTTPException(status_code=500, detail="MiMo API 返回格式异常：无 choices")
+        content_text = choices[0].get("message", {}).get("content") or ""
+        try:
+            log_path = Path(__file__).parent.parent / "B_mimo_response.txt"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*40}\nMiMo response at {datetime.now().isoformat()}:\n")
+                f.write((content_text or "")[:800])
+                f.write("\n")
+        except Exception:
+            pass
+        if content_text and "```json" in content_text:
+            content_text = content_text.split("```json")[1].split("```")[0]
+        return json.loads(content_text.strip())
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error calling MiMo Vision API: {e}")
+        raise HTTPException(status_code=500, detail=f"调用 MiMo 视觉模型时出错: {e}")
 
 # --- Gemini API 调用（使用 REST API）---
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -1598,6 +1671,26 @@ async def analyze_image(request: ImageAnalysisRequest):
         except Exception as e:
             print(f"处理图片时发生错误: {e}")
             raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
+
+    elif model == "mimo":
+        api_key = os.getenv("MIMO_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="未配置有效的 MIMO_API_KEY")
+        default_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
+        try:
+            analysis_result = await asyncio.to_thread(
+                call_mimo_vision_api,
+                api_key,
+                request.image,
+                default_prompt,
+            )
+            validated_result = TrafficAnalysisOutput(**analysis_result)
+            return validated_result
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            print(f"处理图片时发生错误: {e}")
+            raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
     else:  # 默认使用 qwen
         api_key = os.getenv("QWEN_API_KEY")
         if not api_key :
@@ -2260,6 +2353,19 @@ async def process_uploaded_image_api(
                         data_uri,
                         final_prompt
                     )
+                elif use_model == 'mimo':
+                    mimo_key = os.getenv("MIMO_API_KEY")
+                    if not mimo_key:
+                        print("服务端未配置 MIMO_API_KEY，跳过 AI 分析")
+                        analysis_result = None
+                    else:
+                        analysis_result = await loop.run_in_executor(
+                            None,
+                            call_mimo_vision_api,
+                            mimo_key,
+                            data_uri,
+                            final_prompt,
+                        )
                 else:
                     # Default to Gemini
                     gemini_key = os.getenv("GEMINI_API_KEY")

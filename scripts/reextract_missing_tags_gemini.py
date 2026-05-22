@@ -9,9 +9,11 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
+import httpx
 import numpy as np
 import requests
 import torch
+from openai import OpenAI
 from transformers import AutoModel, AutoTokenizer
 
 # 项目根目录: .../taglens-ai-app
@@ -23,17 +25,32 @@ sys.path.insert(0, str(backend_dir))
 
 from core.minio_storage_client import MinIOStorageClient
 
-# 加载环境变量
+# 加载环境变量（backend/.env 优先）
+load_dotenv(PROJECT_ROOT / "backend" / ".env")
 load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
 
-if not api_key:
+REEXTRACT_MODEL = os.getenv("REEXTRACT_MODEL", "gemini").strip().lower()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "").strip()
+MIMO_API_KEY = os.getenv("MIMO_API_KEY", "").strip()
+
+if REEXTRACT_MODEL == "gemini" and not GEMINI_API_KEY:
     print("Error: GEMINI_API_KEY not found in environment variables.")
+    exit(1)
+if REEXTRACT_MODEL == "qwen" and not DASHSCOPE_API_KEY:
+    print("Error: DASHSCOPE_API_KEY not found in environment variables.")
+    exit(1)
+if REEXTRACT_MODEL == "mimo" and not MIMO_API_KEY:
+    print("Error: MIMO_API_KEY not found in environment variables.")
     exit(1)
 
 # Gemini 配置
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-vl-max")
+QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2-omni")
+MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 
 # 批量补齐数量（可用环境变量覆盖）
 BATCH_LIMIT = int(os.getenv("REEXTRACT_LIMIT", "2000"))
@@ -207,6 +224,79 @@ def encode_text_to_vector(text: str) -> bytes:
     return embedding_np.tobytes()
 
 
+def _parse_json_from_model_text(content_text: str) -> dict:
+    text = content_text or ""
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
+    return json.loads(text.strip())
+
+
+def _resolve_mimo_endpoint() -> tuple[str, str, str]:
+    if not MIMO_API_KEY:
+        raise RuntimeError("未配置 MIMO_API_KEY")
+    return MIMO_API_KEY, MIMO_BASE_URL, MIMO_MODEL
+
+
+def analyze_image_with_qwen(image_data_uri: str) -> dict:
+    print(f"Sending request to Qwen ({QWEN_MODEL})...")
+    client = OpenAI(api_key=DASHSCOPE_API_KEY, base_url=QWEN_BASE_URL, timeout=120.0)
+    completion = client.chat.completions.create(
+        model=QWEN_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": PROMPT},
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ],
+            }
+        ],
+        top_p=0.8,
+    )
+    content_text = completion.choices[0].message.content or ""
+    return _parse_json_from_model_text(content_text)
+
+
+def analyze_image_with_mimo(image_data_uri: str) -> dict:
+    vision_key, base_url, vision_model = _resolve_mimo_endpoint()
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    print(f"Sending request to MiMo ({vision_model})...")
+    payload = {
+        "model": vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": PROMPT},
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ],
+            }
+        ],
+        "max_completion_tokens": 4096,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "stream": False,
+    }
+    headers = {"api-key": vision_key, "Content-Type": "application/json"}
+    with httpx.Client(trust_env=False, timeout=120.0) as client:
+        response = client.post(url, headers=headers, json=payload)
+    if response.status_code != 200:
+        try:
+            err_body = response.json()
+            err_msg = err_body.get("error", {}).get("message", response.text)
+        except Exception:
+            err_msg = response.text
+        raise RuntimeError(f"MiMo API 错误 ({response.status_code}): {err_msg}")
+    result = response.json()
+    choices = result.get("choices") or []
+    if not choices:
+        raise RuntimeError("MiMo API 返回格式异常：无 choices")
+    content_text = choices[0].get("message", {}).get("content") or ""
+    return _parse_json_from_model_text(content_text)
+
+
 def analyze_image_with_gemini(image_data_uri: str) -> dict:
     """调用 Gemini API 分析图片，返回解析后的 JSON 结果"""
     print(f"Sending request to Gemini ({GEMINI_MODEL})...")
@@ -217,7 +307,7 @@ def analyze_image_with_gemini(image_data_uri: str) -> dict:
 
         headers = {
             "Content-Type": "application/json",
-            "X-goog-api-key": api_key,
+            "X-goog-api-key": GEMINI_API_KEY,
         }
 
         base64_data = image_data_uri.split(",")[1]
@@ -265,19 +355,21 @@ def analyze_image_with_gemini(image_data_uri: str) -> dict:
         elif "```" in text:
             text = text.split("```")[1].split("```")[0]
 
-        try:
-            data = json.loads(text)
-            return data
-        except json.JSONDecodeError:
-            print("Failed to parse JSON response:")
-            print(text)
-            raise
+        return _parse_json_from_model_text(text)
 
     except Exception as e:
         print(f"API Error: {e}")
         if "response" in locals() and hasattr(response, "text"):
             print(f"Response content: {response.text}")
         raise
+
+
+def analyze_image(image_data_uri: str) -> dict:
+    if REEXTRACT_MODEL == "qwen":
+        return analyze_image_with_qwen(image_data_uri)
+    if REEXTRACT_MODEL == "mimo":
+        return analyze_image_with_mimo(image_data_uri)
+    return analyze_image_with_gemini(image_data_uri)
 
 
 def update_database_with_analysis(
@@ -507,8 +599,13 @@ def get_images_missing_keywords(limit: int = 2000) -> list[dict]:
 
 def batch_reextract_missing_tags() -> None:
     """批量补齐缺失标签"""
+    model_label = {
+        "gemini": GEMINI_MODEL,
+        "qwen": QWEN_MODEL,
+        "mimo": MIMO_MODEL,
+    }.get(REEXTRACT_MODEL, REEXTRACT_MODEL)
     print(
-        f"任务启动: 补齐缺失标签 (最新 {BATCH_LIMIT} 张, 模型: {GEMINI_MODEL})"
+        f"任务启动: 补齐缺失标签 (最新 {BATCH_LIMIT} 张, 模型: {REEXTRACT_MODEL}/{model_label})"
     )
 
     print("正在初始化 MinIO 客户端...")
@@ -558,8 +655,8 @@ def batch_reextract_missing_tags() -> None:
                 f"{base64.b64encode(img_bytes).decode('utf-8')}"
             )
 
-            print("  -> 正在调用 Gemini API...")
-            analysis_result = analyze_image_with_gemini(data_uri)
+            print(f"  -> 正在调用 {REEXTRACT_MODEL} API...")
+            analysis_result = analyze_image(data_uri)
 
             print("  -> 正在更新数据库...")
             update_database_with_analysis(image_id, analysis_result, minio_client)

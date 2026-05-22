@@ -11,12 +11,21 @@ import {
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { AuthGate } from '@/components/AuthGate';
+import { getEventMeta } from '@/app/actions';
 import {
     DropdownMenu,
     DropdownMenuCheckboxItem,
     DropdownMenuContent,
+    DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
 import type { EventOptionItem } from '@/types/event';
 
 // Log Entry Definition
@@ -36,8 +45,10 @@ function DataManagementContent() {
     const [checkPairPath, setCheckPairPath] = useState('');
     const [checkDbPath, setCheckDbPath] = useState('');
     const [reextractLimit, setReextractLimit] = useState('2000');
+    const [reextractModel, setReextractModel] = useState<'gemini' | 'qwen' | 'codex' | 'mimo'>('gemini');
     const [segmentLimit, setSegmentLimit] = useState('10');
     const [segmentEventTypeOptions, setSegmentEventTypeOptions] = useState<EventOptionItem[]>([]);
+    const [segmentEventTypesLoading, setSegmentEventTypesLoading] = useState(true);
     const [selectedSegmentEventTypes, setSelectedSegmentEventTypes] = useState<string[]>([]);
 
     // Log Modal States
@@ -211,6 +222,26 @@ function DataManagementContent() {
         }
     };
 
+    const reextractModelLabels: Record<'gemini' | 'qwen' | 'codex' | 'mimo', string> = {
+        gemini: 'Gemini',
+        qwen: '千问',
+        codex: 'Codex',
+        mimo: '小米 MiMo (Omni)',
+    };
+
+    const startReextractTask = () => {
+        const limit = parseInt(reextractLimit || '2000', 10) || 2000;
+        const modelLabel = reextractModelLabels[reextractModel];
+        setIsReextractRunning(true);
+        runStreamTask(
+            '/api/management/reextract-tags',
+            { model: reextractModel, limit },
+            `缺失标签补齐 (${modelLabel})`
+        ).finally(() => {
+            setIsReextractRunning(false);
+        });
+    };
+
     // 页面加载时探测一次当前缺失标签补齐任务状态
     useEffect(() => {
         const checkReextractStatus = async () => {
@@ -233,18 +264,19 @@ function DataManagementContent() {
 
     useEffect(() => {
         const loadEventTypeOptions = async () => {
+            setSegmentEventTypesLoading(true);
             try {
-                const endpoint = process.env.NEXT_PUBLIC_API_URL
-                    ? `${process.env.NEXT_PUBLIC_API_URL}/events/meta`
-                    : `http://localhost:8000/events/meta`;
-                const res = await fetch(endpoint);
-                if (!res.ok) return;
-                const data = await res.json();
-                if (data?.success && Array.isArray(data?.eventTypeOptions)) {
-                    setSegmentEventTypeOptions(data.eventTypeOptions);
+                // 与「事件数据查询」一致：经 Server Action 转发并携带登录 Cookie（直连 8000 会 401）
+                const meta = await getEventMeta();
+                if (meta.success && Array.isArray(meta.eventTypeOptions)) {
+                    setSegmentEventTypeOptions(meta.eventTypeOptions);
+                } else {
+                    setSegmentEventTypeOptions([]);
                 }
             } catch {
-                // 不阻塞主流程
+                setSegmentEventTypeOptions([]);
+            } finally {
+                setSegmentEventTypesLoading(false);
             }
         };
         loadEventTypeOptions();
@@ -467,74 +499,45 @@ function DataManagementContent() {
                                     />
                                 </div>
 
-                                <div className="grid grid-cols-3 gap-3">
-                                    {isReextractRunning ? (
-                                        <>
-                                            <Button
-                                                className="col-span-3 w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-cyan-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
-                                                onClick={openReextractLogStream}
+                                {isReextractRunning ? (
+                                    <Button
+                                        className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-cyan-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
+                                        onClick={openReextractLogStream}
+                                    >
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        正在补齐中，点击查看进度
+                                    </Button>
+                                ) : (
+                                    <div className="flex gap-3 items-stretch">
+                                        <div className="flex-1 min-w-0 space-y-2">
+                                            <Label className="text-xs text-slate-500 uppercase tracking-wider font-bold">AI 模型</Label>
+                                            <Select
+                                                value={reextractModel}
+                                                onValueChange={(v) => setReextractModel(v as typeof reextractModel)}
                                             >
-                                                <Loader2 className="h-4 w-4 animate-spin" />
-                                                正在补齐中，点击查看进度
-                                            </Button>
-                                        </>
-                                    ) : (
-                                        <>
+                                                <SelectTrigger className="w-full h-10 bg-slate-950/50 border-white/10 focus:border-cyan-500/50 text-cyan-100 text-sm rounded-lg">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="gemini">Google Gemini</SelectItem>
+                                                    <SelectItem value="qwen">Qwen (通义千问)</SelectItem>
+                                                    <SelectItem value="codex">CodeX</SelectItem>
+                                                    <SelectItem value="mimo">小米 MiMo (Omni)</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div className="flex flex-col justify-end shrink-0">
                                             <Button
-                                                className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                                className="h-10 px-5 text-sm bg-cyan-600/90 hover:bg-cyan-500 text-white border border-cyan-500/30 rounded-lg font-medium whitespace-nowrap"
                                                 disabled={!reextractLimit.trim() || (isProcessing && showLogModal)}
-                                                onClick={() => {
-                                                    setIsReextractRunning(true);
-                                                    runStreamTask(
-                                                        '/api/management/reextract-tags',
-                                                        { model: 'gemini', limit: parseInt(reextractLimit || '2000', 10) || 2000 },
-                                                        '缺失标签补齐 (Gemini)'
-                                                    ).finally(() => {
-                                                        // 若任务正常结束，后端日志会更新 status，这里作为兜底
-                                                        setIsReextractRunning(false);
-                                                    });
-                                                }}
+                                                onClick={startReextractTask}
                                             >
                                                 <Sparkles className="h-4 w-4 mr-2" />
-                                                Gemini 补齐
+                                                确认补齐
                                             </Button>
-                                            <Button
-                                                className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-white/5 rounded-lg font-medium"
-                                                disabled={!reextractLimit.trim() || (isProcessing && showLogModal)}
-                                                onClick={() => {
-                                                    setIsReextractRunning(true);
-                                                    runStreamTask(
-                                                        '/api/management/reextract-tags',
-                                                        { model: 'qwen', limit: parseInt(reextractLimit || '2000', 10) || 2000 },
-                                                        '缺失标签补齐 (千问)'
-                                                    ).finally(() => {
-                                                        setIsReextractRunning(false);
-                                                    });
-                                                }}
-                                            >
-                                                <Sparkles className="h-4 w-4 mr-2" />
-                                                千问 补齐
-                                            </Button>
-                                            <Button
-                                                className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-cyan-100 hover:text-white border border-white/5 rounded-lg font-medium"
-                                                disabled={!reextractLimit.trim() || (isProcessing && showLogModal)}
-                                                onClick={() => {
-                                                    setIsReextractRunning(true);
-                                                    runStreamTask(
-                                                        '/api/management/reextract-tags',
-                                                        { model: 'codex', limit: parseInt(reextractLimit || '2000', 10) || 2000 },
-                                                        '缺失标签补齐 (Codex)'
-                                                    ).finally(() => {
-                                                        setIsReextractRunning(false);
-                                                    });
-                                                }}
-                                            >
-                                                <Sparkles className="h-4 w-4 mr-2" />
-                                                Codex 补齐
-                                            </Button>
-                                        </>
-                                    )}
-                                </div>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -616,20 +619,30 @@ function DataManagementContent() {
                                             </Button>
                                         </DropdownMenuTrigger>
                                         <DropdownMenuContent className="w-[320px] max-h-[320px] overflow-y-auto">
-                                            {segmentEventTypeOptions.map((type) => (
-                                                <DropdownMenuCheckboxItem
-                                                    key={type.code}
-                                                    checked={selectedSegmentEventTypes.includes(type.code)}
-                                                    onSelect={(event) => event.preventDefault()}
-                                                    onCheckedChange={(checked) => {
-                                                        setSelectedSegmentEventTypes((prev) =>
-                                                            checked ? [...prev, type.code] : prev.filter((item) => item !== type.code),
-                                                        );
-                                                    }}
-                                                >
-                                                    {type.name}
-                                                </DropdownMenuCheckboxItem>
-                                            ))}
+                                            {segmentEventTypesLoading ? (
+                                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                                    正在加载事件类型...
+                                                </DropdownMenuItem>
+                                            ) : segmentEventTypeOptions.length === 0 ? (
+                                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                                    暂无事件类型（请检查后端字典或登录状态）
+                                                </DropdownMenuItem>
+                                            ) : (
+                                                segmentEventTypeOptions.map((type) => (
+                                                    <DropdownMenuCheckboxItem
+                                                        key={type.code}
+                                                        checked={selectedSegmentEventTypes.includes(type.code)}
+                                                        onSelect={(event) => event.preventDefault()}
+                                                        onCheckedChange={(checked) => {
+                                                            setSelectedSegmentEventTypes((prev) =>
+                                                                checked ? [...prev, type.code] : prev.filter((item) => item !== type.code),
+                                                            );
+                                                        }}
+                                                    >
+                                                        {type.name}
+                                                    </DropdownMenuCheckboxItem>
+                                                ))
+                                            )}
                                         </DropdownMenuContent>
                                     </DropdownMenu>
                                 </div>

@@ -343,7 +343,7 @@ async def check_features_endpoint():
 
 class ReextractTagsRequest(BaseModel):
     limit: int = 2000
-    model: str = "gemini"  # gemini | qwen | codex
+    model: str = "gemini"  # gemini | qwen | codex | mimo
 
 
 class EventVideoSegmentRequest(BaseModel):
@@ -461,6 +461,7 @@ async def reextract_tags_generator(limit: int, model: str):
     script_name_by_model = {
         "gemini": "reextract_missing_tags_gemini.py",
         "qwen": "reextract_missing_tags_gemini.py",
+        "mimo": "reextract_missing_tags_gemini.py",
         "codex": "demo_codex_api.py",
     }
     script_name = script_name_by_model.get(model_normalized)
@@ -516,6 +517,7 @@ async def reextract_tags_generator(limit: int, model: str):
     env = os.environ.copy()
     env["REEXTRACT_MODE"] = "batch"
     env["REEXTRACT_LIMIT"] = str(limit)
+    env["REEXTRACT_MODEL"] = model_normalized
     if model_normalized == "gemini":
         env["GEMINI_MODEL"] = "gemini-3-flash-preview"
     

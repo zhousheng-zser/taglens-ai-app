@@ -208,6 +208,7 @@ function ProjectSyncContent() {
                 const modelLabel =
                     value === 'qwen' ? '通义千问' :
                     value === 'codex' ? 'CodeX' :
+                    value === 'mimo' ? '小米 MiMo (Omni)' :
                     'Gemini';
                 toast({ title: '模型已更新', description: `项目现在使用: ${modelLabel}` });
             } else {
@@ -543,6 +544,7 @@ function ProjectSyncContent() {
                                             <SelectItem value="qwen">Qwen (通义千问)</SelectItem>
                                             <SelectItem value="gemini">Google Gemini</SelectItem>
                                             <SelectItem value="codex">CodeX</SelectItem>
+                                            <SelectItem value="mimo">小米 MiMo (Omni)</SelectItem>
                                         </SelectContent>
                                     </Select>
                                 </div>

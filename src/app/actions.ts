@@ -18,7 +18,7 @@ interface ActionResult {
 
 interface AnalyzeImageInput {
   photoDataUri: string;
-  model?: 'qwen' | 'gemini' | 'codex' | 'both';
+  model?: 'qwen' | 'gemini' | 'codex' | 'mimo' | 'both';
 }
 
 interface SaveImageInput {

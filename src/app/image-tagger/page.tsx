@@ -52,7 +52,7 @@ export default function ImageTaggerPage() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
-  const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'codex' | 'both'>('qwen');
+  const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'codex' | 'mimo' | 'both'>('qwen');
   const [similarityThreshold, setSimilarityThreshold] = useState(0.7409); // 默认74.09%
   const { toast } = useToast();
 
@@ -350,7 +350,7 @@ export default function ImageTaggerPage() {
           {/* 模型选择 */}
           <div className="space-y-2">
             <Label htmlFor="model-select">选择AI模型</Label>
-            <Select value={selectedModel} onValueChange={(value: 'qwen' | 'gemini' | 'codex' | 'both') => setSelectedModel(value)}>
+            <Select value={selectedModel} onValueChange={(value: 'qwen' | 'gemini' | 'codex' | 'mimo' | 'both') => setSelectedModel(value)}>
               <SelectTrigger id="model-select" className="w-full">
                 <SelectValue placeholder="选择AI模型" />
               </SelectTrigger>
@@ -358,18 +358,21 @@ export default function ImageTaggerPage() {
                 <SelectItem value="qwen">通义千问 (Qwen)</SelectItem>
                 <SelectItem value="gemini">Gemini</SelectItem>
                 <SelectItem value="codex">CodeX</SelectItem>
+                <SelectItem value="mimo">小米 MiMo (Omni)</SelectItem>
                 <SelectItem value="both">两者都调用</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
               {selectedModel === 'both'
-                ? '将同时调用两个模型，可以对比结果后选择保存其中一个'
+                ? '将同时调用 Qwen 与 Gemini，可以对比结果后选择保存其中一个'
                 : `将使用 ${
                     selectedModel === 'qwen'
                       ? '通义千问'
                       : selectedModel === 'gemini'
                         ? 'Gemini'
-                        : 'CodeX'
+                        : selectedModel === 'mimo'
+                          ? '小米 MiMo'
+                          : 'CodeX'
                   } 模型进行分析`}
             </p>
           </div>
