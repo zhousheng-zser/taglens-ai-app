@@ -4,21 +4,14 @@ import type { TrafficAnalysisOutput } from '@/types/analysis';
 import type { EventMetaResponse, EventSearchRequest, EventSearchResponse } from '@/types/event';
 import { cookies } from 'next/headers';
 
-interface DualAnalysisResult {
-  qwen: TrafficAnalysisOutput | null;
-  gemini: TrafficAnalysisOutput | null;
-  error?: string;
-}
-
 interface ActionResult {
   analysis?: TrafficAnalysisOutput;
-  dualAnalysis?: DualAnalysisResult;
   error?: string;
 }
 
 interface AnalyzeImageInput {
   photoDataUri: string;
-  model?: 'qwen' | 'gemini' | 'codex' | 'mimo' | 'both';
+  model?: 'qwen' | 'gemini' | 'codex' | 'mimo';
 }
 
 interface SaveImageInput {
@@ -123,15 +116,7 @@ export async function handleImageAnalysis(input: AnalyzeImageInput): Promise<Act
     }
 
     const result = await response.json();
-
-    // 判断返回的是单模型结果还是双模型结果
-    if (result.qwen !== undefined || result.gemini !== undefined) {
-      // 双模型结果
-      return { dualAnalysis: result as DualAnalysisResult };
-    } else {
-      // 单模型结果
-      return { analysis: result as TrafficAnalysisOutput };
-    }
+    return { analysis: result as TrafficAnalysisOutput };
 
   } catch (error: any) {
     console.error('调用后端服务时出错:', error);

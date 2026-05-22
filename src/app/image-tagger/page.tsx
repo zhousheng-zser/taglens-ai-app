@@ -27,22 +27,14 @@ interface ImageQueueItem {
   dataUri: string;
 }
 
-interface DualAnalysisResult {
-  qwen: TrafficAnalysisOutput | null;
-  gemini: TrafficAnalysisOutput | null;
-  error?: string;
-}
-
 interface ImageAnalysisItem {
   file: File;
   preview: string;
   dataUri: string;
   fileName: string;
   analysis: TrafficAnalysisOutput | null;
-  dualAnalysis: DualAnalysisResult | null;  // 当选择 both 时使用
   error: string | null;
   isSaved: boolean;
-  selectedModel?: 'qwen' | 'gemini';  // 保存时选择的模型
   similarImageData?: string | null;  // 最相似图片的base64数据（data URI格式）
   similarityScore?: number;  // 相似度分数
 }
@@ -52,7 +44,7 @@ export default function ImageTaggerPage() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
-  const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'codex' | 'mimo' | 'both'>('qwen');
+  const [selectedModel, setSelectedModel] = useState<'qwen' | 'gemini' | 'codex' | 'mimo'>('qwen');
   const [similarityThreshold, setSimilarityThreshold] = useState(0.7409); // 默认74.09%
   const { toast } = useToast();
 
@@ -102,7 +94,6 @@ export default function ImageTaggerPage() {
             updated[index] = {
               ...updated[index],
               analysis: null,
-              dualAnalysis: null,
               error: `检测到相似图片（相似度: ${(similarityCheck.max_similarity * 100).toFixed(1)}%），跳过AI分析以避免重复`,
               similarImageData: mostSimilarImage?.imageData || null,
               similarityScore: similarityCheck.max_similarity,
@@ -143,23 +134,11 @@ export default function ImageTaggerPage() {
         setImageAnalyses(prev => {
           const updated = [...prev];
           if (updated[index]) {
-            if (selectedModel === 'both' && result.dualAnalysis) {
-              // 双模型结果
-              updated[index] = {
-                ...updated[index],
-                analysis: null,
-                dualAnalysis: result.dualAnalysis,
-                error: null,
-              };
-            } else {
-              // 单模型结果
-              updated[index] = {
-                ...updated[index],
-                analysis: result.analysis || null,
-                dualAnalysis: null,
-                error: null,
-              };
-            }
+            updated[index] = {
+              ...updated[index],
+              analysis: result.analysis || null,
+              error: null,
+            };
           }
           return updated;
         });
@@ -217,7 +196,6 @@ export default function ImageTaggerPage() {
         dataUri,
         fileName: file.name,
         analysis: null,
-        dualAnalysis: null,
         error: null,
         isSaved: false,
       });
@@ -350,7 +328,7 @@ export default function ImageTaggerPage() {
           {/* 模型选择 */}
           <div className="space-y-2">
             <Label htmlFor="model-select">选择AI模型</Label>
-            <Select value={selectedModel} onValueChange={(value: 'qwen' | 'gemini' | 'codex' | 'mimo' | 'both') => setSelectedModel(value)}>
+            <Select value={selectedModel} onValueChange={(value: 'qwen' | 'gemini' | 'codex' | 'mimo') => setSelectedModel(value)}>
               <SelectTrigger id="model-select" className="w-full">
                 <SelectValue placeholder="选择AI模型" />
               </SelectTrigger>
@@ -359,21 +337,18 @@ export default function ImageTaggerPage() {
                 <SelectItem value="gemini">Gemini</SelectItem>
                 <SelectItem value="codex">CodeX</SelectItem>
                 <SelectItem value="mimo">小米 MiMo (Omni)</SelectItem>
-                <SelectItem value="both">两者都调用</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              {selectedModel === 'both'
-                ? '将同时调用 Qwen 与 Gemini，可以对比结果后选择保存其中一个'
-                : `将使用 ${
-                    selectedModel === 'qwen'
-                      ? '通义千问'
-                      : selectedModel === 'gemini'
-                        ? 'Gemini'
-                        : selectedModel === 'mimo'
-                          ? '小米 MiMo'
-                          : 'CodeX'
-                  } 模型进行分析`}
+              {`将使用 ${
+                selectedModel === 'qwen'
+                  ? '通义千问'
+                  : selectedModel === 'gemini'
+                    ? 'Gemini'
+                    : selectedModel === 'mimo'
+                      ? '小米 MiMo'
+                      : 'CodeX'
+              } 模型进行分析`}
             </p>
           </div>
 
@@ -421,7 +396,6 @@ export default function ImageTaggerPage() {
           <div className="flex flex-col h-full">
             <ImageAnalysisDisplay
               analysis={currentImage?.analysis || null}
-              dualAnalysis={currentImage?.dualAnalysis || null}
               isLoading={isLoading}
               hasImage={!!currentImage}
               imageData={currentImage?.dataUri || null}
@@ -431,20 +405,6 @@ export default function ImageTaggerPage() {
               totalCount={imageAnalyses.length}
               onPrevious={handlePrevious}
               onNext={handleNext}
-              onSelectModel={(model) => {
-                // 更新当前图片的选中模型
-                setImageAnalyses(prev => {
-                  const updated = [...prev];
-                  if (updated[currentIndex]) {
-                    updated[currentIndex] = {
-                      ...updated[currentIndex],
-                      selectedModel: model,
-                    };
-                  }
-                  return updated;
-                });
-              }}
-              selectedModel={currentImage?.selectedModel || 'qwen'}
               similarImageData={currentImage?.similarImageData || null}
               similarityScore={currentImage?.similarityScore}
               isSaved={currentImage?.isSaved || false}

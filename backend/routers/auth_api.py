@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
+from core.sync_executor import run_blocking
 from core.manage_database import (
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
@@ -64,7 +65,7 @@ async def get_current_user(
 ) -> Dict[str, Any]:
     if not taglens_session:
         raise HTTPException(status_code=401, detail="请先登录")
-    user = verify_session_token(taglens_session)
+    user = await run_blocking(verify_session_token, taglens_session)
     if not user:
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
     return user
@@ -78,12 +79,15 @@ async def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)
 
 @router.post("/login")
 async def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
-    user = authenticate_user(request.username.strip(), request.password)
+    user = await run_blocking(authenticate_user, request.username.strip(), request.password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    token = create_session_token(int(user["id"]))
+    token = await run_blocking(create_session_token, int(user["id"]))
     response.set_cookie(SESSION_COOKIE_NAME, token, **_cookie_kwargs())
-    return {"success": True, "user": _with_time_ranges(user)}
+    time_ranges = await run_blocking(list_user_time_ranges, int(user["id"]))
+    result = dict(user)
+    result["timeRanges"] = time_ranges
+    return {"success": True, "user": result}
 
 
 @router.post("/logout")
@@ -94,7 +98,10 @@ async def logout(response: Response) -> Dict[str, Any]:
 
 @router.get("/me")
 async def me(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    return {"success": True, "user": _with_time_ranges(current_user)}
+    time_ranges = await run_blocking(list_user_time_ranges, int(current_user["id"]))
+    user = dict(current_user)
+    user["timeRanges"] = time_ranges
+    return {"success": True, "user": user}
 
 
 @router.get("/users")

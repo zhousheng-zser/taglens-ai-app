@@ -20,6 +20,7 @@ from core.manage_database import (
     upsert_event_review_record,
 )
 from core.minio_storage_client import get_storage_client
+from core.sync_executor import run_blocking
 from routers.auth_api import get_current_user, require_admin
 
 
@@ -227,7 +228,7 @@ def _is_qa_review_done(questions_answers_list: List[List[Dict[str, str]]], segme
 
 @router.get("/meta", response_model=EventMetaResponse)
 async def get_event_meta(_: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    cache = get_event_dict_cache()
+    cache = await run_blocking(get_event_dict_cache)
     return {
         "success": True,
         "projectOptions": cache["projectOptions"],
@@ -253,27 +254,32 @@ async def search_events_api(
 
     try:
         scoped_start_date, scoped_end_date = _apply_reviewer_time_scope(request, current_user)
-        results, total = search_events(
-            project_ids=request.projectIds,
-            event_type_codes=request.eventTypeCodes,
-            source_name=request.sourceName,
-            processing_status=request.processingStatus,
-            question_answer_status=request.questionAnswerStatus,
-            description_status=request.descriptionStatus,
-            start_date=scoped_start_date,
-            end_date=scoped_end_date,
-            page=request.page,
-            page_size=request.pageSize,
-        )
-        keys = [
-            (item["eventId"], item["projectId"], item["eventTypeCode"])
-            for item in results
-        ]
-        review_map = get_event_review_records_for_keys(keys)
-        for item in results:
-            review = review_map.get((item["eventId"], item["projectId"], item["eventTypeCode"]))
-            if review:
-                item.update(review)
+
+        def _search() -> tuple[list, int]:
+            rows, total = search_events(
+                project_ids=request.projectIds,
+                event_type_codes=request.eventTypeCodes,
+                source_name=request.sourceName,
+                processing_status=request.processingStatus,
+                question_answer_status=request.questionAnswerStatus,
+                description_status=request.descriptionStatus,
+                start_date=scoped_start_date,
+                end_date=scoped_end_date,
+                page=request.page,
+                page_size=request.pageSize,
+            )
+            keys = [
+                (item["eventId"], item["projectId"], item["eventTypeCode"])
+                for item in rows
+            ]
+            review_map = get_event_review_records_for_keys(keys)
+            for item in rows:
+                review = review_map.get((item["eventId"], item["projectId"], item["eventTypeCode"]))
+                if review:
+                    item.update(review)
+            return rows, total
+
+        results, total = await run_blocking(_search)
         return {"success": True, "results": results, "total": total}
     except HTTPException:
         raise

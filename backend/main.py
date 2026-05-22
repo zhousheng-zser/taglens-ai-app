@@ -63,6 +63,7 @@ from services.bulk_import_storage import (
 from services.image_similarity import decode_base64_image, load_image_from_path, extract_spatial_histogram_vector
 from services.faiss_index_manager import get_faiss_index_manager
 from core.minio_storage_client import get_storage_client
+from core.sync_executor import run_blocking
 from routers import management_api
 from routers import dtc_api
 from routers import event_api
@@ -237,7 +238,7 @@ def _resolve_mimo_endpoint(api_key: str) -> tuple[str, str, str]:
 # --- Pydantic 模型定义 ---
 class ImageAnalysisRequest(BaseModel):
     image: str # Base64 data URI
-    model: str = "qwen"  # 可选值: "qwen", "gemini", "codex", "mimo", "both"
+    model: str = "qwen"  # 可选值: "qwen", "gemini", "codex", "mimo"
 
 class SemanticSearch(BaseModel):
     description: str
@@ -250,11 +251,6 @@ class TrainingData(BaseModel):
 class TrafficAnalysisOutput(BaseModel):
     semantic_search: SemanticSearch
     training_data: TrainingData
-
-class DualAnalysisResponse(BaseModel):
-    qwen: Optional[TrafficAnalysisOutput] = None
-    gemini: Optional[TrafficAnalysisOutput] = None
-    error: Optional[str] = None
 
 class SaveImageRequest(BaseModel):
     image: str  # Base64 data URI
@@ -1315,12 +1311,8 @@ def test_qwen_connection():
 
 
 # --- API 路由 ---
-@app.post("/check-similarity", response_model=ImageSimilarityCheckResponse)
-async def check_image_similarity(request: ImageSimilarityCheckRequest):
-    """
-    检查上传的图片是否与数据库中的图片相似（使用 Faiss LSH）
-    如果相似度超过阈值，返回相似图片列表，建议不调用大模型API
-    """
+def _check_image_similarity_sync(request: ImageSimilarityCheckRequest) -> ImageSimilarityCheckResponse:
+    """同步：Faiss 相似度检查（在线程池中执行）"""
     try:
         # 提取上传图片的空间分块直方图向量
         uploaded_img = decode_base64_image(request.image)
@@ -1434,6 +1426,15 @@ async def check_image_similarity(request: ImageSimilarityCheckRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"检查图片相似度失败: {str(e)}")
+
+
+@app.post("/check-similarity", response_model=ImageSimilarityCheckResponse)
+async def check_image_similarity(request: ImageSimilarityCheckRequest):
+    """
+    检查上传的图片是否与数据库中的图片相似（使用 Faiss LSH）
+    如果相似度超过阈值，返回相似图片列表，建议不调用大模型API
+    """
+    return await run_blocking(_check_image_similarity_sync, request)
 
 
 # --- 批量导入 API ---
@@ -1556,7 +1557,7 @@ async def bulk_import_logs(
 
 @app.post("/analyze")
 async def analyze_image(request: ImageAnalysisRequest):
-    """分析图片，支持选择 Qwen、Gemini 或两者"""
+    """分析图片，支持 Qwen、Gemini、Codex、MiMo"""
     # 日志：记录调用来源的关键特征，方便对比前端“图片标签”和管理任务的请求形态
     raw_model = (request.model or "gemini") if hasattr(request, "model") else "gemini"
     img_str = request.image if hasattr(request, "image") and request.image else ""
@@ -1569,70 +1570,10 @@ async def analyze_image(request: ImageAnalysisRequest):
         pass
 
     model = raw_model.lower()
-    
-    # 如果选择 both，返回 DualAnalysisResponse
-    if model == "both":
-        qwen_key = os.getenv("QWEN_API_KEY")
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        
-        result = DualAnalysisResponse()
-        
-        # 并行调用两个 API
-        async def call_qwen():
-            if not qwen_key :
-                return None
-            try:
-                analysis_result = await asyncio.to_thread(
-                    call_qwen_vision_api, 
-                    qwen_key, 
-                    request.image
-                )
-                return TrafficAnalysisOutput(**analysis_result)
-            except Exception as e:
-                print(f"Qwen API 调用失败: {e}")
-                return None
-        
-        async def call_gemini():
-            if not gemini_key :
-                return None
-            try:
-                analysis_result = await asyncio.to_thread(
-                    call_gemini_vision_api, 
-                    gemini_key, 
-                    request.image
-                )
-                return TrafficAnalysisOutput(**analysis_result)
-            except Exception as e:
-                print(f"Gemini API 调用失败: {e}")
-                return None
-        
-        # 并行执行
-        qwen_result, gemini_result = await asyncio.gather(
-            call_qwen(),
-            call_gemini(),
-            return_exceptions=True
-        )
-        
-        if isinstance(qwen_result, Exception):
-            result.error = f"Qwen API 错误: {str(qwen_result)}"
-        else:
-            result.qwen = qwen_result
-        
-        if isinstance(gemini_result, Exception):
-            if result.error:
-                result.error += f"; Gemini API 错误: {str(gemini_result)}"
-            else:
-                result.error = f"Gemini API 错误: {str(gemini_result)}"
-        else:
-            result.gemini = gemini_result
-        
-        if not result.qwen and not result.gemini:
-            raise HTTPException(status_code=500, detail=result.error or "两个 API 都调用失败")
-        
-        return result
-    
-    # 单个模型调用
-    elif model == "gemini":
+    if model not in ("qwen", "gemini", "codex", "mimo"):
+        raise HTTPException(status_code=400, detail=f"不支持的模型: {raw_model}")
+
+    if model == "gemini":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key :
             print("警告: 未找到有效的 GEMINI_API_KEY，将返回模拟数据。")
@@ -1691,7 +1632,7 @@ async def analyze_image(request: ImageAnalysisRequest):
         except Exception as e:
             print(f"处理图片时发生错误: {e}")
             raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
-    else:  # 默认使用 qwen
+    else:  # qwen
         api_key = os.getenv("QWEN_API_KEY")
         if not api_key :
             print("警告: 未找到有效的 QWEN_API_KEY，将返回模拟数据。")
@@ -1750,12 +1691,8 @@ def extract_image_format_from_data_uri(data_uri: str) -> tuple[str, bytes]:
     
     return ext, image_bytes
 
-@app.post("/save-image", response_model=SaveImageResponse)
-async def save_image(request: SaveImageRequest):
-    """
-    保存图片到 MinIO 和数据库
-    路径格式: project_data/default/YYYY-MM-DD/uuid.ext
-    """
+def _save_image_sync(request: SaveImageRequest) -> SaveImageResponse:
+    """同步：保存图片（在线程池中执行）"""
     try:
         # 获取当前日期 (YYYY-MM-DD)
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -1866,10 +1803,15 @@ async def save_image(request: SaveImageRequest):
         raise HTTPException(status_code=500, detail=f"保存图片失败: {str(e)}")
 
 
+@app.post("/save-image", response_model=SaveImageResponse)
+async def save_image(request: SaveImageRequest):
+    """保存图片到 MinIO 和数据库"""
+    return await run_blocking(_save_image_sync, request)
+
+
 # --- 搜索 API ---
-@app.post("/search", response_model=SearchResponse)
-async def search_images_api(request: SearchRequest):
-    """从数据库搜索图片（使用向量相似度搜索，支持多标签和权重）"""
+def _search_images_sync(request: SearchRequest) -> SearchResponse:
+    """同步：向量搜索（在线程池中执行）"""
     print("=" * 60)
     print("收到搜索请求!")
     
@@ -1990,36 +1932,62 @@ async def search_images_api(request: SearchRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
+
+@app.post("/search", response_model=SearchResponse)
+async def search_images_api(request: SearchRequest):
+    return await run_blocking(_search_images_sync, request)
+
+
+def _get_all_images_sync(limit: int) -> SearchResponse:
+    results = get_all_images(limit)
+    image_results = [
+        ImageSearchResult(
+            id=r['id'],
+            uuid=r['uuid'],
+            filePath=r['filePath'],
+            fileName=r['fileName'],
+            createdAt=r['createdAt'],
+            description=r['description'],
+            keywords=r['keywords'],
+            tags=r['tags'],
+            qwenCaptions=r['qwenCaptions'],
+            yoloObjects=r['yoloObjects'],
+        )
+        for r in results
+    ]
+    return SearchResponse(
+        success=True,
+        results=image_results,
+        total=len(image_results),
+    )
+
+
 @app.get("/images", response_model=SearchResponse)
 async def get_all_images_api(limit: int = Query(100, ge=1, le=1000)):
-    """获取所有图片"""
     try:
-        results = get_all_images(limit)
-        
-        image_results = [
-            ImageSearchResult(
-                id=r['id'],
-                uuid=r['uuid'],
-                filePath=r['filePath'],
-                fileName=r['fileName'],
-                createdAt=r['createdAt'],
-                description=r['description'],
-                keywords=r['keywords'],
-                tags=r['tags'],
-                qwenCaptions=r['qwenCaptions'],
-                yoloObjects=r['yoloObjects']
-            )
-            for r in results
-        ]
-        
-        return SearchResponse(
-            success=True,
-            results=image_results,
-            total=len(image_results)
-        )
+        return await run_blocking(_get_all_images_sync, limit)
     except Exception as e:
         print(f"获取图片列表时发生错误: {e}")
         raise HTTPException(status_code=500, detail=f"获取图片列表失败: {str(e)}")
+
+
+def _delete_image_sync(image_uuid: str) -> Dict[str, Any]:
+    api_start = time.time()
+    print(f"[images/delete] start uuid={image_uuid}")
+    db_start = time.time()
+    deleted = delete_image_by_uuid(image_uuid)
+    print(f"[images/delete] db delete finished cost={time.time()-db_start:.3f}s deleted={deleted}")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="图片记录不存在")
+    try:
+        faiss_start = time.time()
+        faiss_manager = get_faiss_index_manager()
+        removed = faiss_manager.remove_vector(image_uuid)
+        print(f"[images/delete] faiss remove finished removed={removed} cost={time.time()-faiss_start:.3f}s")
+    except Exception as faiss_exc:
+        print(f"删除 Faiss 向量失败 uuid={image_uuid}: {faiss_exc}")
+    print(f"[images/delete] done uuid={image_uuid} total_cost={time.time()-api_start:.3f}s")
+    return {"success": True, "uuid": image_uuid}
 
 
 @app.post("/images/delete")
@@ -2028,39 +1996,16 @@ async def delete_image_api(request: DeleteImageRequest):
     image_uuid = (request.uuid or "").strip()
     if not image_uuid:
         raise HTTPException(status_code=400, detail="uuid 不能为空")
-    api_start = time.time()
-    print(f"[images/delete] start uuid={image_uuid}")
     try:
-        db_start = time.time()
-        deleted = delete_image_by_uuid(image_uuid)
-        print(f"[images/delete] db delete finished cost={time.time()-db_start:.3f}s deleted={deleted}")
-        if not deleted:
-            raise HTTPException(status_code=404, detail="图片记录不存在")
-        # 从 Faiss 索引中同步移除（逻辑删除）
-        try:
-            faiss_start = time.time()
-            print(f"[images/delete] before get_faiss_index_manager")
-            faiss_manager = get_faiss_index_manager()
-            print(f"[images/delete] after get_faiss_index_manager")
-            removed = faiss_manager.remove_vector(image_uuid)
-            print(f"[images/delete] faiss remove finished removed={removed} cost={time.time()-faiss_start:.3f}s")
-            print("[images/delete] faiss save_index scheduled by background uploader")
-        except Exception as faiss_exc:
-            print(f"删除 Faiss 向量失败 uuid={image_uuid}: {faiss_exc}")
-        print(f"[images/delete] done uuid={image_uuid} total_cost={time.time()-api_start:.3f}s")
-        return {"success": True, "uuid": image_uuid}
+        return await run_blocking(_delete_image_sync, image_uuid)
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[images/delete] failed uuid={image_uuid} err={e} total_cost={time.time()-api_start:.3f}s")
         raise HTTPException(status_code=500, detail=f"删除图片失败: {str(e)}")
 
 # --- 直接读取文件系统图片接口 ---
-@app.get("/api/images/direct")
-async def get_image_direct(
-    path: str = Query(..., description="图片路径（MinIO 对象路径）")
-):
-    """直接从文件系统读取图片（不通过 MinIO 客户端）"""
+def _get_image_direct_sync(path: str) -> Response:
+    """同步：从本地 MinIO 数据目录读图"""
     # MinIO 数据目录的常见路径
     possible_dirs = [
         "/var/lib/minio/data",
@@ -2117,28 +2062,37 @@ async def get_image_direct(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+@app.get("/api/images/direct")
+async def get_image_direct(
+    path: str = Query(..., description="图片路径（MinIO 对象路径）"),
+):
+    return await run_blocking(_get_image_direct_sync, path)
+
+
+def _download_image_sync(object_name: str) -> Response:
+    storage_client = get_storage_client(skip_bucket_check=True)
+    if not storage_client.file_exists(object_name):
+        raise HTTPException(status_code=404, detail="图片不存在")
+    file_data = storage_client.download_file_data(object_name)
+    filename = os.path.basename(object_name)
+    content_type, _ = mimetypes.guess_type(object_name)
+    if content_type is None or not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+    return Response(
+        content=file_data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 # --- MinIO 图片下载接口 ---
 @app.get("/api/minio/download/image")
 async def download_image_api(
-    object_name: str = Query(..., description="MinIO 中的对象名称（路径）")
+    object_name: str = Query(..., description="MinIO 中的对象名称（路径）"),
 ):
     """从 MinIO 下载图片"""
     try:
-        storage_client = get_storage_client(skip_bucket_check=True)
-        if not storage_client.file_exists(object_name):
-            raise HTTPException(status_code=404, detail="图片不存在")
-        
-        file_data = storage_client.download_file_data(object_name)
-        filename = os.path.basename(object_name)
-        content_type, _ = mimetypes.guess_type(object_name)
-        if content_type is None or not content_type.startswith("image/"):
-            content_type = "image/jpeg"
-        
-        return Response(
-            content=file_data,
-            media_type=content_type,
-            headers={"Content-Disposition": f'inline; filename="{filename}"'}
-        )
+        return await run_blocking(_download_image_sync, object_name)
     except HTTPException:
         raise
     except Exception as e:
@@ -2218,28 +2172,20 @@ async def download_file_api(
 
 
 # --- 图片上传处理接口 (Project Sync用) ---
-@app.post("/upload-image-for-processing")
-async def process_uploaded_image_api(
-    file: UploadFile = File(...),
-    project_name: str = Form(...),
-    timestamp: Optional[str] = Form(None),
-    camera_id: Optional[str] = Form(None),
-    sz_name: Optional[str] = Form(None),
-    threshold: float = Form(0.7409)
-):
-    """
-    接收上传的图片，执行完整处理流程：
-    1. 去重 (Faiss)
-    2. 上传 MinIO
-    3. AI 分析 (Qwen/Gemini/CodeX)
-    4. 入库 (MySQL/SQLite)
-    """
+def _process_uploaded_image_sync(
+    image_bytes: bytes,
+    file_name: Optional[str],
+    content_type: str,
+    project_name: str,
+    timestamp: Optional[str],
+    camera_id: Optional[str],
+    sz_name: Optional[str],
+    threshold: float,
+) -> Dict[str, Any]:
+    """同步：项目同步上传处理（在线程池中执行，含 AI 调用）"""
     ai_error_message: Optional[str] = None
+    temp_uuid = str(uuid.uuid4())
     try:
-        # 1. 读取图片数据
-        image_bytes = await file.read()
-        file_name = file.filename
-        
         # 将 image_bytes 转为 PIL Image 以计算特征向量
         from io import BytesIO
         from PIL import Image
@@ -2254,8 +2200,6 @@ async def process_uploaded_image_api(
         # 2. 计算特征向量并去重
         spatial_vector = extract_spatial_histogram_vector(pil_image)
         
-        # 生成一个临时UUID用于去重检查
-        temp_uuid = str(uuid.uuid4())
         faiss_manager = get_faiss_index_manager()
         
         # 原子性检查与占位
@@ -2288,14 +2232,14 @@ async def process_uploaded_image_api(
         final_file_name = f"{temp_uuid}_{file_name}"
         minio_path = f"project_data/{project_name}/{date_str}/{final_file_name}"
 
-        storage_client.upload_file_data(image_bytes, minio_path, file.content_type or "image/jpeg")
+        storage_client.upload_file_data(image_bytes, minio_path, content_type)
 
         # 3.2 AI 分析 preparation
         import base64
         import random
         
         base64_str = base64.b64encode(image_bytes).decode('utf-8')
-        mime_type = file.content_type or "image/jpeg"
+        mime_type = content_type or "image/jpeg"
         data_uri = f"data:{mime_type};base64,{base64_str}"
         
         # 确定使用的模型和概率
@@ -2328,58 +2272,31 @@ async def process_uploaded_image_api(
                 print(f"构造动态Prompt失败: {e}")
 
         if should_call_api:
-            # 异步调用 AI (Run in thread pool)
             try:
-                loop = asyncio.get_event_loop()
-                
                 if use_model == 'qwen':
                     qwen_key = os.getenv("QWEN_API_KEY")
                     print(f"[DEBUG] Qwen API Key configured: {'Yes' if qwen_key else 'No'}")
-                    if not qwen_key :
+                    if not qwen_key:
                         print("服务端未配置 QWEN_API_KEY，跳过 AI 分析")
                         analysis_result = None
                     else:
-                        analysis_result = await loop.run_in_executor(
-                            None, 
-                            call_qwen_vision_api, 
-                            qwen_key, 
-                            data_uri,
-                            final_prompt
-                        )
+                        analysis_result = call_qwen_vision_api(qwen_key, data_uri, final_prompt)
                 elif use_model == 'codex':
-                    analysis_result = await loop.run_in_executor(
-                        None,
-                        call_codex_vision_api,
-                        data_uri,
-                        final_prompt
-                    )
+                    analysis_result = call_codex_vision_api(data_uri, final_prompt)
                 elif use_model == 'mimo':
                     mimo_key = os.getenv("MIMO_API_KEY")
                     if not mimo_key:
                         print("服务端未配置 MIMO_API_KEY，跳过 AI 分析")
                         analysis_result = None
                     else:
-                        analysis_result = await loop.run_in_executor(
-                            None,
-                            call_mimo_vision_api,
-                            mimo_key,
-                            data_uri,
-                            final_prompt,
-                        )
+                        analysis_result = call_mimo_vision_api(mimo_key, data_uri, final_prompt)
                 else:
-                    # Default to Gemini
                     gemini_key = os.getenv("GEMINI_API_KEY")
                     if not gemini_key:
                         print("服务端未配置 GEMINI_API_KEY，跳过 AI 分析")
                         analysis_result = None
                     else:
-                        analysis_result = await loop.run_in_executor(
-                            None, 
-                            call_gemini_vision_api, 
-                            gemini_key, 
-                            data_uri,
-                            final_prompt
-                        )
+                        analysis_result = call_gemini_vision_api(gemini_key, data_uri, final_prompt)
             except Exception as ai_e:
                 analysis_result = None
                 ai_error_message = str(ai_e)
@@ -2485,6 +2402,30 @@ async def process_uploaded_image_api(
         except:
             pass
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/upload-image-for-processing")
+async def process_uploaded_image_api(
+    file: UploadFile = File(...),
+    project_name: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    camera_id: Optional[str] = Form(None),
+    sz_name: Optional[str] = Form(None),
+    threshold: float = Form(0.7409),
+):
+    """接收上传的图片，执行完整处理流程（在线程池中运行，不阻塞事件循环）"""
+    image_bytes = await file.read()
+    return await run_blocking(
+        _process_uploaded_image_sync,
+        image_bytes,
+        file.filename,
+        file.content_type or "image/jpeg",
+        project_name,
+        timestamp,
+        camera_id,
+        sz_name,
+        threshold,
+    )
 
 
 # --- 项目脚本执行管理 ---
@@ -2834,9 +2775,24 @@ if __name__ == "__main__":
     
     test_qwen_connection()
     
-    print(f"启动 TagLens AI 后端服务于 http://localhost:8000")
+    host = os.getenv("UVICORN_HOST", "0.0.0.0")
+    port = int(os.getenv("UVICORN_PORT", "8000"))
+    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    reload = os.getenv("UVICORN_RELOAD", "true").lower() in ("1", "true", "yes")
+    if reload and workers > 1:
+        print(">> UVICORN_RELOAD=true 时仅使用 1 个 worker")
+        workers = 1
+
+    print(f"启动 TagLens AI 后端服务于 http://{host}:{port}")
     print(f"  - Qwen 模型: {QWEN_MODEL}")
     print(f"  - Gemini 模型: {GEMINI_MODEL}")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    print(f"  - workers: {workers}, reload: {reload}")
+    uvicorn.run(
+        "main:app",
+        host=host,
+        port=port,
+        workers=workers,
+        reload=reload,
+    )
 
     

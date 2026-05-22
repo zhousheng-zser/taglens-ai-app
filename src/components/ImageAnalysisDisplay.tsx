@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Badge } from './ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
@@ -13,15 +13,8 @@ import { saveImageMetadata } from '@/lib/imageStorage';
 import { saveImageToFileSystem } from '@/app/actions';
 import type { TrafficAnalysisOutput } from '@/types/analysis';
 
-interface DualAnalysisResult {
-  qwen: TrafficAnalysisOutput | null;
-  gemini: TrafficAnalysisOutput | null;
-  error?: string;
-}
-
 interface ImageAnalysisDisplayProps {
   analysis: TrafficAnalysisOutput | null;
-  dualAnalysis?: DualAnalysisResult | null; // 双模型结果
   isLoading: boolean;
   hasImage: boolean;
   imageData?: string | null; // base64 data URI
@@ -31,8 +24,6 @@ interface ImageAnalysisDisplayProps {
   totalCount?: number; // 总图片数
   onPrevious?: () => void; // 上一张
   onNext?: () => void; // 下一张
-  onSelectModel?: (model: 'qwen' | 'gemini') => void; // 选择要保存的模型
-  selectedModel?: 'qwen' | 'gemini'; // 当前选择的模型
   similarImageData?: string | null;  // 最相似图片的base64数据（data URI格式）
   similarityScore?: number;  // 相似度分数
   isSaved?: boolean;  // 图片是否已保存（由父组件维护）
@@ -101,7 +92,6 @@ const RecursiveRenderer: React.FC<{ data: any; depth?: number }> = ({ data, dept
 
 export function ImageAnalysisDisplay({
   analysis,
-  dualAnalysis,
   isLoading,
   hasImage,
   imageData,
@@ -111,37 +101,15 @@ export function ImageAnalysisDisplay({
   totalCount = 0,
   onPrevious,
   onNext,
-  onSelectModel,
-  selectedModel,
   similarImageData,
   similarityScore,
   isSaved: isSavedProp = false  // 从父组件接收已保存状态
 }: ImageAnalysisDisplayProps) {
   const { toast } = useToast();
   const [isSaving, setIsSaving] = useState(false);
-  const [localSelectedModel, setLocalSelectedModel] = useState<'qwen' | 'gemini'>(selectedModel || 'qwen');
-
-  // 当 selectedModel prop 改变时，同步更新本地状态
-  useEffect(() => {
-    if (selectedModel) {
-      setLocalSelectedModel(selectedModel);
-    }
-  }, [selectedModel]);
-
-  // 确定要使用的分析结果
-  const currentAnalysis = dualAnalysis
-    ? (localSelectedModel === 'qwen' ? dualAnalysis.qwen : dualAnalysis.gemini)
-    : analysis;
-
-  const handleModelSelect = (model: 'qwen' | 'gemini') => {
-    setLocalSelectedModel(model);
-    if (onSelectModel) {
-      onSelectModel(model);
-    }
-  };
 
   const handleSave = async () => {
-    const analysisToSave = currentAnalysis;
+    const analysisToSave = analysis;
     if (!analysisToSave || !imageData) {
       toast({
         variant: 'destructive',
@@ -282,125 +250,6 @@ export function ImageAnalysisDisplay({
       );
     }
 
-    // 处理双模型结果 - 同时展示两个模型的结果
-    if (dualAnalysis) {
-      const qwenAnalysis = dualAnalysis.qwen;
-      const geminiAnalysis = dualAnalysis.gemini;
-
-      // 渲染单个模型的分析结果
-      const renderAnalysisCard = (analysis: TrafficAnalysisOutput | null, modelName: string, modelKey: 'qwen' | 'gemini') => {
-        if (!analysis) {
-          return (
-            <Card className="bg-muted/30 border-dashed">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-3 text-xl text-muted-foreground">
-                  <Bot className="text-muted-foreground" />
-                  {modelName} - 未返回结果
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-muted-foreground text-center p-8">该模型未返回分析结果</p>
-              </CardContent>
-            </Card>
-          );
-        }
-
-        return (
-          <div className="space-y-4">
-            <Card className="bg-muted/30">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="flex items-center gap-3 text-xl">
-                    <Bot className="text-primary" />
-                    {modelName} - 语义检索核心 (Semantic Search)
-                  </CardTitle>
-                  <Button
-                    variant={localSelectedModel === modelKey ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => handleModelSelect(modelKey)}
-                    disabled={!analysis}
-                  >
-                    {localSelectedModel === modelKey ? '✓ 已选择保存' : '选择保存此结果'}
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <Section icon={ScanText} title="高密度描述">
-                  <p className="text-base text-foreground bg-background/50 p-3 rounded-md border">
-                    {analysis.semantic_search.description}
-                  </p>
-                </Section>
-                <Section icon={Tags} title="核心关键词">
-                  <div className="flex flex-wrap gap-2">
-                    {analysis.semantic_search.keywords.map(tag => (
-                      <Badge key={tag} variant="secondary" className="text-base py-1 px-3 cursor-pointer hover:bg-primary/80">
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                </Section>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-muted/30">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-3 text-xl"><TestTube2 className="text-primary" /> {modelName} - 模型训练数据 (Training Data)</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-
-                <Section icon={ScanText} title="Qwen描述">
-                  <div className="bg-background/50 p-3 rounded-md border space-y-3">
-                    <RecursiveRenderer data={analysis.training_data.qwen_captions} />
-                  </div>
-                </Section>
-                <Section icon={ListTree} title="YOLO目标清单">
-                  <div className="flex flex-wrap gap-2">
-                    {analysis.training_data.yolo_objects.map(obj => (
-                      <Badge key={obj} variant="outline" className="text-sm py-1 px-3 font-mono">
-                        {obj}
-                      </Badge>
-                    ))}
-                  </div>
-                </Section>
-              </CardContent>
-            </Card>
-          </div>
-        );
-      };
-
-      return (
-        <div className="space-y-6 animate-in fade-in-50 p-1">
-          {dualAnalysis.error && (
-            <Alert variant="destructive" className="mb-4">
-              <AlertDescription>{dualAnalysis.error}</AlertDescription>
-            </Alert>
-          )}
-
-          {/* 并排显示两个模型的结果 */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Qwen 结果 */}
-            <div className="space-y-4">
-              {renderAnalysisCard(qwenAnalysis, '通义千问 (Qwen)', 'qwen')}
-            </div>
-
-            {/* Gemini 结果 */}
-            <div className="space-y-4">
-              {renderAnalysisCard(geminiAnalysis, 'Gemini', 'gemini')}
-            </div>
-          </div>
-
-          {/* 当前选择的模型提示 */}
-          <div className="bg-primary/10 border border-primary/20 rounded-lg p-4 text-center">
-            <p className="text-sm text-muted-foreground">
-              当前选择保存: <span className="font-semibold text-primary">
-                {localSelectedModel === 'qwen' ? '通义千问 (Qwen)' : 'Gemini'}
-              </span>
-            </p>
-          </div>
-        </div>
-      );
-    }
-
     if (analysis) {
       return (
         <div className="space-y-6 animate-in fade-in-50 p-1">
@@ -502,7 +351,7 @@ export function ImageAnalysisDisplay({
               </div>
             )}
           </div>
-          {(analysis || (dualAnalysis && currentAnalysis)) && imageData && !isLoading && (
+          {analysis && imageData && !isLoading && (
             <Button
               onClick={handleSave}
               size="sm"
