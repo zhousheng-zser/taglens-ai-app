@@ -224,7 +224,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 TEXT_MODEL = os.getenv("QWEN_TEXT_MODEL", "qwen-plus")  # 用于文本模型测试
 # 北京地域的兼容Endpoint
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2-omni")
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 
 
@@ -916,7 +916,7 @@ def call_qwen_vision_api(api_key: str, data_uri: str, prompt: str):
         print(f"Error calling Qwen Vision API: {e}")
         raise HTTPException(status_code=500, detail=f"调用AI视觉模型时出错: {e}")
 
-# --- MiMo 图片理解 API（token-plan: mimo-v2-omni；开放平台: mimo-v2.5）---
+# --- MiMo 图片理解 API（token-plan: mimo-v2.5；）---
 def call_mimo_vision_api(api_key: str, data_uri: str, prompt: str):
     vision_key, base_url, vision_model = _resolve_mimo_endpoint(api_key)
     url = f"{base_url.rstrip('/')}/chat/completions"

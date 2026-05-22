@@ -49,7 +49,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-vl-max")
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2-omni")
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 
 # 批量补齐数量（可用环境变量覆盖）
