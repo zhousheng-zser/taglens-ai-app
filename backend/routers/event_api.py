@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.event_database import (
     delete_event_record,
@@ -22,6 +23,12 @@ from core.manage_database import (
 from core.minio_storage_client import get_storage_client
 from core.sync_executor import run_blocking
 from routers.auth_api import get_current_user, require_admin
+from services.event_segment_ai_description_service import (
+    SegmentAiMediaError,
+    SegmentAiModelError,
+    generate_segment_description_sync,
+    get_executor,
+)
 
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -102,6 +109,17 @@ class EventDeleteRequest(BaseModel):
     eventId: str
     projectId: str
     eventTypeCode: str
+
+
+class SegmentAiDescriptionRequest(BaseModel):
+    segmentVideoUrl: str = Field(..., min_length=1)
+    overlayImageUrl: Optional[str] = None
+    segmentIndex: int = 0
+
+
+class SegmentAiDescriptionResponse(BaseModel):
+    success: bool
+    description: str
 
 
 def _normalize_to_object_name(raw_path: str) -> str:
@@ -285,6 +303,36 @@ async def search_events_api(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"事件搜索失败: {exc}")
+
+
+@router.post("/segment-ai-description", response_model=SegmentAiDescriptionResponse)
+async def generate_segment_ai_description_api(
+    request: SegmentAiDescriptionRequest,
+    _: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    segment_video_url = (request.segmentVideoUrl or "").strip()
+    if not segment_video_url:
+        raise HTTPException(status_code=400, detail="segmentVideoUrl 不能为空")
+
+    overlay_url = (request.overlayImageUrl or "").strip() or None
+    loop = asyncio.get_running_loop()
+    executor = get_executor()
+
+    try:
+        description = await loop.run_in_executor(
+            executor,
+            generate_segment_description_sync,
+            segment_video_url,
+            overlay_url,
+        )
+    except SegmentAiMediaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except SegmentAiModelError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI 分段描述生成失败: {exc}") from exc
+
+    return {"success": True, "description": description}
 
 
 @router.post("/segment-annotations")

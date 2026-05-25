@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Search, RotateCcw, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2 } from 'lucide-react';
+import { Search, RotateCcw, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2, Sparkles } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { getEventMeta, searchEvents } from '@/app/actions';
@@ -63,6 +64,16 @@ const DESCRIPTION_STATUS_OPTIONS = [
   { value: 'partially_edited', label: '部分已编辑' },
 ] as const;
 
+function resolveMediaUrlForApi(url: string): string {
+  const value = (url || '').trim();
+  if (!value) return '';
+  if (value.startsWith('http://') || value.startsWith('https://')) return value;
+  if (typeof window !== 'undefined') {
+    return new URL(value, window.location.origin).href;
+  }
+  return value;
+}
+
 type EventStreamPlayerProps = {
   record: EventSearchResult;
   onDirtyChange: (dirty: boolean) => void;
@@ -77,6 +88,7 @@ type EventStreamPlayerProps = {
 };
 
 const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirtyChange, onSaved }: EventStreamPlayerProps) {
+  const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number>(-1);
   const [activeStreamUrl, setActiveStreamUrl] = useState<string>('');
@@ -90,6 +102,7 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
   const [initialStatuses, setInitialStatuses] = useState<string[]>([]);
   const [initialQuestionsAnswers, setInitialQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
   const [isSaving, setIsSaving] = useState(false);
+  const [isAiGenerating, setIsAiGenerating] = useState(false);
   const [quickMarkStatus, setQuickMarkStatus] = useState<'待定' | '正样本' | '负样本' | null>(null);
   const [quickMarkSelections, setQuickMarkSelections] = useState<number[]>([]);
 
@@ -307,6 +320,66 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
     }
   };
 
+  const handleAiSmartDescription = async () => {
+    if (activeEditableSegmentIndex === null || isAiGenerating) return;
+    const idx = activeEditableSegmentIndex;
+    const segmentVideoUrl = resolveMediaUrlForApi((record.segmentUrls || [])[idx] || '');
+    if (!segmentVideoUrl) {
+      toast({ title: '无法生成', description: '当前分段没有可访问的视频地址', variant: 'destructive' });
+      return;
+    }
+    const overlayRaw = (record.imageOverlayUrl || '').trim();
+    const overlayImageUrl = overlayRaw ? resolveMediaUrlForApi(overlayRaw) : undefined;
+
+    setIsAiGenerating(true);
+    try {
+      const response = await fetch('/api/backend/events/segment-ai-description', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          segmentVideoUrl,
+          overlayImageUrl: overlayImageUrl || undefined,
+          segmentIndex: idx,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = typeof payload?.detail === 'string'
+          ? payload.detail
+          : (payload?.detail?.msg || payload?.error || 'AI 描述生成失败');
+        throw new Error(detail);
+      }
+      const description = String(payload?.description || '').trim();
+      if (!description) {
+        throw new Error('AI 未返回描述内容');
+      }
+
+      const raw = draftDescriptions[idx] || '';
+      const trimmed = raw.trim();
+      const next = [...draftDescriptions];
+      if (!trimmed) {
+        next[idx] = description;
+        setDraftDescriptions(next);
+        return;
+      }
+      const separator = raw.endsWith('\n') ? '' : '\n';
+      next[idx] = `${raw}${separator}${description}`;
+      setDraftDescriptions(next);
+      toast({
+        title: '已追加 AI 描述',
+        description: `已将内容追加到分段 ${idx.toString().padStart(3, '0')} 描述末尾，请确认后保存。`,
+      });
+    } catch (error: any) {
+      toast({
+        title: 'AI 描述生成失败',
+        description: error?.message || '未知错误',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsAiGenerating(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start">
@@ -438,10 +511,22 @@ const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirt
               {isSaving ? '保存中...' : '全部保存'}
             </Button>
           </div>
-          <div className="text-xs text-muted-foreground">
-            {activeEditableSegmentIndex === null
-              ? '请选择 000/001... 分段后编辑描述'
-              : `当前分段：${activeEditableSegmentIndex.toString().padStart(3, '0')}`}
+          <div className="flex items-center justify-between gap-2 min-h-7">
+            <span className="text-xs text-muted-foreground shrink-0">
+              {activeEditableSegmentIndex === null
+                ? '请选择 000/001... 分段后编辑描述'
+                : `当前分段：${activeEditableSegmentIndex.toString().padStart(3, '0')}`}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void handleAiSmartDescription()}
+              disabled={activeEditableSegmentIndex === null || isSaving || isAiGenerating}
+              className="h-7 shrink-0 px-2.5 text-xs font-medium text-white border-0 shadow-md bg-gradient-to-r from-violet-500 via-fuchsia-500 to-amber-400 hover:from-violet-400 hover:via-fuchsia-400 hover:to-amber-300 disabled:opacity-50 disabled:from-zinc-600 disabled:via-zinc-600 disabled:to-zinc-600"
+            >
+              <Sparkles className="h-3.5 w-3.5 mr-1" />
+              {isAiGenerating ? '生成中…' : 'AI智能描述'}
+            </Button>
           </div>
           <textarea
             value={activeEditableSegmentIndex === null ? '' : (draftDescriptions[activeEditableSegmentIndex] || '')}
