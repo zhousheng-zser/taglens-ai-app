@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
-    Trash2, FileDiff, Database, Activity, Loader2, AlertTriangle, CheckCircle2, ShieldAlert,
+    Trash2, FileDiff, Activity, Loader2, AlertTriangle, ShieldAlert,
     Terminal, X, Check, AlertCircle, Info, Lock, ChevronRight, Sparkles, Scissors, ChevronsUpDown
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -37,19 +37,26 @@ interface LogEntry {
     timestamp: string;
 }
 
+/** 经 Next 同源代理到 FastAPI，避免浏览器直连 localhost:8000 导致 Failed to fetch */
+function managementApiUrl(path: string): string {
+    const normalized = path.startsWith('/') ? path.slice(1) : path;
+    return `/api/backend/${normalized}`;
+}
+
 function DataManagementContent() {
     const { toast } = useToast();
 
     // Input States
     const [deletePath, setDeletePath] = useState('');
     const [checkPairPath, setCheckPairPath] = useState('');
-    const [checkDbPath, setCheckDbPath] = useState('');
     const [reextractLimit, setReextractLimit] = useState('2000');
     const [reextractModel, setReextractModel] = useState<'gemini' | 'qwen' | 'codex' | 'mimo'>('gemini');
     const [segmentLimit, setSegmentLimit] = useState('10');
+    const [segmentDescFillLimit, setSegmentDescFillLimit] = useState('10');
     const [segmentEventTypeOptions, setSegmentEventTypeOptions] = useState<EventOptionItem[]>([]);
     const [segmentEventTypesLoading, setSegmentEventTypesLoading] = useState(true);
     const [selectedSegmentEventTypes, setSelectedSegmentEventTypes] = useState<string[]>([]);
+    const [selectedSegmentDescFillEventTypes, setSelectedSegmentDescFillEventTypes] = useState<string[]>([]);
 
     // Log Modal States
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -58,6 +65,7 @@ function DataManagementContent() {
     const [isTaskDone, setIsTaskDone] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [isReextractRunning, setIsReextractRunning] = useState(false);
+    const [isSegmentDescFillRunning, setIsSegmentDescFillRunning] = useState(false);
     const logEndRef = useRef<HTMLDivElement>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -85,9 +93,7 @@ function DataManagementContent() {
         setIsProcessing(true);
 
         try {
-            const endpoint = process.env.NEXT_PUBLIC_API_URL
-                ? `${process.env.NEXT_PUBLIC_API_URL}${url}`
-                : `http://localhost:8000${url}`;
+            const endpoint = managementApiUrl(url);
 
             const controller = new AbortController();
             abortControllerRef.current = controller;
@@ -148,20 +154,19 @@ function DataManagementContent() {
         }
     };
 
-    // 仅用于重新连接缺失标签补齐任务的日志，不会重新启动任务
-    const openReextractLogStream = async () => {
+    const attachLogStream = async (
+        endpoint: string,
+        taskName: string,
+        onDone?: () => void,
+    ) => {
         setShowLogModal(true);
-        setCurrentTaskName('缺失标签补齐 (进行中)');
+        setCurrentTaskName(taskName);
         setLogs([]);
-        addLog('Re-attaching to 缺失标签补齐 日志流...', 'system');
+        addLog('Re-attaching to 任务日志流...', 'system');
         setIsTaskDone(false);
         setIsProcessing(true);
 
         try {
-            const endpoint = process.env.NEXT_PUBLIC_API_URL
-                ? `${process.env.NEXT_PUBLIC_API_URL}/api/management/reextract-tags/log-stream`
-                : `http://localhost:8000/api/management/reextract-tags/log-stream`;
-
             const controller = new AbortController();
             abortControllerRef.current = controller;
 
@@ -175,7 +180,7 @@ function DataManagementContent() {
                 throw new Error(`Server returned ${response.status}: ${errText}`);
             }
 
-            if (!response.body) throw new Error("No response body received");
+            if (!response.body) throw new Error('No response body received');
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -196,10 +201,10 @@ function DataManagementContent() {
                         addLog(data.message, data.type || 'info');
                         if (data.type === 'done') {
                             setIsTaskDone(true);
-                            setIsReextractRunning(false);
+                            onDone?.();
                         }
-                    } catch (e) {
-                        console.warn("Log parse error", line);
+                    } catch {
+                        console.warn('Log parse error', line);
                     }
                 }
             }
@@ -214,6 +219,23 @@ function DataManagementContent() {
             setIsProcessing(false);
             abortControllerRef.current = null;
         }
+    };
+
+    // 仅用于重新连接缺失标签补齐任务的日志，不会重新启动任务
+    const openReextractLogStream = async () => {
+        await attachLogStream(
+            managementApiUrl('/api/management/reextract-tags/log-stream'),
+            '缺失标签补齐 (进行中)',
+            () => setIsReextractRunning(false),
+        );
+    };
+
+    const openSegmentDescFillLogStream = async () => {
+        await attachLogStream(
+            managementApiUrl('/api/management/event-segment-desc-fill/log-stream'),
+            '事件分段描述补齐 (进行中)',
+            () => setIsSegmentDescFillRunning(false),
+        );
     };
 
     const handleStopTask = () => {
@@ -238,28 +260,70 @@ function DataManagementContent() {
             { model: reextractModel, limit },
             `缺失标签补齐 (${modelLabel})`
         ).finally(() => {
-            setIsReextractRunning(false);
+            // 关页后任务可能仍在跑，由 /status 与「查看进度」纠正 UI 状态
+            void (async () => {
+                try {
+                    const res = await fetch(managementApiUrl('/api/management/reextract-tags/status'));
+                    if (res.ok) {
+                        const data = await res.json();
+                        setIsReextractRunning(!!data.running);
+                    }
+                } catch {
+                    setIsReextractRunning(false);
+                }
+            })();
         });
     };
 
-    // 页面加载时探测一次当前缺失标签补齐任务状态
-    useEffect(() => {
-        const checkReextractStatus = async () => {
-            try {
-                const endpoint = process.env.NEXT_PUBLIC_API_URL
-                    ? `${process.env.NEXT_PUBLIC_API_URL}/api/management/reextract-tags/status`
-                    : `http://localhost:8000/api/management/reextract-tags/status`;
+    const startSegmentDescFillTask = () => {
+        const limit = parseInt(segmentDescFillLimit || '10', 10) || 10;
+        setIsSegmentDescFillRunning(true);
+        runStreamTask(
+            '/api/management/event-segment-desc-fill',
+            {
+                limit,
+                eventTypeCodes: selectedSegmentDescFillEventTypes,
+            },
+            '事件分段描述补齐',
+        ).finally(() => {
+            void (async () => {
+                try {
+                    const res = await fetch(managementApiUrl('/api/management/event-segment-desc-fill/status'));
+                    if (res.ok) {
+                        const data = await res.json();
+                        setIsSegmentDescFillRunning(!!data.running);
+                    }
+                } catch {
+                    setIsSegmentDescFillRunning(false);
+                }
+            })();
+        });
+    };
 
-                const res = await fetch(endpoint);
-                if (!res.ok) return;
-                const data = await res.json();
-                setIsReextractRunning(!!data.running);
+    // 页面加载时探测后台任务是否在运行
+    useEffect(() => {
+        const checkBackgroundTaskStatus = async () => {
+            try {
+                const reextractRes = await fetch(managementApiUrl('/api/management/reextract-tags/status'));
+                if (reextractRes.ok) {
+                    const data = await reextractRes.json();
+                    setIsReextractRunning(!!data.running);
+                }
             } catch {
-                // 忽略状态查询错误，不影响其他功能
+                // ignore
+            }
+            try {
+                const descFillRes = await fetch(managementApiUrl('/api/management/event-segment-desc-fill/status'));
+                if (descFillRes.ok) {
+                    const data = await descFillRes.json();
+                    setIsSegmentDescFillRunning(!!data.running);
+                }
+            } catch {
+                // ignore
             }
         };
 
-        checkReextractStatus();
+        checkBackgroundTaskStatus();
     }, []);
 
     useEffect(() => {
@@ -308,6 +372,13 @@ function DataManagementContent() {
     const segmentEventTypeLabel = selectedSegmentEventTypes.length > 0
         ? segmentEventTypeOptions
             .filter((item) => selectedSegmentEventTypes.includes(item.code))
+            .map((item) => item.name)
+            .join(' / ')
+        : '全部事件类型';
+
+    const segmentDescFillEventTypeLabel = selectedSegmentDescFillEventTypes.length > 0
+        ? segmentEventTypeOptions
+            .filter((item) => selectedSegmentDescFillEventTypes.includes(item.code))
             .map((item) => item.name)
             .join(' / ')
         : '全部事件类型';
@@ -430,42 +501,92 @@ function DataManagementContent() {
                         </div>
                     </div>
 
-                    {/* Card 3: DB Existence */}
+                    {/* Card 3: Event segment AI description batch (logic TBD) */}
                     <div className="group relative rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-950/20 to-transparent p-[1px] shadow-lg transition-all duration-300 hover:border-purple-500/40 hover:shadow-purple-900/10 flex flex-col">
                         <div className="relative h-full bg-black/40 backdrop-blur-xl rounded-[15px] p-6 flex flex-col gap-5 transition-colors group-hover:bg-slate-900/40">
                             <div className="flex items-center gap-4">
                                 <div className="p-2.5 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-400">
-                                    <Database className="w-6 h-6" />
+                                    <Sparkles className="w-6 h-6" />
                                 </div>
                                 <div>
-                                    <h3 className="text-lg font-bold text-white leading-tight">索引有效性</h3>
-                                    <p className="text-xs uppercase tracking-wider text-purple-400/60 font-semibold mt-0.5">Database Layer</p>
+                                    <h3 className="text-lg font-bold text-white leading-tight">事件分段描述补齐</h3>
+                                    <p className="text-xs uppercase tracking-wider text-purple-400/60 font-semibold mt-0.5">Event Segment AI</p>
                                 </div>
                             </div>
 
                             <p className="text-sm text-slate-400 leading-relaxed font-light min-h-[3em]">
-                                清除“幽灵记录”：数据库中存在但 MinIO 物理文件已丢失的数据。
+                                按 <span className="text-purple-300 font-mono">start_time</span> 倒序处理 N 条<strong>描述为空</strong>的分段视频，调用 AI 生成描述并写回数据库。
                             </p>
 
                             <div className="mt-auto space-y-4">
                                 <div className="space-y-2">
-                                    <Label htmlFor="check-db-path" className="text-xs text-slate-500 uppercase tracking-wider font-bold">Scope Prefix</Label>
+                                    <Label htmlFor="segment-desc-fill-limit" className="text-xs text-slate-500 uppercase tracking-wider font-bold">Scope (处理N条分段)</Label>
                                     <Input
-                                        id="check-db-path"
-                                        placeholder="project_data/..."
-                                        value={checkDbPath}
-                                        onChange={(e) => setCheckDbPath(e.target.value)}
+                                        id="segment-desc-fill-limit"
+                                        placeholder="10"
+                                        value={segmentDescFillLimit}
+                                        onChange={(e) => setSegmentDescFillLimit(e.target.value.replace(/[^\d]/g, ''))}
                                         className="bg-slate-950/50 border-white/10 focus:border-purple-500/50 text-purple-100 placeholder:text-white/10 text-sm h-10 rounded-lg px-3 font-mono"
                                     />
                                 </div>
-                                <Button
-                                    className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-purple-100 hover:text-white border border-white/5 rounded-lg font-medium"
-                                    disabled={!checkDbPath.trim()}
-                                    onClick={() => runStreamTask('/api/management/check-db-existence', { path: checkDbPath }, '索引有效性验证')}
-                                >
-                                    <CheckCircle2 className="h-4 w-4 mr-2" />
-                                    执行验证
-                                </Button>
+                                <div className="space-y-2">
+                                    <Label className="text-xs text-slate-500 uppercase tracking-wider font-bold">事件类型筛选（可多选）</Label>
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button
+                                                variant="outline"
+                                                className="h-10 w-full justify-between bg-slate-950/50 border-white/10 text-purple-100 font-normal"
+                                            >
+                                                <span className="truncate text-left text-sm">{segmentDescFillEventTypeLabel}</span>
+                                                <ChevronsUpDown className="h-4 w-4 opacity-70" />
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent className="w-[320px] max-h-[320px] overflow-y-auto">
+                                            {segmentEventTypesLoading ? (
+                                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                                    正在加载事件类型...
+                                                </DropdownMenuItem>
+                                            ) : segmentEventTypeOptions.length === 0 ? (
+                                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                                    暂无事件类型（请检查后端字典或登录状态）
+                                                </DropdownMenuItem>
+                                            ) : (
+                                                segmentEventTypeOptions.map((type) => (
+                                                    <DropdownMenuCheckboxItem
+                                                        key={`desc-fill-${type.code}`}
+                                                        checked={selectedSegmentDescFillEventTypes.includes(type.code)}
+                                                        onSelect={(event) => event.preventDefault()}
+                                                        onCheckedChange={(checked) => {
+                                                            setSelectedSegmentDescFillEventTypes((prev) =>
+                                                                checked ? [...prev, type.code] : prev.filter((item) => item !== type.code),
+                                                            );
+                                                        }}
+                                                    >
+                                                        {type.name}
+                                                    </DropdownMenuCheckboxItem>
+                                                ))
+                                            )}
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                </div>
+                                {isSegmentDescFillRunning ? (
+                                    <Button
+                                        className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-purple-100 hover:text-white border border-purple-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
+                                        onClick={openSegmentDescFillLogStream}
+                                    >
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        正在补齐中，点击查看进度
+                                    </Button>
+                                ) : (
+                                    <Button
+                                        className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-purple-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                        disabled={!segmentDescFillLimit.trim() || (isProcessing && showLogModal)}
+                                        onClick={startSegmentDescFillTask}
+                                    >
+                                        <Sparkles className="h-4 w-4 mr-2" />
+                                        开始补齐
+                                    </Button>
+                                )}
                             </div>
                         </div>
                     </div>

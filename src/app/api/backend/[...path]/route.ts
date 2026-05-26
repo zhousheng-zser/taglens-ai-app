@@ -1,6 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const PROXY_TIMEOUT_MS = 600_000;
+
+function isStreamingContentType(contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return (
+    ct.includes('ndjson')
+    || ct.includes('text/event-stream')
+    || ct.includes('text/plain')
+  );
+}
+
+function buildProxyStreamResponse(response: Response): NextResponse {
+  const headers = new Headers();
+  const contentType = response.headers.get('Content-Type');
+  if (contentType) headers.set('Content-Type', contentType);
+  const cacheControl = response.headers.get('Cache-Control');
+  if (cacheControl) headers.set('Cache-Control', cacheControl);
+  return new NextResponse(response.body, {
+    status: response.status,
+    headers,
+  });
+}
 
 export async function GET(
   request: NextRequest,
@@ -20,7 +42,7 @@ export async function GET(
         ...(request.headers.get('cookie') ? { Cookie: request.headers.get('cookie') as string } : {}),
       },
       // 增加超时时间到10分钟（600秒）
-      signal: AbortSignal.timeout(600000),
+      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -30,8 +52,12 @@ export async function GET(
       );
     }
 
-    // 检查 Content-Type：除 JSON 外都按二进制转发（覆盖视频/音频/图片等）
     const contentType = response.headers.get('Content-Type') || '';
+    if (isStreamingContentType(contentType)) {
+      return buildProxyStreamResponse(response);
+    }
+
+    // 检查 Content-Type：除 JSON 外都按二进制转发（覆盖视频/音频/图片等）
     const isJson = contentType.includes('application/json');
     if (!isJson) {
       const buffer = await response.arrayBuffer();
@@ -86,8 +112,9 @@ export async function POST(
         ...(request.headers.get('cookie') ? { Cookie: request.headers.get('cookie') as string } : {}),
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
     });
-    
+
     console.log(`[API代理] 后端响应状态: ${response.status}`);
 
     if (!response.ok) {
@@ -96,6 +123,11 @@ export async function POST(
         { error: `后端服务错误: ${response.status}`, details: errorText },
         { status: response.status }
       );
+    }
+
+    const contentType = response.headers.get('Content-Type') || '';
+    if (isStreamingContentType(contentType)) {
+      return buildProxyStreamResponse(response);
     }
 
     const data = await response.json();

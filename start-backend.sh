@@ -35,6 +35,7 @@ fi
 echo "正在启动后端服务 (前台运行，Ctrl+C 可直接停止)..."
 # 生产环境可提高并发：UVICORN_WORKERS=2 UVICORN_RELOAD=false python main.py
 # reload 与多 worker 不能同时开启
-export UVICORN_RELOAD="${UVICORN_RELOAD:-true}"
+# 生产环境务必 false：reload 子进程异常时会导致端口可连但请求全部挂起
+export UVICORN_RELOAD="${UVICORN_RELOAD:-false}"
 export UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 python main.py

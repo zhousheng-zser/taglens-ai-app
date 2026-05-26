@@ -26,6 +26,21 @@ EVENT_SEGMENT_AI_TIMEOUT_SEC = float(os.getenv("EVENT_SEGMENT_AI_TIMEOUT_SEC", "
 
 EVENT_MEDIA_HTTP_ORIGIN = os.getenv("EVENT_MEDIA_HTTP_ORIGIN", "http://127.0.0.1:9002").rstrip("/")
 EVENT_MEDIA_FETCH_TIMEOUT_SEC = float(os.getenv("EVENT_MEDIA_FETCH_TIMEOUT_SEC", "120"))
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
+
+
+def build_public_media_url(path: Optional[str]) -> str:
+    """将 DB/MinIO 相对路径转为与前端页面一致的 HTTP 直链。"""
+    raw = (path or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    if raw.startswith("/"):
+        return f"{EVENT_MEDIA_HTTP_ORIGIN}{raw}"
+    if raw.startswith(f"{MINIO_BUCKET}/"):
+        return f"{EVENT_MEDIA_HTTP_ORIGIN}/{raw}"
+    return f"{EVENT_MEDIA_HTTP_ORIGIN}/{MINIO_BUCKET}/{raw.lstrip('/')}"
 
 
 class SegmentAiMediaError(Exception):

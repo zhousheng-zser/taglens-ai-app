@@ -23,7 +23,13 @@ from core.database import (
 )
 from core.event_database import (
     get_pending_event_videos_for_segmentation,
+    get_pending_segments_for_ai_description,
     update_event_segmentation_result,
+)
+from services.event_segment_ai_batch_service import (
+    fill_one_segment_description,
+    get_batch_max_workers,
+    get_batch_executor,
 )
 from services.event_video_segment_service import (
     ensure_ffmpeg_available,
@@ -44,11 +50,30 @@ CURRENT_REEXTRACT_TASK: Dict[str, Any] = {
     "pid": None,          # 子进程 PID，用于在 /status 中判断是否仍在运行
 }
 
+SEGMENT_DESC_FILL_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "segment_desc_fill.log"
+CURRENT_SEGMENT_DESC_FILL_TASK: Dict[str, Any] = {
+    "running": False,
+    "limit": None,
+    "eventTypeCodes": None,
+    "started_at": None,
+}
+
 class PathRequest(BaseModel):
     path: str
 
 def format_log(message: str, type: str = "info"):
     return json.dumps({"message": message, "type": type}, ensure_ascii=False) + "\n"
+
+
+def _append_segment_desc_fill_log_line(line: str) -> None:
+    SEGMENT_DESC_FILL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with SEGMENT_DESC_FILL_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
+async def _log_segment_desc_fill(message: str, log_type: str = "info") -> None:
+    line = format_log(message, log_type)
+    await run_blocking(_append_segment_desc_fill_log_line, line)
 
 async def _sync_all_to_minio_gen():
     """Generator for syncing steps"""
@@ -230,56 +255,6 @@ async def check_pairs_endpoint(req: PathRequest):
     return StreamingResponse(check_pairs_generator(req.path), media_type="application/x-ndjson")
 
 
-async def check_db_existence_generator(prefix: str):
-    yield format_log(f"任务启动: 数据库物理文件存在性校验 (前缀: {prefix})", "start")
-    await asyncio.sleep(0.01)
-    
-    try:
-        minio_client = await run_blocking(get_storage_client, skip_bucket_check=True)
-        faiss_manager = await run_blocking(get_faiss_index_manager)
-        yield format_log("MinIO/Faiss 客户端初始化成功", "success")
-        
-        yield format_log("正在查询数据库记录...", "system")
-        db_images = await run_blocking(get_images_by_path_prefix, prefix)
-        total = len(db_images)
-        yield format_log(f"数据库记录: {total} 条", "info")
-        await asyncio.sleep(0.01)
-        
-        deleted_count = 0
-        for i, img in enumerate(db_images):
-            path = img['relative_path']
-            
-            # Check exist
-            exists = await run_blocking(minio_client.file_exists, path)
-            
-            if not exists:
-                yield format_log(f"!!! 发现无效记录 [{i+1}/{total}]: {path} 在 MinIO 中不存在", "warning")
-                await run_blocking(delete_image_by_uuid, img['uuid'])
-                await run_blocking(faiss_manager.remove_vector, img['uuid'])
-                yield format_log(f"  -> 数据库/向量记录已清理", "success")
-                deleted_count += 1
-            else:
-                if i % 10 == 0: # Log verbose progress
-                     yield format_log(f"记录校验通过 [{i+1}/{total}]: {path}", "success")
-            
-            await asyncio.sleep(0.01)
-
-        yield format_log(f"校验完成，共清理 {deleted_count} 条无效记录", "success")
-        
-        async for log in _sync_all_to_minio_gen():
-            yield log
-            await asyncio.sleep(0.01)
-            
-        yield format_log("任务全部完成", "done")
-        
-    except Exception as e:
-        yield format_log(f"校验出错: {e}", "error")
-
-@router.post("/check-db-existence")
-async def check_db_existence_endpoint(req: PathRequest):
-    return StreamingResponse(check_db_existence_generator(req.path), media_type="application/x-ndjson")
-
-
 async def check_features_generator():
     yield format_log("任务启动: 全库特征向量审计", "start")
     await asyncio.sleep(0.01)
@@ -352,6 +327,11 @@ class ReextractTagsRequest(BaseModel):
 
 
 class EventVideoSegmentRequest(BaseModel):
+    limit: int = 10
+    eventTypeCodes: List[str] = []
+
+
+class EventSegmentDescFillRequest(BaseModel):
     limit: int = 10
     eventTypeCodes: List[str] = []
 
@@ -447,6 +427,195 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
 async def event_video_segment_endpoint(req: EventVideoSegmentRequest):
     return StreamingResponse(
         event_video_segment_generator(req.limit, req.eventTypeCodes),
+        media_type="application/x-ndjson",
+    )
+
+
+async def _run_segment_desc_fill_job(limit: int, event_type_codes: Optional[List[str]] = None) -> None:
+    """后台任务：与 HTTP 连接解耦，日志写入文件；执行阶段使用专用线程池并行补齐。"""
+    global CURRENT_SEGMENT_DESC_FILL_TASK
+    safe_limit = max(int(limit or 0), 1)
+    normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
+    scope_text = "全部事件类型" if not normalized_codes else f"事件类型={','.join(normalized_codes)}"
+    workers = get_batch_max_workers()
+
+    try:
+        await _log_segment_desc_fill(
+            f"任务启动: 事件分段描述补齐 (处理分段数: {safe_limit}, {scope_text}, 并行度: {workers})",
+            "start",
+        )
+
+        items = await run_blocking(
+            get_pending_segments_for_ai_description,
+            safe_limit,
+            normalized_codes,
+        )
+        total = len(items)
+        if total <= 0:
+            await _log_segment_desc_fill(
+                "未找到待补齐分段（segment_paths_json 须有有效 mp4、描述为空，且符合事件类型筛选）",
+                "warning",
+            )
+            await _log_segment_desc_fill("任务结束", "done")
+            return
+
+        await _log_segment_desc_fill(
+            f"待处理分段数: {total}（按事件 start_time 倒序，最多 {workers} 路并行）",
+            "info",
+        )
+
+        loop = asyncio.get_running_loop()
+        batch_executor = get_batch_executor()
+        success_count = 0
+        failed_count = 0
+        count_lock = asyncio.Lock()
+        work_sem = asyncio.Semaphore(workers)
+
+        async def _run_one(seq: int, item: Dict[str, Any]) -> None:
+            nonlocal success_count, failed_count
+            async with work_sem:
+                event_id = str(item["event_id"])
+                seg_label = str(int(item["segment_index"])).zfill(3)
+
+                await _log_segment_desc_fill(
+                    f"[{seq}/{total}] 开始处理 event_id={event_id} 分段 {seg_label}",
+                    "info",
+                )
+                await _log_segment_desc_fill(f"  -> 视频: {item['segment_media_path']}", "progress")
+                if item.get("overlay_media_path"):
+                    await _log_segment_desc_fill(f"  -> 叠框图: {item['overlay_media_path']}", "progress")
+                else:
+                    await _log_segment_desc_fill("  -> 叠框图: 无（仅视频）", "progress")
+
+                try:
+                    result = await loop.run_in_executor(
+                        batch_executor, fill_one_segment_description, item
+                    )
+                except Exception as exc:
+                    async with count_lock:
+                        failed_count += 1
+                    await _log_segment_desc_fill(f"  -> 补齐失败: {exc}", "error")
+                    return
+
+                if result.success:
+                    async with count_lock:
+                        success_count += 1
+                    preview = (
+                        (result.description[:120] + "…")
+                        if len(result.description) > 120
+                        else result.description
+                    )
+                    await _log_segment_desc_fill(f"  -> 补齐成功: {preview}", "success")
+                else:
+                    async with count_lock:
+                        failed_count += 1
+                    await _log_segment_desc_fill(f"  -> 补齐失败: {result.error}", "error")
+
+        await asyncio.gather(
+            *[_run_one(idx, item) for idx, item in enumerate(items, start=1)],
+            return_exceptions=True,
+        )
+
+        await _log_segment_desc_fill(
+            f"任务完成: 成功 {success_count} 段, 失败 {failed_count} 段（并行度 {workers}）",
+            "done",
+        )
+    except Exception as exc:
+        await _log_segment_desc_fill(f"任务异常: {exc}", "error")
+        await _log_segment_desc_fill("任务结束", "done")
+    finally:
+        CURRENT_SEGMENT_DESC_FILL_TASK["running"] = False
+
+
+async def _segment_desc_fill_log_follow_generator(from_start: bool = False):
+    """跟踪分段描述补齐日志文件（启动任务时从头读；重连时从尾部读）。"""
+    if not SEGMENT_DESC_FILL_LOG_PATH.exists():
+        yield format_log("当前暂无事件分段描述补齐任务日志。", "info")
+        yield format_log("日志流结束", "done")
+        return
+
+    position = 0 if from_start else SEGMENT_DESC_FILL_LOG_PATH.stat().st_size
+    idle_rounds = 0
+
+    try:
+        while True:
+            got_new = False
+            with SEGMENT_DESC_FILL_LOG_PATH.open("r", encoding="utf-8") as f:
+                f.seek(position)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        position = f.tell()
+                        break
+                    if line.strip():
+                        yield line
+                        got_new = True
+                    position = f.tell()
+
+            if CURRENT_SEGMENT_DESC_FILL_TASK.get("running"):
+                idle_rounds = 0
+                await asyncio.sleep(0.2)
+                continue
+
+            if got_new:
+                idle_rounds = 0
+                await asyncio.sleep(0.2)
+                continue
+
+            idle_rounds += 1
+            if idle_rounds >= 2:
+                break
+            await asyncio.sleep(0.2)
+
+        yield format_log("日志流结束", "done")
+    except Exception as exc:
+        yield format_log(f"读取日志时出错: {exc}", "error")
+        yield format_log("日志流结束", "done")
+
+
+@router.post("/event-segment-desc-fill")
+async def event_segment_desc_fill_endpoint(req: EventSegmentDescFillRequest):
+    global CURRENT_SEGMENT_DESC_FILL_TASK
+
+    if CURRENT_SEGMENT_DESC_FILL_TASK.get("running"):
+        async def reject_stream():
+            yield format_log("已有事件分段描述补齐任务正在运行，禁止重复启动。", "warning")
+            yield format_log("任务结束", "done")
+
+        return StreamingResponse(reject_stream(), media_type="application/x-ndjson")
+
+    try:
+        SEGMENT_DESC_FILL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SEGMENT_DESC_FILL_LOG_PATH.open("w", encoding="utf-8") as f:
+            f.write("")
+    except Exception as exc:
+        logger.warning(f"初始化分段描述补齐日志文件失败: {exc}")
+
+    CURRENT_SEGMENT_DESC_FILL_TASK = {
+        "running": True,
+        "limit": req.limit,
+        "eventTypeCodes": list(req.eventTypeCodes or []),
+        "started_at": datetime.utcnow().isoformat() + "Z",
+    }
+    asyncio.create_task(_run_segment_desc_fill_job(req.limit, req.eventTypeCodes))
+
+    return StreamingResponse(
+        _segment_desc_fill_log_follow_generator(from_start=True),
+        media_type="application/x-ndjson",
+    )
+
+
+@router.get("/event-segment-desc-fill/status")
+async def event_segment_desc_fill_status():
+    """查询事件分段描述补齐任务是否在运行（关页后仍可探测）。"""
+    return CURRENT_SEGMENT_DESC_FILL_TASK.copy()
+
+
+@router.get("/event-segment-desc-fill/log-stream")
+async def event_segment_desc_fill_log_stream():
+    """重新打开日志窗口时，从当前日志尾部继续跟踪输出。"""
+    return StreamingResponse(
+        _segment_desc_fill_log_follow_generator(from_start=False),
         media_type="application/x-ndjson",
     )
 

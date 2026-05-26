@@ -844,6 +844,192 @@ def get_pending_event_videos_for_segmentation(
     ]
 
 
+def _is_valid_segment_video_path(raw_path: str) -> bool:
+    """segment_paths_json 中单条路径是否可作为分段视频（非空且为 .mp4）。"""
+    normalized = _normalize_video_object_path(raw_path)
+    if not normalized:
+        return False
+    return normalized.lower().endswith(".mp4")
+
+
+def get_pending_segments_for_ai_description(
+    limit: int,
+    event_type_codes: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    从 event_records 筛选待 AI 补齐的分段（每条 = 一个分段视频）：
+    - segment_paths_json：必须有有效 .mp4 路径
+    - image_paths：解析 overlay（image_overlay.jpg），可选
+    - segment_descriptions_json：该下标已有描述则跳过
+    - event_type_corrected：与「事件视频分块」相同 IN 过滤（空列表 = 全部）
+    - 按 start_time 倒序，最多 limit 条分段
+    """
+    safe_limit = max(int(limit or 0), 1)
+    normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
+    where_sql = """
+        segment_paths_json IS NOT NULL
+        AND TRIM(segment_paths_json) <> ''
+        AND TRIM(segment_paths_json) <> '[]'
+    """
+    params: List[Any] = []
+    if normalized_codes:
+        placeholders = ",".join("?" for _ in normalized_codes)
+        where_sql += f" AND event_type_corrected IN ({placeholders})"
+        params.extend(normalized_codes)
+
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT
+                event_id,
+                project_id,
+                event_type_corrected,
+                start_time,
+                image_paths,
+                segment_paths_json,
+                segment_descriptions_json,
+                segment_statuses_json,
+                questions_answers_list,
+                segment_count
+            FROM event_records
+            WHERE {where_sql}
+            ORDER BY start_time DESC, event_id DESC
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+
+    pending: List[Dict[str, Any]] = []
+    for row in rows:
+        if len(pending) >= safe_limit:
+            break
+
+        segment_paths = _parse_json_string_list(row["segment_paths_json"])
+        if not segment_paths:
+            continue
+
+        segment_count = int(row["segment_count"] or 0) or len(segment_paths)
+        segment_descriptions = _parse_json_string_list(row["segment_descriptions_json"])
+        while len(segment_descriptions) < len(segment_paths):
+            segment_descriptions.append("")
+
+        overlay_url = _build_image_variant_urls(row["image_paths"]).get("overlay")
+        event_id = str(row["event_id"])
+        event_type = str(row["event_type_corrected"] or "")
+
+        for idx, raw_path in enumerate(segment_paths):
+            if len(pending) >= safe_limit:
+                break
+            if (segment_descriptions[idx] or "").strip():
+                continue
+            if not _is_valid_segment_video_path(raw_path):
+                continue
+            normalized_path = _normalize_video_object_path(raw_path)
+            segment_media_path = _build_video_url(normalized_path)
+            if not segment_media_path:
+                continue
+
+            pending.append(
+                {
+                    "event_id": event_id,
+                    "project_id": row["project_id"],
+                    "event_type_corrected": event_type,
+                    "start_time": row["start_time"],
+                    "segment_index": idx,
+                    "segment_media_path": segment_media_path,
+                    "overlay_media_path": overlay_url,
+                }
+            )
+
+    return pending
+
+
+def get_event_segment_annotation_snapshot(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+) -> Optional[Dict[str, Any]]:
+    """读取事件当前分段标注快照，供并发补齐时写库前刷新。"""
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                segment_paths_json,
+                segment_descriptions_json,
+                segment_statuses_json,
+                questions_answers_list,
+                segment_count
+            FROM event_records
+            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+            """,
+            (event_id, project_id, event_type_corrected),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+
+    segment_paths = _parse_json_string_list(row["segment_paths_json"])
+    if not segment_paths:
+        return None
+
+    segment_count = int(row["segment_count"] or 0) or len(segment_paths)
+    segment_descriptions = _parse_json_string_list(row["segment_descriptions_json"])
+    segment_statuses = _parse_json_string_list(row["segment_statuses_json"])
+    questions_answers_list = _parse_questions_answers_2d(
+        row["questions_answers_list"],
+        segment_count=segment_count,
+        event_type_code=event_type_corrected,
+        event_id=event_id,
+    )
+
+    while len(segment_descriptions) < len(segment_paths):
+        segment_descriptions.append("")
+    while len(segment_statuses) < len(segment_paths):
+        segment_statuses.append("待定")
+    while len(questions_answers_list) < len(segment_paths):
+        questions_answers_list.append([])
+
+    return {
+        "segment_paths": segment_paths,
+        "segment_descriptions": segment_descriptions,
+        "segment_statuses": segment_statuses,
+        "questions_answers_list": questions_answers_list,
+    }
+
+
+def update_event_segment_description_at_index(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+    segment_index: int,
+    description: str,
+) -> None:
+    """写库前基于最新 DB 快照更新单个分段描述（调用方需在同事件锁内调用）。"""
+    snapshot = get_event_segment_annotation_snapshot(event_id, project_id, event_type_corrected)
+    if not snapshot:
+        raise ValueError(f"事件记录不存在: event_id={event_id}")
+
+    idx = int(segment_index)
+    descriptions = list(snapshot["segment_descriptions"])
+    statuses = list(snapshot["segment_statuses"])
+    qa_list = list(snapshot["questions_answers_list"])
+
+    if idx < 0 or idx >= len(descriptions):
+        raise ValueError(f"分段下标越界: {idx}")
+
+    descriptions[idx] = description
+    update_event_segment_annotations(
+        event_id=event_id,
+        project_id=project_id,
+        event_type_corrected=event_type_corrected,
+        segment_descriptions=descriptions,
+        segment_statuses=statuses,
+        questions_answers_list=qa_list,
+    )
+
+
 def update_event_segmentation_result(
     event_id: str,
     project_id: str,
