@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -184,14 +186,13 @@ def _panel_with_title(panel_rgb: np.ndarray, title: str, footer_h: int = 36) -> 
     return np.array(img)
 
 
-def save_comparison_figure(
+def render_comparison_figure(
     image_np: np.ndarray,
     masks,
     num_masks: int,
-    save_path: Path,
     text_prompt: str,
     threshold: float,
-) -> None:
+) -> Image.Image:
     if num_masks > 1:
         stack = [m > 0.5 if m.dtype != bool else m for m in masks]
         combined_mask = np.any(np.stack(stack, axis=0), axis=0).astype(np.uint8) * 255
@@ -238,10 +239,55 @@ def save_comparison_figure(
     draw = ImageDraw.Draw(header_img)
     header_text = f'Prompt: "{text_prompt}" | Threshold: {threshold} | Masks: {num_masks}'
     draw.text((12, 10), header_text, fill=(0, 0, 0))
+    return Image.fromarray(np.array(header_img))
 
+
+def save_comparison_figure(
+    image_np: np.ndarray,
+    masks,
+    num_masks: int,
+    save_path: Path,
+    text_prompt: str,
+    threshold: float,
+) -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(np.array(header_img)).save(save_path)
+    render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold).save(save_path)
     print(f"  ✓ Saved: {save_path.name} (detected {num_masks} masks)")
+
+
+def comparison_figure_png_bytes(
+    image_np: np.ndarray,
+    masks,
+    num_masks: int,
+    text_prompt: str,
+    threshold: float,
+) -> bytes:
+    buf = io.BytesIO()
+    render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def build_labelme_payload(
+    image_name: str,
+    image_np: np.ndarray,
+    masks,
+    text_prompt: str,
+    image_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    if not image_bytes:
+        raise ValueError("image_bytes 不能为空")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_height, image_width = int(image_np.shape[0]), int(image_np.shape[1])
+    return {
+        "version": "5.0.5",
+        "flags": {},
+        "shapes": masks_to_polygon_shapes(masks, text_prompt),
+        "imagePath": image_name,
+        "Path": image_name,
+        "imageData": image_b64,
+        "imageHeight": image_height,
+        "imageWidth": image_width,
+    }
 
 
 def masks_to_polygon_shapes(masks, label_text: str) -> list[dict]:
@@ -265,20 +311,9 @@ def masks_to_polygon_shapes(masks, label_text: str) -> list[dict]:
 
 def save_labelme_json(image_path: Path, image_np: np.ndarray, masks, text_prompt: str, json_save_path: Path) -> None:
     with open(image_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    image_height, image_width = int(image_np.shape[0]), int(image_np.shape[1])
-    shapes = masks_to_polygon_shapes(masks, text_prompt)
-    payload = {
-        "version": "5.0.5",
-        "flags": {},
-        "shapes": shapes,
-        "imagePath": image_path.name,
-        "Path": str(image_path.resolve()),
-        "imageData": image_b64,
-        "imageHeight": image_height,
-        "imageWidth": image_width,
-    }
+        image_bytes = f.read()
+    payload = build_labelme_payload(image_path.name, image_np, masks, text_prompt, image_bytes)
+    payload["Path"] = str(image_path.resolve())
     json_save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(json_save_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)

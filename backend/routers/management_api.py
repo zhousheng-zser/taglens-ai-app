@@ -36,6 +36,8 @@ from services.event_video_segment_service import (
     process_event_video_segmentation,
 )
 from core.sync_executor import run_blocking
+from services.event_segment_ai_description_service import check_rlq_api_available
+from services.segment_media_validator import is_playability_check_enabled
 
 router = APIRouter(prefix="/api/management", tags=["management"])
 logger = logging.getLogger(__name__)
@@ -444,6 +446,28 @@ async def _run_segment_desc_fill_job(limit: int, event_type_codes: Optional[List
             f"任务启动: 事件分段描述补齐 (处理分段数: {safe_limit}, {scope_text}, 并行度: {workers})",
             "start",
         )
+        if is_playability_check_enabled():
+            await _log_segment_desc_fill(
+                "已启用送模型前视频损坏检测（ffmpeg）；损坏分段将跳过，不调用 AI",
+                "info",
+            )
+        else:
+            await _log_segment_desc_fill(
+                "未启用视频损坏检测（需安装 ffmpeg/ffprobe 且 EVENT_SEGMENT_VALIDATE_PLAYABLE=true）",
+                "warning",
+            )
+
+        rlq_err = await run_blocking(check_rlq_api_available)
+        if rlq_err:
+            await _log_segment_desc_fill(
+                f"RLQ 服务探测失败（将继续处理 {safe_limit} 段：损坏视频跳过，其余逐段尝试调用模型）: {rlq_err}",
+                "warning",
+            )
+        else:
+            await _log_segment_desc_fill(
+                f"RLQ 服务可用: {os.getenv('EVENT_SEGMENT_AI_BASE_URL', '')}",
+                "info",
+            )
 
         items = await run_blocking(
             get_pending_segments_for_ai_description,
@@ -468,11 +492,12 @@ async def _run_segment_desc_fill_job(limit: int, event_type_codes: Optional[List
         batch_executor = get_batch_executor()
         success_count = 0
         failed_count = 0
+        skipped_count = 0
         count_lock = asyncio.Lock()
         work_sem = asyncio.Semaphore(workers)
 
         async def _run_one(seq: int, item: Dict[str, Any]) -> None:
-            nonlocal success_count, failed_count
+            nonlocal success_count, failed_count, skipped_count
             async with work_sem:
                 event_id = str(item["event_id"])
                 seg_label = str(int(item["segment_index"])).zfill(3)
@@ -497,7 +522,14 @@ async def _run_segment_desc_fill_job(limit: int, event_type_codes: Optional[List
                     await _log_segment_desc_fill(f"  -> 补齐失败: {exc}", "error")
                     return
 
-                if result.success:
+                if result.damage_log:
+                    await _log_segment_desc_fill(f"  -> 视频检测: {result.damage_log}", "info")
+
+                if getattr(result, "skipped", False):
+                    async with count_lock:
+                        skipped_count += 1
+                    await _log_segment_desc_fill(f"  -> 已跳过（视频损坏）: {result.error}", "warning")
+                elif result.success:
                     async with count_lock:
                         success_count += 1
                     preview = (
@@ -509,7 +541,13 @@ async def _run_segment_desc_fill_job(limit: int, event_type_codes: Optional[List
                 else:
                     async with count_lock:
                         failed_count += 1
-                    await _log_segment_desc_fill(f"  -> 补齐失败: {result.error}", "error")
+                    if "RLQ" in (result.error or "") or "404" in (result.error or ""):
+                        await _log_segment_desc_fill(
+                            f"  -> 补齐失败（RLQ API，视频已通过损坏检测）: {result.error}",
+                            "error",
+                        )
+                    else:
+                        await _log_segment_desc_fill(f"  -> 补齐失败: {result.error}", "error")
 
         await asyncio.gather(
             *[_run_one(idx, item) for idx, item in enumerate(items, start=1)],
@@ -517,7 +555,7 @@ async def _run_segment_desc_fill_job(limit: int, event_type_codes: Optional[List
         )
 
         await _log_segment_desc_fill(
-            f"任务完成: 成功 {success_count} 段, 失败 {failed_count} 段（并行度 {workers}）",
+            f"任务完成: 成功 {success_count} 段, 跳过 {skipped_count} 段, 失败 {failed_count} 段（并行度 {workers}）",
             "done",
         )
     except Exception as exc:

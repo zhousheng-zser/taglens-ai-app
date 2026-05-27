@@ -22,6 +22,33 @@ def ensure_ffmpeg_available() -> None:
         raise RuntimeError("系统未找到 ffmpeg 命令，请先安装 ffmpeg")
 
 
+def _remux_segments_faststart(segment_files: List[Path]) -> None:
+    """将 moov 移到文件头，避免浏览器黑屏/无法起播/时长显示异常。"""
+    for seg_file in segment_files:
+        fixed = seg_file.with_suffix(".faststart.mp4")
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(seg_file),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(fixed),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"分段 faststart 重封装失败: {seg_file.name}")
+        fixed.replace(seg_file)
+
+
 def split_video_to_segments(input_file: Path, output_pattern: Path) -> None:
     cmd = [
         "ffmpeg",
@@ -73,6 +100,8 @@ def process_event_video_segmentation(
         local_segments = sorted(tmp_path.glob(f"{stem}_*.mp4"))
         if not local_segments:
             raise RuntimeError("未生成任何分段视频")
+
+        _remux_segments_faststart(local_segments)
 
         segment_paths: List[str] = []
         for seg_file in local_segments:

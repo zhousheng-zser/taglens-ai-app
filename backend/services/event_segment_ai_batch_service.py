@@ -12,8 +12,13 @@ from core.event_database import (
     update_event_segment_description_at_index,
 )
 from services.event_segment_ai_description_service import (
+    SegmentAiMediaError,
+    SegmentAiModelError,
     build_public_media_url,
+    fetch_segment_video_bytes,
+    format_model_error,
     generate_segment_description_sync,
+    inspect_video_damage,
 )
 
 SEGMENT_DESC_FILL_MAX_WORKERS = max(
@@ -55,8 +60,10 @@ def _lock_for_event(key: Tuple[str, str, str]) -> threading.Lock:
 @dataclass
 class SegmentFillResult:
     success: bool
+    skipped: bool = False
     description: str = ""
     error: str = ""
+    damage_log: str = ""
     event_id: str = ""
     segment_index: int = 0
 
@@ -72,11 +79,60 @@ def fill_one_segment_description(item: Dict[str, Any]) -> SegmentFillResult:
     overlay_image_url = build_public_media_url(overlay_path) if overlay_path else None
 
     try:
-        description = generate_segment_description_sync(segment_video_url, overlay_image_url)
+        video_bytes, video_ct = fetch_segment_video_bytes(segment_video_url)
+    except SegmentAiMediaError as exc:
+        return SegmentFillResult(
+            success=False,
+            error=f"媒体拉取失败: {exc}",
+            damage_log="损坏程度=未知（未能下载视频）",
+            event_id=event_id,
+            segment_index=segment_index,
+        )
+
+    damage_report = inspect_video_damage(video_bytes)
+    damage_log = damage_report.log_line()
+    if damage_report.should_skip:
+        reason = damage_report.skip_reason or "视频损坏"
+        return SegmentFillResult(
+            success=False,
+            skipped=True,
+            error=f"视频损坏，跳过补齐（未调用 RLQ）: {reason}",
+            damage_log=damage_log,
+            event_id=event_id,
+            segment_index=segment_index,
+        )
+
+    try:
+        description = generate_segment_description_sync(
+            segment_video_url,
+            overlay_image_url,
+            video_bytes=video_bytes,
+            video_content_type=video_ct,
+        )
+    except SegmentAiMediaError as exc:
+        message = str(exc)
+        is_damaged = "视频损坏" in message or "跳过补齐" in message
+        return SegmentFillResult(
+            success=False,
+            skipped=is_damaged,
+            error=message,
+            damage_log=damage_log,
+            event_id=event_id,
+            segment_index=segment_index,
+        )
+    except SegmentAiModelError as exc:
+        return SegmentFillResult(
+            success=False,
+            error=format_model_error(exc),
+            damage_log=damage_log,
+            event_id=event_id,
+            segment_index=segment_index,
+        )
     except Exception as exc:
         return SegmentFillResult(
             success=False,
             error=str(exc),
+            damage_log=damage_log,
             event_id=event_id,
             segment_index=segment_index,
         )
@@ -88,6 +144,7 @@ def fill_one_segment_description(item: Dict[str, Any]) -> SegmentFillResult:
             return SegmentFillResult(
                 success=True,
                 description=snapshot["segment_descriptions"][segment_index],
+                damage_log=damage_log,
                 event_id=event_id,
                 segment_index=segment_index,
             )
@@ -102,6 +159,7 @@ def fill_one_segment_description(item: Dict[str, Any]) -> SegmentFillResult:
     return SegmentFillResult(
         success=True,
         description=description,
+        damage_log=damage_log,
         event_id=event_id,
         segment_index=segment_index,
     )

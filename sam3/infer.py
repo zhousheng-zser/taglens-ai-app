@@ -1,8 +1,10 @@
 import argparse
-import os
-import json
 import base64
+import io
+import json
+import os
 from pathlib import Path
+from typing import Any, Dict, Optional
 from transformers import Sam3Processor, Sam3Model
 import torch
 from PIL import Image
@@ -58,10 +60,8 @@ def create_overlay(image_np, masks):
     
     return overlay
 
-def save_comparison_figure(image_np, masks, num_masks, save_path, text_prompt, threshold):
-    """
-    保存三图对比：原图 | Mask | 叠加图
-    """
+def render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold):
+    """渲染三图对比：原图 | Mask | 叠加图，返回 matplotlib Figure。"""
     # 合并所有mask为单张二值图（如果有多个instance）
     if num_masks > 1:
         combined_mask = np.any(masks > 0.5, axis=0).astype(np.uint8) * 255
@@ -101,10 +101,45 @@ def save_comparison_figure(image_np, masks, num_masks, save_path, text_prompt, t
                  fontsize=14, y=0.98)
     
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.savefig(save_path, dpi=150, bbox_inches='tight', pad_inches=0.1)
-    plt.close()
-    
+    return fig
+
+
+def save_comparison_figure(image_np, masks, num_masks, save_path, text_prompt, threshold):
+    fig = render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight", pad_inches=0.1)
+    plt.close(fig)
     print(f"  ✓ Saved: {save_path.name} (detected {num_masks} masks)")
+
+
+def comparison_figure_png_bytes(image_np, masks, num_masks, text_prompt, threshold) -> bytes:
+    fig = render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.1)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def build_labelme_payload(
+    image_name: str,
+    image_np: np.ndarray,
+    masks,
+    text_prompt: str,
+    image_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    if image_bytes is None:
+        raise ValueError("image_bytes 不能为空")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_height, image_width = int(image_np.shape[0]), int(image_np.shape[1])
+    return {
+        "version": "5.0.5",
+        "flags": {},
+        "shapes": masks_to_polygon_shapes(masks, text_prompt),
+        "imagePath": image_name,
+        "Path": image_name,
+        "imageData": image_b64,
+        "imageHeight": image_height,
+        "imageWidth": image_width,
+    }
 
 def get_image_files(input_dir):
     """
@@ -168,29 +203,12 @@ def masks_to_polygon_shapes(masks, label_text: str):
 
 
 def save_labelme_json(image_path: Path, image_np: np.ndarray, masks, text_prompt: str, json_save_path: Path):
-    """
-    生成并保存 LabelMe 风格 JSON
-    """
     with open(image_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    image_height, image_width = int(image_np.shape[0]), int(image_np.shape[1])
-    shapes = masks_to_polygon_shapes(masks, text_prompt)
-
-    payload = {
-        "version": "5.0.5",
-        "flags": {},
-        "shapes": shapes,
-        "imagePath": image_path.name,
-        "Path": str(image_path.resolve()),
-        "imageData": image_b64,
-        "imageHeight": image_height,
-        "imageWidth": image_width,
-    }
-
+        image_bytes = f.read()
+    payload = build_labelme_payload(image_path.name, image_np, masks, text_prompt, image_bytes)
+    payload["Path"] = str(image_path.resolve())
     with open(json_save_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-
     print(f"  ✓ Saved: {json_save_path.name} (labelme json)")
 
 def main():

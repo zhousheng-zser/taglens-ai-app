@@ -11,10 +11,11 @@ DTC 本地分割服务：启动时加载模型，HTTP 接口与 TagLens 前端 /
 """
 from __future__ import annotations
 
+import base64
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +52,53 @@ class SegmentPathSyncRequest(BaseModel):
     category: str = Field(default=DEFAULT_CATEGORY, pattern="^(concept|simple|complex)$")
     adapter_scale: float = Field(default=DEFAULT_ADAPTER_SCALE, gt=0)
     output: Optional[str] = None
+
+
+class SegmentImageBase64Item(BaseModel):
+    name: str = "image.jpg"
+    data: str = Field(..., description="图片 base64，可带 data:image/...;base64, 前缀")
+
+
+class SegmentImagesJsonRequest(BaseModel):
+    """请求体传图：无需 backendPath，响应内联 LabelMe JSON 与可选 comparison 图。"""
+    images: List[SegmentImageBase64Item]
+    prompt: str
+    threshold: float = 0.3
+    includeComparison: bool = True
+    category: str = Field(default=DEFAULT_CATEGORY, pattern="^(concept|simple|complex)$")
+    adapter_scale: float = Field(default=DEFAULT_ADAPTER_SCALE, gt=0)
+
+
+def _parse_bool_form(value: str, default: bool = True) -> bool:
+    if value is None or not str(value).strip():
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _decode_image_base64(data: str) -> bytes:
+    raw = (data or "").strip()
+    if "," in raw and raw.startswith("data:"):
+        raw = raw.split(",", 1)[1]
+    try:
+        return base64.b64decode(raw, validate=False)
+    except Exception as exc:
+        raise ValueError(f"base64 解码失败: {exc}") from exc
+
+
+async def _images_from_uploads(files: List[UploadFile]) -> List[Tuple[str, bytes]]:
+    items: List[Tuple[str, bytes]] = []
+    for uf in files:
+        name = (uf.filename or "image.jpg").strip() or "image.jpg"
+        body = await uf.read()
+        if not body:
+            raise ValueError(f"图片为空: {name}")
+        items.append((name, body))
+    return items
+
+
+def _validate_threshold(threshold: float) -> None:
+    if not (0 < float(threshold) < 1):
+        raise HTTPException(status_code=400, detail="threshold 必须在 (0,1) 之间")
 
 
 @asynccontextmanager
@@ -177,6 +225,76 @@ async def create_path_task(req: CreatePathTaskRequest) -> Dict[str, Any]:
         return {"success": True, "task": task}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/dtc/segment/images")
+async def segment_images_multipart(
+    files: List[UploadFile] = File(..., description="一张或多张图片"),
+    prompt: str = Form(...),
+    threshold: float = Form(0.3),
+    includeComparison: str = Form("true"),
+    category: str = Form(DEFAULT_CATEGORY),
+    adapter_scale: float = Form(DEFAULT_ADAPTER_SCALE),
+) -> Dict[str, Any]:
+    """
+    上传图片直接分割（无需 backendPath）。
+    includeComparison=false 时不返回 comparisonImageBase64。
+    """
+    if not engine.loaded:
+        raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
+    if not files:
+        raise HTTPException(status_code=400, detail="请上传至少一张图片")
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt 不能为空")
+    _validate_threshold(threshold)
+    try:
+        images = await _images_from_uploads(files)
+        summary = engine.run_images(
+            images=images,
+            prompt=prompt.strip(),
+            threshold=float(threshold),
+            include_comparison=_parse_bool_form(includeComparison, True),
+            category=category,
+            adapter_scale=float(adapter_scale),
+        )
+        return {"success": True, **summary}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/dtc/segment/images/json")
+async def segment_images_json(req: SegmentImagesJsonRequest) -> Dict[str, Any]:
+    """JSON 传图（images[].data 为 base64），响应格式同 /dtc/segment/images。"""
+    if not engine.loaded:
+        raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
+    if not req.images:
+        raise HTTPException(status_code=400, detail="images 不能为空")
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt 不能为空")
+    _validate_threshold(req.threshold)
+    try:
+        images: List[Tuple[str, bytes]] = []
+        for item in req.images:
+            name = (item.name or "image.jpg").strip() or "image.jpg"
+            raw = _decode_image_base64(item.data)
+            if not raw:
+                raise ValueError(f"图片为空: {name}")
+            images.append((name, raw))
+        summary = engine.run_images(
+            images=images,
+            prompt=req.prompt.strip(),
+            threshold=float(req.threshold),
+            include_comparison=req.includeComparison,
+            category=req.category,
+            adapter_scale=float(req.adapter_scale),
+        )
+        return {"success": True, **summary}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @app.post("/dtc/segment/sync")

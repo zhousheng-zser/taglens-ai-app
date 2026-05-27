@@ -60,6 +60,56 @@ curl -s -X POST http://127.0.0.1:8010/dtc/segment/sync \
   -d '{"backendPath":"/path/to/images","prompt":"helmet","threshold":0.5}'
 ```
 
+### 传图推理（无需 backendPath，响应内联 JSON + comparison）
+
+**multipart 上传（推荐）**
+
+```bash
+# DTC_v2 (8010)
+curl -s -X POST http://127.0.0.1:8010/dtc/segment/images \
+  -F 'files=@/path/to/a.jpg' \
+  -F 'prompt=helmet' \
+  -F 'threshold=0.5' \
+  -F 'includeComparison=true' \
+  -F 'category=simple' \
+  -F 'adapter_scale=0.5'
+
+# 不要 comparison 图时
+curl -s -X POST http://127.0.0.1:8010/dtc/segment/images \
+  -F 'files=@/path/to/a.jpg' \
+  -F 'prompt=helmet' \
+  -F 'threshold=0.5' \
+  -F 'includeComparison=false'
+
+# DTC_v1 / SAM3 (8011)
+curl -s -X POST http://127.0.0.1:8011/sam3/segment/images \
+  -F 'files=@/path/to/a.jpg' \
+  -F 'prompt=helmet' \
+  -F 'threshold=0.5' \
+  -F 'includeComparison=true'
+```
+
+**JSON + base64**
+
+```bash
+IMG_B64=$(base64 -w0 /path/to/a.jpg)
+curl -s -X POST http://127.0.0.1:8010/dtc/segment/images/json \
+  -H 'Content-Type: application/json' \
+  -d "{\"images\":[{\"name\":\"a.jpg\",\"data\":\"$IMG_B64\"}],\"prompt\":\"helmet\",\"threshold\":0.5,\"includeComparison\":true}"
+```
+
+响应 `results[]` 每项字段：
+
+| 字段 | 说明 |
+|------|------|
+| `sourceName` | 文件名（无扩展名） |
+| `imageName` | 原始文件名 |
+| `numMasks` | 检测到的 mask 数量 |
+| `json` | LabelMe 格式标注（含 `shapes`、`imageData` 等） |
+| `comparisonImageBase64` | 三图对比 PNG（仅 `includeComparison=true`） |
+| `comparisonMimeType` | `image/png` |
+| `error` | 单张失败时的错误信息 |
+
 ## 环境
 
 - **DTC**：`DTC/dtc_dep` 虚拟环境 + `DTC/ckpt/checkpoint.pt`  

@@ -4,12 +4,14 @@ SAM3 推理引擎：启动时加载 HuggingFace 模型，任务执行时复用�
 """
 from __future__ import annotations
 
+import base64
+import io
 import os
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -224,6 +226,81 @@ class Sam3InferEngine:
             raise RuntimeError("; ".join(errors[:5]))
         if errors:
             task["warnings"] = errors
+
+    def run_images(
+        self,
+        images: List[Tuple[str, bytes]],
+        prompt: str,
+        threshold: float,
+        include_comparison: bool = True,
+    ) -> Dict[str, Any]:
+        """直接传入图片字节，返回 LabelMe JSON 与可选 comparison 图（不落盘）。"""
+        self.ensure_loaded()
+        if not images:
+            raise ValueError("请至少提供一张图片")
+        if not prompt.strip():
+            raise ValueError("prompt 不能为空")
+
+        results: List[Dict[str, Any]] = []
+        errors: List[str] = []
+
+        with self._infer_lock:
+            for image_name, raw_bytes in images:
+                source = Path(image_name).stem or "image"
+                try:
+                    pil_image = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+                except Exception as exc:
+                    results.append(
+                        {
+                            "sourceName": source,
+                            "imageName": image_name,
+                            "error": f"图片无法解码: {exc}",
+                        }
+                    )
+                    errors.append(f"{image_name}: {exc}")
+                    continue
+
+                try:
+                    image_np = np.array(pil_image)
+                    masks = self._infer_image(pil_image, prompt.strip(), float(threshold))
+                    num_masks = _count_masks(masks)
+                    labelme = infer_mod.build_labelme_payload(
+                        image_name, image_np, masks, prompt.strip(), raw_bytes
+                    )
+                    item: Dict[str, Any] = {
+                        "sourceName": source,
+                        "imageName": image_name,
+                        "numMasks": num_masks,
+                        "json": labelme,
+                    }
+                    if include_comparison:
+                        png = infer_mod.comparison_figure_png_bytes(
+                            image_np, masks, num_masks, prompt.strip(), float(threshold)
+                        )
+                        item["comparisonMimeType"] = "image/png"
+                        item["comparisonImageBase64"] = base64.b64encode(png).decode("ascii")
+                    results.append(item)
+                except Exception as exc:
+                    results.append(
+                        {
+                            "sourceName": source,
+                            "imageName": image_name,
+                            "error": str(exc),
+                        }
+                    )
+                    errors.append(f"{image_name}: {exc}")
+
+        ok_count = sum(1 for r in results if "json" in r)
+        if ok_count == 0:
+            raise RuntimeError("; ".join(errors[:5]) if errors else "全部图片推理失败")
+
+        return {
+            "algorithm": "sam3",
+            "status": "success",
+            "result_count": ok_count,
+            "results": results,
+            "warnings": errors or None,
+        }
 
 
 engine = Sam3InferEngine()

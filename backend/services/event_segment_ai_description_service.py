@@ -12,6 +12,11 @@ import httpx
 from openai import OpenAI
 
 from prompts.event_segment_prompt import PROMPT, PROMPT_IMAGE_FOCUS_SUFFIX
+from services.segment_media_validator import (
+    VideoDamageReport,
+    analyze_segment_video_bytes,
+    is_playability_check_enabled,
+)
 
 MAX_WORKERS = 15
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="segment-ai")
@@ -115,11 +120,74 @@ def _build_user_content(video_data_url: str, image_data_url: Optional[str]) -> L
     return content
 
 
+def inspect_video_damage(video_bytes: bytes) -> VideoDamageReport:
+    """检测分段视频损坏程度（批量任务写日志用）。"""
+    return analyze_segment_video_bytes(video_bytes)
+
+
+def get_video_damage_reason(video_bytes: bytes) -> Optional[str]:
+    """ffmpeg 检测损坏；None=可送 RLQ，非 None=损坏原因。"""
+    report = inspect_video_damage(video_bytes)
+    return report.skip_reason
+
+
+def fetch_segment_video_bytes(segment_video_url: str) -> tuple[bytes, str]:
+    """拉取分段视频（供批量任务：先检测再决定是否调 RLQ）。"""
+    return _fetch_media_bytes(segment_video_url)
+
+
+def check_rlq_api_available() -> Optional[str]:
+    """任务开始前探测 RLQ；None=可用，否则返回原因。"""
+    url = f"{EVENT_SEGMENT_AI_BASE_URL.rstrip('/')}/models"
+    try:
+        with httpx.Client(trust_env=False, timeout=20.0) as client:
+            response = client.get(
+                url,
+                headers={"Authorization": f"Bearer {EVENT_SEGMENT_AI_API_KEY}"},
+            )
+    except httpx.TimeoutException:
+        return f"RLQ API 连接超时: {url}"
+    except httpx.HTTPError as exc:
+        return f"RLQ API 连接失败: {exc}"
+
+    if response.status_code == 404:
+        return (
+            "RLQ 视觉 API 返回 404（常见于 AutoDL 实例关机或端口未映射），"
+            f"请检查 EVENT_SEGMENT_AI_BASE_URL={EVENT_SEGMENT_AI_BASE_URL}"
+        )
+    if response.status_code >= 400:
+        return f"RLQ API 返回 HTTP {response.status_code}"
+    return None
+
+
+def format_model_error(exc: Exception) -> str:
+    """避免把整页 HTML 打进日志。"""
+    message = str(exc).strip()
+    lower = message.lower()
+    if "<html" in lower or "not found" in lower and "404" in lower:
+        return (
+            "RLQ 视觉 API 不可用(404)，未成功调用模型。"
+            f"请检查 backend/.env 中 EVENT_SEGMENT_AI_BASE_URL={EVENT_SEGMENT_AI_BASE_URL}"
+        )
+    if len(message) > 400:
+        return message[:400] + "…"
+    return f"RLQ 视觉模型调用失败: {message}"
+
+
 def generate_segment_description_sync(
     segment_video_url: str,
     overlay_image_url: Optional[str] = None,
+    video_bytes: Optional[bytes] = None,
+    video_content_type: Optional[str] = None,
 ) -> str:
-    video_bytes, video_ct = _fetch_media_bytes(segment_video_url)
+    if video_bytes is None:
+        video_bytes, video_ct = _fetch_media_bytes(segment_video_url)
+        damage = get_video_damage_reason(video_bytes)
+        if damage:
+            raise SegmentAiMediaError(f"视频损坏，跳过补齐: {damage}")
+    else:
+        video_ct = video_content_type or "video/mp4"
+
     video_mime = video_ct if video_ct.startswith("video/") else "video/mp4"
     video_data_url = _bytes_to_data_url(video_bytes, video_mime)
 
@@ -158,7 +226,7 @@ def generate_segment_description_sync(
             stream=False,
         )
     except Exception as exc:
-        raise SegmentAiModelError(f"视觉模型调用失败: {exc}") from exc
+        raise SegmentAiModelError(format_model_error(exc)) from exc
 
     choices = response.choices or []
     if not choices:
