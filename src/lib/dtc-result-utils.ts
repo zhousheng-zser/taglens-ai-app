@@ -10,7 +10,13 @@ export function canonicalSourceKey(item: DtcResultItem): string {
   let stem = (item.sourceName || '').split(/[\\/]/).pop() || '';
   if (item.imagePath) {
     const img = item.imagePath.split(/[\\/]/).pop() || '';
-    stem = img.replace(/_comparison\.png$/i, '');
+    stem = img.replace(/_(comparison|bbox|overlay|mask)\.png$/i, '');
+  } else if (item.overlayPath) {
+    const img = item.overlayPath.split(/[\\/]/).pop() || '';
+    stem = img.replace(/_overlay\.png$/i, '');
+  } else if (item.maskPath) {
+    const img = item.maskPath.split(/[\\/]/).pop() || '';
+    stem = img.replace(/_mask\.png$/i, '');
   }
 
   const legacy = stem.match(/^(.+)_(\d+)$/);
@@ -47,8 +53,14 @@ export function mergeResultItems(items: DtcResultItem[]): DtcResultItem[] {
       sourceName: key,
       imagePath: item.imagePath || prev.imagePath,
       imageName: item.imageName || prev.imageName,
+      sourcePath: item.sourcePath || prev.sourcePath,
+      maskPath: item.maskPath || prev.maskPath,
+      overlayPath: item.overlayPath || prev.overlayPath,
       jsonPath: item.jsonPath || prev.jsonPath,
       jsonName: item.jsonName || prev.jsonName,
+      shapeCount: typeof item.shapeCount === 'number' ? item.shapeCount : prev.shapeCount,
+      processingTimeMs:
+        typeof item.processingTimeMs === 'number' ? item.processingTimeMs : prev.processingTimeMs,
       resultJson:
         item.resultJson && Object.keys(item.resultJson).length > 0
           ? item.resultJson

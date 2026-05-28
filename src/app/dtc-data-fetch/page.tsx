@@ -22,6 +22,7 @@ import {
 import type {
   DtcAlgorithm,
   DtcFetchMode,
+  DtcInferMode,
   DtcImageSetItem,
   DtcResultItem,
   DtcTaskItem,
@@ -34,9 +35,41 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Loader2, Upload, FolderOpen, Copy, Check, Download, X, ImageIcon } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Loader2, Copy, Check, Download, X, ImageIcon, CircleHelp } from 'lucide-react';
 
 const DTC_CATEGORIES = ['concept', 'simple', 'complex'] as const;
+
+const DTC_CATEGORY_HINT =
+  '提示词类别，决定 prompt 如何包装后送入模型：concept=概念级(直接使用原始 prompt)；simple=简单查询(默认，适合 helmet/car 等单词)；complex=复杂查询(适合长句描述)';
+
+const DTC_ADAPTER_SCALE_HINT =
+  'Adapter 缩放系数，控制 LoRA adapter 对输出的影响强度，须 > 0（默认 0.5）';
+
+function FieldLabelWithHint({ label, hint }: { label: string; hint: string }) {
+  return (
+    <div className="flex items-center gap-1 mb-1">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex text-muted-foreground hover:text-foreground"
+            aria-label={`${label} 说明`}
+          >
+            <CircleHelp className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          className="max-w-[360px] p-2.5 text-xs leading-relaxed whitespace-pre-wrap"
+        >
+          {hint}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
 
 function DtcDataFetchContent() {
   const { toast } = useToast();
@@ -46,6 +79,7 @@ function DtcDataFetchContent() {
   const [backendPath, setBackendPath] = useState('');
   const [prompt, setPrompt] = useState('');
   const [thresholdText, setThresholdText] = useState('0.3');
+  const [inferMode, setInferMode] = useState<DtcInferMode>('mask');
   const [category, setCategory] = useState<string>('simple');
   const [adapterScaleText, setAdapterScaleText] = useState('0.5');
   const [isRunning, setIsRunning] = useState(false);
@@ -76,7 +110,7 @@ function DtcDataFetchContent() {
   }, [algorithm]);
 
   const zipApiPrefix = algorithm === 'dtc_v2' ? '/dtc' : '/sam3';
-  const algorithmLabel = algorithm === 'dtc_v2' ? 'DTC_v2' : 'DTC_v1';
+  const algorithmLabel = algorithm === 'dtc_v2' ? 'DTC-Sem' : 'DTC-Fine';
   const artifactProxyBase = '/api/dtc/tasks';
 
   const buildArtifactUrl = (taskId: string, filePath: string) =>
@@ -202,12 +236,27 @@ function DtcDataFetchContent() {
   };
 
   const getResultSummary = (item: DtcResultItem): string => {
-    const shapes = Array.isArray(item.resultJson?.shapes) ? item.resultJson.shapes.length : 0;
+    const shapesList = Array.isArray(item.resultJson?.shapes) ? item.resultJson.shapes : [];
+    const shapes = typeof item.shapeCount === 'number' ? item.shapeCount : shapesList.length;
+    const hasRectangle = shapesList.some((shape) => shape?.shape_type === 'rectangle');
+    const modeText = selectedTask?.infer_mode || (hasRectangle ? 'bbox' : 'mask');
     const parts: string[] = [];
     if (selectedTask?.prompt) parts.push(`Prompt: ${selectedTask.prompt}`);
     if (selectedTask?.threshold != null) parts.push(`Threshold: ${selectedTask.threshold}`);
-    parts.push(`Masks: ${shapes}`);
+    parts.push(`Mode: ${modeText}`);
+    parts.push(`Shapes: ${shapes}`);
+    if (typeof item.processingTimeMs === 'number') {
+      parts.push(`Time: ${(item.processingTimeMs / 1000).toFixed(3)}s`);
+    }
     return parts.join(' | ');
+  };
+
+  const getResultMode = (item: DtcResultItem): 'mask' | 'bbox' => {
+    if (selectedTask?.infer_mode === 'bbox') return 'bbox';
+    if (selectedTask?.infer_mode === 'mask') return 'mask';
+    const shapesList = Array.isArray(item.resultJson?.shapes) ? item.resultJson.shapes : [];
+    const hasRectangle = shapesList.some((shape) => shape?.shape_type === 'rectangle');
+    return hasRectangle ? 'bbox' : 'mask';
   };
 
   const shortId = (id?: string): string => {
@@ -270,6 +319,7 @@ function DtcDataFetchContent() {
       const effectivePrompt = prompt.trim();
       const fetchBase = {
         algorithm,
+        infer_mode: inferMode,
         prompt: effectivePrompt,
         threshold: effectiveThreshold,
         ...(algorithm === 'dtc_v2'
@@ -445,7 +495,7 @@ function DtcDataFetchContent() {
       <div>
         <h1 className="text-2xl font-bold">DTC数据获取</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          支持上传图片或指定后端目录，选择 DTC_v1（SAM3）或 DTC_v2（DTC）分割服务获取结果图与 JSON。
+          支持上传图片或指定后端目录，选择 DTC-Sem（DTC-语义版）或 DTC-Fine（DTC-精分版）并按 mask/bbox 形态生成结果图与 JSON。
         </p>
       </div>
 
@@ -459,33 +509,36 @@ function DtcDataFetchContent() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="dtc_v2">DTC_v2</SelectItem>
-                  <SelectItem value="dtc_v1">DTC_v1</SelectItem>
+                  <SelectItem value="dtc_v2">DTC-Sem(DTC-语义版)</SelectItem>
+                  <SelectItem value="dtc_v1">DTC-Fine(DTC-精分版)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
-            <div className="md:col-span-2 flex items-center gap-2">
-              <Button
-                type="button"
-                variant={mode === 'upload' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setMode('upload')}
-                className="gap-1.5"
-              >
-                <Upload className="h-3.5 w-3.5" />
-                上传图
-              </Button>
-              <Button
-                type="button"
-                variant={mode === 'path' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setMode('path')}
-                className="gap-1.5"
-              >
-                <FolderOpen className="h-3.5 w-3.5" />
-                后端路径
-              </Button>
+            <div className="md:col-span-1">
+              <Label className="text-xs text-muted-foreground mb-1 block">推理形态</Label>
+              <Select value={inferMode} onValueChange={(v) => setInferMode(v as DtcInferMode)}>
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="mask">mask</SelectItem>
+                  <SelectItem value="bbox">bbox</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="md:col-span-1">
+              <Label className="text-xs text-muted-foreground mb-1 block">数据来源</Label>
+              <Select value={mode} onValueChange={(v) => setMode(v as DtcFetchMode)}>
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="upload">上传图片</SelectItem>
+                  <SelectItem value="path">后端路径</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="md:col-span-3">
@@ -560,39 +613,43 @@ function DtcDataFetchContent() {
           </div>
 
           {algorithm === 'dtc_v2' ? (
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-              <div className="md:col-span-2">
-                <Label className="text-xs text-muted-foreground mb-1 block">Category</Label>
-                <Select value={category} onValueChange={setCategory}>
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {DTC_CATEGORIES.map((c) => (
-                      <SelectItem key={c} value={c}>
-                        {c}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+            <TooltipProvider delayDuration={200}>
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
+                <div className="md:col-span-2">
+                  <FieldLabelWithHint label="Category" hint={DTC_CATEGORY_HINT} />
+                  <Select value={category} onValueChange={setCategory}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DTC_CATEGORIES.map((c) => (
+                        <SelectItem key={c} value={c}>
+                          {c}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="md:col-span-2">
+                  <FieldLabelWithHint label="Adapter Scale" hint={DTC_ADAPTER_SCALE_HINT} />
+                  <Input
+                    value={adapterScaleText}
+                    onChange={(e) => setAdapterScaleText(e.target.value)}
+                    className="h-8 text-xs"
+                    inputMode="decimal"
+                  />
+                </div>
+                <div className="md:col-span-8 text-xs text-muted-foreground flex items-center leading-relaxed">
+                  DTC-Sem 专用参数：Category 控制 prompt 包装方式，Adapter Scale 控制 LoRA 影响强度（默认
+                  simple / 0.5）
+                </div>
               </div>
-              <div className="md:col-span-2">
-                <Label className="text-xs text-muted-foreground mb-1 block">Adapter Scale</Label>
-                <Input
-                  value={adapterScaleText}
-                  onChange={(e) => setAdapterScaleText(e.target.value)}
-                  className="h-8 text-xs"
-                  inputMode="decimal"
-                />
-              </div>
-              <div className="md:col-span-8 text-xs text-muted-foreground flex items-center">
-                DTC_v2 专用参数（默认 category=simple，adapter_scale=0.5）
-              </div>
-            </div>
+            </TooltipProvider>
           ) : null}
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
             <span>当前算法: {algorithmLabel}</span>
+            <span>推理形态: {inferMode}</span>
             <span>
               {mode === 'upload'
                 ? `已选择 ${files.length} 张图片，已上传图片集 ${imageSets.length} 个`
@@ -730,9 +787,12 @@ function DtcDataFetchContent() {
                       >
                         <TableCell className="pl-6">
                           <div className="relative h-12 w-20 rounded shadow-md overflow-hidden bg-black/40 flex items-center justify-center">
-                            {item.imagePath && selectedTaskId ? (
+                            {(item.overlayPath || item.imagePath || item.sourcePath) && selectedTaskId ? (
                               <img
-                                src={buildArtifactUrl(selectedTaskId, item.imagePath)}
+                                src={buildArtifactUrl(
+                                  selectedTaskId,
+                                  item.overlayPath || item.imagePath || item.sourcePath!
+                                )}
                                 alt={fileName}
                                 className="absolute inset-0 h-full w-full object-cover"
                                 loading="lazy"
@@ -833,13 +893,55 @@ function DtcDataFetchContent() {
             </div>
             <div className="p-6 space-y-4">
               <p className="text-sm text-muted-foreground">{getResultSummary(mergedResults[previewIndex])}</p>
-              {mergedResults[previewIndex].imagePath && selectedTaskId ? (
-                <div className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video max-h-[70vh]">
-                  <img
-                    src={buildArtifactUrl(selectedTaskId, mergedResults[previewIndex].imagePath!)}
-                    alt={getDisplayFileName(mergedResults[previewIndex])}
-                    className="absolute inset-0 h-full w-full object-contain"
-                  />
+              {selectedTaskId ? (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="rounded-lg border border-border/50 bg-black p-2">
+                    <p className="text-xs text-muted-foreground mb-2">原图</p>
+                    {mergedResults[previewIndex].sourcePath ? (
+                      <img
+                        src={buildArtifactUrl(selectedTaskId, mergedResults[previewIndex].sourcePath!)}
+                        alt={`${getDisplayFileName(mergedResults[previewIndex])}-source`}
+                        className="w-full max-h-[60vh] object-contain"
+                      />
+                    ) : (
+                      <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
+                        无原图
+                      </div>
+                    )}
+                  </div>
+                  {getResultMode(mergedResults[previewIndex]) === 'mask' ? (
+                    <div className="rounded-lg border border-border/50 bg-black p-2">
+                      <p className="text-xs text-muted-foreground mb-2">Mask</p>
+                      {mergedResults[previewIndex].maskPath ? (
+                        <img
+                          src={buildArtifactUrl(selectedTaskId, mergedResults[previewIndex].maskPath!)}
+                          alt={`${getDisplayFileName(mergedResults[previewIndex])}-mask`}
+                          className="w-full max-h-[60vh] object-contain"
+                        />
+                      ) : (
+                        <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
+                          无Mask图
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                  <div className="rounded-lg border border-border/50 bg-black p-2">
+                    <p className="text-xs text-muted-foreground mb-2">Overlay</p>
+                    {mergedResults[previewIndex].overlayPath || mergedResults[previewIndex].imagePath ? (
+                      <img
+                        src={buildArtifactUrl(
+                          selectedTaskId,
+                          mergedResults[previewIndex].overlayPath || mergedResults[previewIndex].imagePath!
+                        )}
+                        alt={getDisplayFileName(mergedResults[previewIndex])}
+                        className="w-full max-h-[60vh] object-contain"
+                      />
+                    ) : (
+                      <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
+                        无Overlay图
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">

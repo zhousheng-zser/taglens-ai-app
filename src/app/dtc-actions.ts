@@ -36,6 +36,7 @@ export async function runDtcFetch(request: RunDtcFetchRequest): Promise<DtcCreat
     const baseBody: Record<string, unknown> = {
       prompt: request.prompt,
       threshold: request.threshold ?? 0.3,
+      infer_mode: request.infer_mode ?? 'mask',
     };
     if (request.algorithm === 'dtc_v2') {
       baseBody.category = request.category ?? 'simple';

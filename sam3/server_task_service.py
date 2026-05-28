@@ -10,7 +10,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from infer_engine import Sam3InferEngine, _collect_results, _date_token, _safe_text, _task_id, engine
+from infer_engine import (
+    DEFAULT_INFER_MODE,
+    Sam3InferEngine,
+    _collect_results,
+    _date_token,
+    _safe_text,
+    _task_id,
+    engine,
+)
 
 import sam3_task_storage as storage
 
@@ -39,7 +47,14 @@ def _save_upload_files(input_root: Path, files: List[Any]) -> None:
             out.write(data)
 
 
-def _make_task_record(mode: str, prompt: str, threshold: float, input_path: str, output_base: str) -> Dict[str, Any]:
+def _make_task_record(
+    mode: str,
+    prompt: str,
+    threshold: float,
+    input_path: str,
+    output_base: str,
+    infer_mode: str = DEFAULT_INFER_MODE,
+) -> Dict[str, Any]:
     return {
         "task_id": _task_id(),
         "mode": mode,
@@ -49,6 +64,7 @@ def _make_task_record(mode: str, prompt: str, threshold: float, input_path: str,
         "input_path": input_path,
         "output_base": output_base,
         "algorithm": "sam3",
+        "infer_mode": infer_mode if infer_mode in ("mask", "bbox") else DEFAULT_INFER_MODE,
     }
 
 
@@ -81,7 +97,12 @@ def upload_chunk_to_image_set(files: List[Any], image_set_id: Optional[str] = No
     )
 
 
-def create_upload_task_from_image_set(image_set_id: str, prompt: str, threshold: float) -> Dict[str, Any]:
+def create_upload_task_from_image_set(
+    image_set_id: str,
+    prompt: str,
+    threshold: float,
+    infer_mode: str = DEFAULT_INFER_MODE,
+) -> Dict[str, Any]:
     image_set = storage.get_image_set(image_set_id)
     if not image_set:
         raise ValueError("图片集不存在")
@@ -89,7 +110,7 @@ def create_upload_task_from_image_set(image_set_id: str, prompt: str, threshold:
     if not input_path.exists() or not input_path.is_dir():
         raise ValueError("图片集目录不存在")
 
-    task = _make_task_record("upload", prompt, threshold, str(input_path), "")
+    task = _make_task_record("upload", prompt, threshold, str(input_path), "", infer_mode)
     task["image_set_id"] = image_set_id
     paths = _build_task_paths(task["task_id"], task["date"])
     task["output_base"] = str(paths["output_base"])
@@ -98,10 +119,15 @@ def create_upload_task_from_image_set(image_set_id: str, prompt: str, threshold:
     return created
 
 
-def create_path_task(backend_path: str, prompt: str, threshold: float) -> Dict[str, Any]:
+def create_path_task(
+    backend_path: str,
+    prompt: str,
+    threshold: float,
+    infer_mode: str = DEFAULT_INFER_MODE,
+) -> Dict[str, Any]:
     if not backend_path or not Path(backend_path).exists():
         raise ValueError("backend_path 不存在")
-    task = _make_task_record("path", prompt, threshold, backend_path, "")
+    task = _make_task_record("path", prompt, threshold, backend_path, "", infer_mode)
     paths = _build_task_paths(task["task_id"], task["date"])
     task["output_base"] = str(paths["output_base"])
     created = storage.create_task(task)

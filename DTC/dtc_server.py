@@ -17,10 +17,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from infer_engine import DEFAULT_ADAPTER_SCALE, DEFAULT_CATEGORY, DEFAULT_CHECKPOINT, engine
 import server_task_service as task_svc
@@ -34,6 +34,7 @@ class CreatePathTaskRequest(BaseModel):
     threshold: float = 0.3
     category: str = Field(default=DEFAULT_CATEGORY, pattern="^(concept|simple|complex)$")
     adapter_scale: float = Field(default=DEFAULT_ADAPTER_SCALE, gt=0)
+    infer_mode: str = Field(default="mask", pattern="^(mask|bbox)$")
 
 
 class CreateUploadRunTaskRequest(BaseModel):
@@ -42,6 +43,7 @@ class CreateUploadRunTaskRequest(BaseModel):
     threshold: float = 0.3
     category: str = Field(default=DEFAULT_CATEGORY, pattern="^(concept|simple|complex)$")
     adapter_scale: float = Field(default=DEFAULT_ADAPTER_SCALE, gt=0)
+    infer_mode: str = Field(default="mask", pattern="^(mask|bbox)$")
 
 
 class SegmentPathSyncRequest(BaseModel):
@@ -51,6 +53,7 @@ class SegmentPathSyncRequest(BaseModel):
     threshold: float = 0.3
     category: str = Field(default=DEFAULT_CATEGORY, pattern="^(concept|simple|complex)$")
     adapter_scale: float = Field(default=DEFAULT_ADAPTER_SCALE, gt=0)
+    infer_mode: str = Field(default="mask", pattern="^(mask|bbox)$")
     output: Optional[str] = None
 
 
@@ -60,13 +63,17 @@ class SegmentImageBase64Item(BaseModel):
 
 
 class SegmentImagesJsonRequest(BaseModel):
-    """请求体传图：无需 backendPath，响应内联 LabelMe JSON 与可选 comparison 图。"""
+    """请求体传图：无需 backendPath，响应内联 LabelMe JSON 与可选 mask/overlay 图。"""
     images: List[SegmentImageBase64Item]
     prompt: str
     threshold: float = 0.3
-    includeComparison: bool = True
+    inferMode: str = Field(default="mask", pattern="^(mask|bbox)$")
+    includeJsonImageData: bool = True
+    includeMaskImageBase64: bool = True
+    includeOverlayImageBase64: bool = True
     category: str = Field(default=DEFAULT_CATEGORY, pattern="^(concept|simple|complex)$")
     adapter_scale: float = Field(default=DEFAULT_ADAPTER_SCALE, gt=0)
+    model_config = ConfigDict(extra="forbid")
 
 
 def _parse_bool_form(value: str, default: bool = True) -> bool:
@@ -140,7 +147,10 @@ app.add_middleware(
 async def health() -> Dict[str, Any]:
     return {
         "success": engine.loaded,
-        "algorithm": "dtc",
+        "algorithm": "dtc",  # backward compatibility
+        "modelKey": "dtc_v2",
+        "modelName": "DTC-Semantic",
+        "modelAlias": "DTC-Sem",
         "model_loaded": engine.loaded,
         "load_error": engine.load_error,
         "checkpoint": engine._checkpoint if engine.loaded else None,
@@ -200,6 +210,7 @@ async def create_upload_run_task(req: CreateUploadRunTaskRequest) -> Dict[str, A
             float(req.threshold),
             req.category,
             float(req.adapter_scale),
+            req.infer_mode,
         )
         return {"success": True, "task": task}
     except ValueError as e:
@@ -221,6 +232,7 @@ async def create_path_task(req: CreatePathTaskRequest) -> Dict[str, Any]:
             float(req.threshold),
             req.category,
             float(req.adapter_scale),
+            req.infer_mode,
         )
         return {"success": True, "task": task}
     except ValueError as e:
@@ -229,17 +241,18 @@ async def create_path_task(req: CreatePathTaskRequest) -> Dict[str, Any]:
 
 @app.post("/dtc/segment/images")
 async def segment_images_multipart(
+    request: Request,
     files: List[UploadFile] = File(..., description="一张或多张图片"),
     prompt: str = Form(...),
     threshold: float = Form(0.3),
-    includeComparison: str = Form("true"),
+    inferMode: str = Form("mask"),
+    includeJsonImageData: str = Form("true"),
+    includeMaskImageBase64: str = Form("true"),
+    includeOverlayImageBase64: str = Form("true"),
     category: str = Form(DEFAULT_CATEGORY),
     adapter_scale: float = Form(DEFAULT_ADAPTER_SCALE),
 ) -> Dict[str, Any]:
-    """
-    上传图片直接分割（无需 backendPath）。
-    includeComparison=false 时不返回 comparisonImageBase64。
-    """
+    """上传图片直接分割（无需 backendPath）。"""
     if not engine.loaded:
         raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
     if not files:
@@ -247,13 +260,19 @@ async def segment_images_multipart(
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     _validate_threshold(threshold)
+    form_data = await request.form()
+    if "includeComparison" in form_data:
+        raise HTTPException(status_code=400, detail="参数 includeComparison 已移除，请使用 includeMaskImageBase64/includeOverlayImageBase64")
     try:
         images = await _images_from_uploads(files)
         summary = engine.run_images(
             images=images,
             prompt=prompt.strip(),
             threshold=float(threshold),
-            include_comparison=_parse_bool_form(includeComparison, True),
+            infer_mode=inferMode,
+            include_json_image_data=_parse_bool_form(includeJsonImageData, True),
+            include_mask_image_base64=_parse_bool_form(includeMaskImageBase64, True),
+            include_overlay_image_base64=_parse_bool_form(includeOverlayImageBase64, True),
             category=category,
             adapter_scale=float(adapter_scale),
         )
@@ -262,6 +281,34 @@ async def segment_images_multipart(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+@app.post("/dtc-sem/segment/images")
+async def segment_images_multipart_semantic(
+    request: Request,
+    files: List[UploadFile] = File(..., description="一张或多张图片"),
+    prompt: str = Form(...),
+    threshold: float = Form(0.3),
+    inferMode: str = Form("mask"),
+    includeJsonImageData: str = Form("true"),
+    includeMaskImageBase64: str = Form("true"),
+    includeOverlayImageBase64: str = Form("true"),
+    category: str = Form(DEFAULT_CATEGORY),
+    adapter_scale: float = Form(DEFAULT_ADAPTER_SCALE),
+) -> Dict[str, Any]:
+    """DTC-Sem 外部别名接口（与 /dtc/segment/images 行为一致）。"""
+    return await segment_images_multipart(
+        request=request,
+        files=files,
+        prompt=prompt,
+        threshold=threshold,
+        inferMode=inferMode,
+        includeJsonImageData=includeJsonImageData,
+        includeMaskImageBase64=includeMaskImageBase64,
+        includeOverlayImageBase64=includeOverlayImageBase64,
+        category=category,
+        adapter_scale=adapter_scale,
+    )
 
 
 @app.post("/dtc/segment/images/json")
@@ -286,7 +333,10 @@ async def segment_images_json(req: SegmentImagesJsonRequest) -> Dict[str, Any]:
             images=images,
             prompt=req.prompt.strip(),
             threshold=float(req.threshold),
-            include_comparison=req.includeComparison,
+            infer_mode=req.inferMode,
+            include_json_image_data=req.includeJsonImageData,
+            include_mask_image_base64=req.includeMaskImageBase64,
+            include_overlay_image_base64=req.includeOverlayImageBase64,
             category=req.category,
             adapter_scale=float(req.adapter_scale),
         )
@@ -325,6 +375,7 @@ async def segment_path_sync(req: SegmentPathSyncRequest) -> Dict[str, Any]:
             threshold=float(req.threshold),
             category=req.category,
             adapter_scale=float(req.adapter_scale),
+            infer_mode=req.infer_mode,
         )
         return {"success": True, **summary}
     except Exception as exc:
@@ -369,10 +420,14 @@ async def download_artifact(task_id: str, file_path: str):
     fp = Path(file_path)
     if not fp.exists() or not fp.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    allowed_root = Path(task["output_base"]).resolve()
+    allowed_roots = [Path(task["output_base"]).resolve()]
+    input_path = str(task.get("input_path") or "").strip()
+    if input_path:
+        allowed_roots.append(Path(input_path).resolve())
     try:
         resolved = fp.resolve()
-        resolved.relative_to(allowed_root)
+        if not any((resolved == root or root in resolved.parents) for root in allowed_roots):
+            raise ValueError("out of allowed roots")
     except Exception:
         raise HTTPException(status_code=400, detail="非法文件路径")
     return FileResponse(path=str(resolved), filename=resolved.name)

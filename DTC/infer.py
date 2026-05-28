@@ -75,6 +75,12 @@ def parse_args():
         default=str(DEFAULT_CHECKPOINT),
         help="Model checkpoint path",
     )
+    parser.add_argument(
+        "--infer_mode",
+        choices=["mask", "bbox"],
+        default="mask",
+        help="输出形态：mask 或 bbox（默认 mask）",
+    )
     return parser.parse_args()
 
 
@@ -160,6 +166,16 @@ def _mask_bbox_polygon(mask_bool: np.ndarray) -> list[list[float]]:
     x0, x1 = float(xs.min()), float(xs.max())
     y0, y1 = float(ys.min()), float(ys.max())
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
+def _iter_bboxes_from_masks(masks) -> list[list[list[float]]]:
+    bboxes: list[list[list[float]]] = []
+    for mask in _iter_masks(masks):
+        mask_bool = mask > 0.5 if getattr(mask, "dtype", None) != bool else mask
+        points = _mask_bbox_polygon(mask_bool)
+        if len(points) == 4:
+            bboxes.append(points)
+    return bboxes
 
 
 def _mask_to_polygon(mask_bool: np.ndarray) -> list[list[float]]:
@@ -267,27 +283,117 @@ def comparison_figure_png_bytes(
     return buf.getvalue()
 
 
+def render_bbox_figure(
+    image_np: np.ndarray,
+    masks,
+    text_prompt: str,
+    threshold: float,
+    box_color: tuple[int, int, int] = (255, 0, 0),
+    box_width: int = 3,
+) -> Image.Image:
+    image = Image.fromarray(image_np.astype(np.uint8)).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    boxes = _iter_bboxes_from_masks(masks)
+    for points in boxes:
+        draw.polygon([(p[0], p[1]) for p in points], outline=box_color, width=box_width)
+    return image
+
+
+def save_bbox_figure(
+    image_np: np.ndarray,
+    masks,
+    save_path: Path,
+    text_prompt: str,
+    threshold: float,
+) -> None:
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    render_bbox_figure(image_np, masks, text_prompt, threshold).save(save_path)
+    print(f"  ✓ Saved: {save_path.name} (bbox view)")
+
+
+def bbox_figure_png_bytes(
+    image_np: np.ndarray,
+    masks,
+    text_prompt: str,
+    threshold: float,
+) -> bytes:
+    buf = io.BytesIO()
+    render_bbox_figure(image_np, masks, text_prompt, threshold).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_mask_figure(image_np: np.ndarray, masks) -> Image.Image:
+    masks_iter = _iter_masks(masks)
+    if masks_iter:
+        stack = [m > 0.5 if getattr(m, "dtype", None) != bool else m for m in masks_iter]
+        merged = np.any(np.stack(stack, axis=0), axis=0).astype(np.uint8) * 255
+    else:
+        merged = np.zeros((image_np.shape[0], image_np.shape[1]), dtype=np.uint8)
+    mask_rgb = np.stack([merged] * 3, axis=-1)
+    return Image.fromarray(mask_rgb)
+
+
+def save_mask_figure(image_np: np.ndarray, masks, save_path: Path) -> None:
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    render_mask_figure(image_np, masks).save(save_path)
+    print(f"  ✓ Saved: {save_path.name} (mask view)")
+
+
+def mask_figure_png_bytes(image_np: np.ndarray, masks) -> bytes:
+    buf = io.BytesIO()
+    render_mask_figure(image_np, masks).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_overlay_figure(image_np: np.ndarray, masks, infer_mode: str = "mask") -> Image.Image:
+    if infer_mode == "bbox":
+        return render_bbox_figure(image_np, masks, "", 0.0)
+    return Image.fromarray(create_overlay(image_np, masks))
+
+
+def save_overlay_figure(image_np: np.ndarray, masks, save_path: Path, infer_mode: str = "mask") -> None:
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    render_overlay_figure(image_np, masks, infer_mode=infer_mode).save(save_path)
+    print(f"  ✓ Saved: {save_path.name} (overlay view)")
+
+
+def overlay_figure_png_bytes(image_np: np.ndarray, masks, infer_mode: str = "mask") -> bytes:
+    buf = io.BytesIO()
+    render_overlay_figure(image_np, masks, infer_mode=infer_mode).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def build_labelme_payload(
     image_name: str,
     image_np: np.ndarray,
     masks,
     text_prompt: str,
     image_bytes: Optional[bytes] = None,
+    infer_mode: str = "mask",
+    include_image_data: bool = True,
+    processing_time_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not image_bytes:
         raise ValueError("image_bytes 不能为空")
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8") if include_image_data else None
     image_height, image_width = int(image_np.shape[0]), int(image_np.shape[1])
-    return {
+    payload = {
         "version": "5.0.5",
         "flags": {},
-        "shapes": masks_to_polygon_shapes(masks, text_prompt),
+        "shapes": (
+            masks_to_rectangle_shapes(masks, text_prompt)
+            if infer_mode == "bbox"
+            else masks_to_polygon_shapes(masks, text_prompt)
+        ),
         "imagePath": image_name,
         "Path": image_name,
         "imageData": image_b64,
         "imageHeight": image_height,
         "imageWidth": image_width,
     }
+    if isinstance(processing_time_ms, int):
+        payload["processingTimeMs"] = processing_time_ms
+    return payload
 
 
 def masks_to_polygon_shapes(masks, label_text: str) -> list[dict]:
@@ -309,10 +415,43 @@ def masks_to_polygon_shapes(masks, label_text: str) -> list[dict]:
     return shapes
 
 
-def save_labelme_json(image_path: Path, image_np: np.ndarray, masks, text_prompt: str, json_save_path: Path) -> None:
+def masks_to_rectangle_shapes(masks, label_text: str) -> list[dict]:
+    shapes: list[dict] = []
+    for points in _iter_bboxes_from_masks(masks):
+        shapes.append(
+            {
+                "label": label_text,
+                "points": points,
+                "group_id": None,
+                "shape_type": "rectangle",
+                "flags": {},
+            }
+        )
+    return shapes
+
+
+def save_labelme_json(
+    image_path: Path,
+    image_np: np.ndarray,
+    masks,
+    text_prompt: str,
+    json_save_path: Path,
+    infer_mode: str = "mask",
+    include_image_data: bool = True,
+    processing_time_ms: Optional[int] = None,
+) -> None:
     with open(image_path, "rb") as f:
         image_bytes = f.read()
-    payload = build_labelme_payload(image_path.name, image_np, masks, text_prompt, image_bytes)
+    payload = build_labelme_payload(
+        image_path.name,
+        image_np,
+        masks,
+        text_prompt,
+        image_bytes,
+        infer_mode=infer_mode,
+        include_image_data=include_image_data,
+        processing_time_ms=processing_time_ms,
+    )
     payload["Path"] = str(image_path.resolve())
     json_save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(json_save_path, "w", encoding="utf-8") as f:
@@ -388,18 +527,24 @@ def main() -> int:
             else:
                 num_masks = len(masks)
 
-            save_filename = f"{base_name}_comparison.png"
-            save_comparison_figure(
+            if args.infer_mode == "mask":
+                save_mask_figure(image_np, masks, output_dir / f"{base_name}_mask.png")
+            save_overlay_figure(
                 image_np,
                 masks,
-                num_masks,
-                output_dir / save_filename,
-                args.text,
-                args.th,
+                output_dir / f"{base_name}_overlay.png",
+                infer_mode=args.infer_mode,
             )
 
             json_save_path = output_dir / img_path.with_suffix(".json").name
-            save_labelme_json(img_path, image_np, masks, args.text, json_save_path)
+            save_labelme_json(
+                img_path,
+                image_np,
+                masks,
+                args.text,
+                json_save_path,
+                infer_mode=args.infer_mode,
+            )
         except Exception as e:
             print(f"  ✗ Error: {e}")
             continue

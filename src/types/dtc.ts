@@ -1,8 +1,10 @@
 export type DtcFetchMode = 'upload' | 'path';
 export type DtcAlgorithm = 'dtc_v1' | 'dtc_v2';
+export type DtcInferMode = 'mask' | 'bbox';
 
 export interface RunDtcFetchRequest {
   algorithm: DtcAlgorithm;
+  infer_mode: DtcInferMode;
   mode: DtcFetchMode;
   prompt: string;
   threshold?: number;
@@ -29,6 +31,7 @@ export interface DtcTaskItem {
   queue_index?: number;
   prompt: string;
   threshold: number;
+  infer_mode?: DtcInferMode;
   input_path: string;
   output_base: string;
   error?: string | null;
@@ -43,8 +46,13 @@ export interface DtcResultItem {
   sourceName: string;
   imageName?: string;
   imagePath?: string;
+  sourcePath?: string;
+  maskPath?: string;
+  overlayPath?: string;
   jsonName?: string;
   jsonPath?: string;
+  shapeCount?: number;
+  processingTimeMs?: number;
   resultJson: Record<string, unknown>;
 }
 

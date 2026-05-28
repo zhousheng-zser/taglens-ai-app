@@ -14,10 +14,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from infer_engine import DEFAULT_MODEL_DIR, engine
 import server_task_service as task_svc
@@ -29,18 +29,21 @@ class CreatePathTaskRequest(BaseModel):
     backendPath: str
     prompt: str
     threshold: float = 0.3
+    infer_mode: str = Field(default="mask", pattern="^(mask|bbox)$")
 
 
 class CreateUploadRunTaskRequest(BaseModel):
     imageSetId: str
     prompt: str
     threshold: float = 0.3
+    infer_mode: str = Field(default="mask", pattern="^(mask|bbox)$")
 
 
 class SegmentPathSyncRequest(BaseModel):
     backendPath: str
     prompt: str
     threshold: float = 0.3
+    infer_mode: str = Field(default="mask", pattern="^(mask|bbox)$")
     output: Optional[str] = None
 
 
@@ -53,7 +56,11 @@ class SegmentImagesJsonRequest(BaseModel):
     images: List[SegmentImageBase64Item]
     prompt: str
     threshold: float = 0.3
-    includeComparison: bool = True
+    inferMode: str = Field(default="mask", pattern="^(mask|bbox)$")
+    includeJsonImageData: bool = True
+    includeMaskImageBase64: bool = True
+    includeOverlayImageBase64: bool = True
+    model_config = ConfigDict(extra="forbid")
 
 
 def _parse_bool_form(value: str, default: bool = True) -> bool:
@@ -122,7 +129,10 @@ app.add_middleware(
 async def health() -> Dict[str, Any]:
     return {
         "success": engine.loaded,
-        "algorithm": "sam3",
+        "algorithm": "sam3",  # backward compatibility
+        "modelKey": "dtc_v1",
+        "modelName": "DTC-Fine-grained",
+        "modelAlias": "DTC-Fine",
         "model_loaded": engine.loaded,
         "load_error": engine.load_error,
         "model_dir": engine._model_dir if engine.loaded else None,
@@ -169,7 +179,7 @@ async def create_upload_run_task(req: CreateUploadRunTaskRequest) -> Dict[str, A
         raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
     try:
         task = task_svc.create_upload_task_from_image_set(
-            req.imageSetId.strip(), req.prompt.strip(), float(req.threshold)
+            req.imageSetId.strip(), req.prompt.strip(), float(req.threshold), req.infer_mode
         )
         return {"success": True, "task": task}
     except ValueError as e:
@@ -185,7 +195,12 @@ async def create_path_task(req: CreatePathTaskRequest) -> Dict[str, Any]:
     if not engine.loaded:
         raise HTTPException(status_code=503, detail=engine.load_error or "模型未就绪")
     try:
-        task = task_svc.create_path_task(req.backendPath.strip(), req.prompt.strip(), float(req.threshold))
+        task = task_svc.create_path_task(
+            req.backendPath.strip(),
+            req.prompt.strip(),
+            float(req.threshold),
+            req.infer_mode,
+        )
         return {"success": True, "task": task}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -193,10 +208,14 @@ async def create_path_task(req: CreatePathTaskRequest) -> Dict[str, Any]:
 
 @app.post("/sam3/segment/images")
 async def segment_images_multipart(
+    request: Request,
     files: List[UploadFile] = File(..., description="一张或多张图片"),
     prompt: str = Form(...),
     threshold: float = Form(0.3),
-    includeComparison: str = Form("true"),
+    inferMode: str = Form("mask"),
+    includeJsonImageData: str = Form("true"),
+    includeMaskImageBase64: str = Form("true"),
+    includeOverlayImageBase64: str = Form("true"),
 ) -> Dict[str, Any]:
     """上传图片直接分割（无需 backendPath）。"""
     if not engine.loaded:
@@ -206,19 +225,49 @@ async def segment_images_multipart(
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     _validate_threshold(threshold)
+    form_data = await request.form()
+    if "includeComparison" in form_data:
+        raise HTTPException(status_code=400, detail="参数 includeComparison 已移除，请使用 includeMaskImageBase64/includeOverlayImageBase64")
     try:
         images = await _images_from_uploads(files)
         summary = engine.run_images(
             images=images,
             prompt=prompt.strip(),
             threshold=float(threshold),
-            include_comparison=_parse_bool_form(includeComparison, True),
+            infer_mode=inferMode,
+            include_json_image_data=_parse_bool_form(includeJsonImageData, True),
+            include_mask_image_base64=_parse_bool_form(includeMaskImageBase64, True),
+            include_overlay_image_base64=_parse_bool_form(includeOverlayImageBase64, True),
         )
         return {"success": True, **summary}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+@app.post("/dtc-fine/segment/images")
+async def segment_images_multipart_fine(
+    request: Request,
+    files: List[UploadFile] = File(..., description="一张或多张图片"),
+    prompt: str = Form(...),
+    threshold: float = Form(0.3),
+    inferMode: str = Form("mask"),
+    includeJsonImageData: str = Form("true"),
+    includeMaskImageBase64: str = Form("true"),
+    includeOverlayImageBase64: str = Form("true"),
+) -> Dict[str, Any]:
+    """DTC-Fine 外部别名接口（与 /sam3/segment/images 行为一致）。"""
+    return await segment_images_multipart(
+        request=request,
+        files=files,
+        prompt=prompt,
+        threshold=threshold,
+        inferMode=inferMode,
+        includeJsonImageData=includeJsonImageData,
+        includeMaskImageBase64=includeMaskImageBase64,
+        includeOverlayImageBase64=includeOverlayImageBase64,
+    )
 
 
 @app.post("/sam3/segment/images/json")
@@ -242,7 +291,10 @@ async def segment_images_json(req: SegmentImagesJsonRequest) -> Dict[str, Any]:
             images=images,
             prompt=req.prompt.strip(),
             threshold=float(req.threshold),
-            include_comparison=req.includeComparison,
+            infer_mode=req.inferMode,
+            include_json_image_data=req.includeJsonImageData,
+            include_mask_image_base64=req.includeMaskImageBase64,
+            include_overlay_image_base64=req.includeOverlayImageBase64,
         )
         return {"success": True, **summary}
     except ValueError as exc:
@@ -267,8 +319,21 @@ async def segment_path_sync(req: SegmentPathSyncRequest) -> Dict[str, Any]:
     date = datetime.now().strftime("%y%m%d")
     output_base = req.output or str(SAM3_ROOT / "output" / date / f"sync_{task_id}")
     try:
-        summary = engine.run_batch(backend, output_base, req.prompt.strip(), float(req.threshold))
-        return {"success": True, "algorithm": "sam3", **summary}
+        summary = engine.run_batch(
+            backend,
+            output_base,
+            req.prompt.strip(),
+            float(req.threshold),
+            infer_mode=req.infer_mode,
+        )
+        return {
+            "success": True,
+            "algorithm": "sam3",
+            "modelKey": "dtc_v1",
+            "modelName": "DTC-Fine-grained",
+            "modelAlias": "DTC-Fine",
+            **summary,
+        }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -310,12 +375,17 @@ async def download_artifact(task_id: str, file_path: str):
     fp = Path(file_path)
     if not fp.exists() or not fp.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    allowed_root = Path(task["output_base"]).resolve()
+    allowed_roots = [Path(task["output_base"]).resolve()]
+    input_path = str(task.get("input_path") or "").strip()
+    if input_path:
+        allowed_roots.append(Path(input_path).resolve())
     try:
-        fp.resolve().relative_to(allowed_root)
+        resolved = fp.resolve()
+        if not any((resolved == root or root in resolved.parents) for root in allowed_roots):
+            raise ValueError("out of allowed roots")
     except Exception:
         raise HTTPException(status_code=400, detail="非法文件路径")
-    return FileResponse(path=str(fp.resolve()), filename=fp.name)
+    return FileResponse(path=str(resolved), filename=fp.name)
 
 
 @app.delete("/sam3/tasks/{task_id}")

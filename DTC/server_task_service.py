@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from infer_engine import (
     DEFAULT_ADAPTER_SCALE,
     DEFAULT_CATEGORY,
+    DEFAULT_INFER_MODE,
     DtcInferEngine,
     _collect_results,
     _date_token,
@@ -63,6 +64,7 @@ def _make_task_record(
     output_base: str,
     category: str = DEFAULT_CATEGORY,
     adapter_scale: float = DEFAULT_ADAPTER_SCALE,
+    infer_mode: str = DEFAULT_INFER_MODE,
 ) -> Dict[str, Any]:
     return {
         "task_id": _task_id(),
@@ -73,6 +75,7 @@ def _make_task_record(
         "threshold": float(threshold),
         "category": category,
         "adapter_scale": float(adapter_scale),
+        "infer_mode": infer_mode if infer_mode in ("mask", "bbox") else DEFAULT_INFER_MODE,
         "input_path": input_path,
         "output_base": output_base,
     }
@@ -113,6 +116,7 @@ def create_upload_task_from_image_set(
     threshold: float,
     category: str = DEFAULT_CATEGORY,
     adapter_scale: float = DEFAULT_ADAPTER_SCALE,
+    infer_mode: str = DEFAULT_INFER_MODE,
 ) -> Dict[str, Any]:
     image_set = storage.get_image_set(image_set_id)
     if not image_set:
@@ -122,7 +126,7 @@ def create_upload_task_from_image_set(
         raise ValueError("图片集目录不存在")
 
     task = _make_task_record(
-        "upload", prompt, threshold, str(input_path), "", category, adapter_scale
+        "upload", prompt, threshold, str(input_path), "", category, adapter_scale, infer_mode
     )
     task["image_set_id"] = image_set_id
     paths = _build_task_paths(task["task_id"], task["date"])
@@ -138,10 +142,11 @@ def create_path_task(
     threshold: float,
     category: str = DEFAULT_CATEGORY,
     adapter_scale: float = DEFAULT_ADAPTER_SCALE,
+    infer_mode: str = DEFAULT_INFER_MODE,
 ) -> Dict[str, Any]:
     if not backend_path or not Path(backend_path).exists():
         raise ValueError("backend_path 不存在")
-    task = _make_task_record("path", prompt, threshold, backend_path, "", category, adapter_scale)
+    task = _make_task_record("path", prompt, threshold, backend_path, "", category, adapter_scale, infer_mode)
     paths = _build_task_paths(task["task_id"], task["date"])
     task["output_base"] = str(paths["output_base"])
     created = storage.create_task(task)

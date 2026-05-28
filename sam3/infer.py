@@ -7,12 +7,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from transformers import Sam3Processor, Sam3Model
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 import cv2
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SAM3 Batch Inference")
@@ -24,6 +23,12 @@ def parse_args():
                         help="Text prompt for segmentation")
     parser.add_argument("--th", type=float, default=0.5, 
                         help="Threshold for mask confidence (default: 0.5)")
+    parser.add_argument(
+        "--infer_mode",
+        choices=["mask", "bbox"],
+        default="mask",
+        help="输出形态：mask 或 bbox（默认 mask）",
+    )
     return parser.parse_args()
 
 def create_overlay(image_np, masks):
@@ -60,62 +65,159 @@ def create_overlay(image_np, masks):
     
     return overlay
 
+
+def _iter_masks(masks):
+    if masks is None:
+        return []
+    if isinstance(masks, np.ndarray) and masks.ndim == 2:
+        return [masks]
+    return list(masks)
+
+
+def _mask_bbox_polygon(mask_bool: np.ndarray) -> list[list[float]]:
+    ys, xs = np.where(mask_bool)
+    if len(xs) == 0:
+        return []
+    x0, x1 = float(xs.min()), float(xs.max())
+    y0, y1 = float(ys.min()), float(ys.max())
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+
+def _iter_bboxes_from_masks(masks) -> list[list[list[float]]]:
+    bboxes: list[list[list[float]]] = []
+    for mask in _iter_masks(masks):
+        mask_bool = mask > 0.5 if getattr(mask, "dtype", None) != bool else mask
+        points = _mask_bbox_polygon(mask_bool)
+        if len(points) == 4:
+            bboxes.append(points)
+    return bboxes
+
+
+def _panel_with_title(panel_rgb: np.ndarray, title: str, footer_h: int = 36) -> np.ndarray:
+    h, w = panel_rgb.shape[:2]
+    canvas = np.ones((h + footer_h, w, 3), dtype=np.uint8) * 255
+    canvas[:h] = panel_rgb
+    img = Image.fromarray(canvas)
+    draw = ImageDraw.Draw(img)
+    draw.text((8, h + 8), title, fill=(0, 0, 0))
+    return np.array(img)
+
 def render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold):
-    """渲染三图对比：原图 | Mask | 叠加图，返回 matplotlib Figure。"""
-    # 合并所有mask为单张二值图（如果有多个instance）
+    """渲染三图对比：原图 | Mask | 叠加图（与 DTC_v2 对齐版式）。"""
     if num_masks > 1:
-        combined_mask = np.any(masks > 0.5, axis=0).astype(np.uint8) * 255
+        stack = [m > 0.5 if getattr(m, "dtype", None) != bool else m for m in _iter_masks(masks)]
+        combined_mask = np.any(np.stack(stack, axis=0), axis=0).astype(np.uint8) * 255
     elif num_masks == 1:
-        combined_mask = (masks[0] > 0.5).astype(np.uint8) * 255
+        m0 = _iter_masks(masks)[0]
+        combined_mask = (m0 > 0.5 if getattr(m0, "dtype", None) != bool else m0).astype(np.uint8) * 255
     else:
         combined_mask = None
-    
-    # 创建叠加图
+
     overlay = create_overlay(image_np, masks)
-    
-    # 创建三图对比
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    # 原图
-    axes[0].imshow(image_np)
-    axes[0].set_title('Original', fontsize=12, fontweight='bold')
-    axes[0].axis('off')
-    
-    # Mask (灰度显示)
+
     if combined_mask is not None:
-        axes[1].imshow(combined_mask, cmap='gray')
-        axes[1].set_title(f'Mask (n={num_masks})', fontsize=12, fontweight='bold')
+        mask_panel = np.stack([combined_mask] * 3, axis=-1)
+        mask_title = f"Mask (n={num_masks})"
     else:
-        axes[1].text(0.5, 0.5, 'No Mask\nDetected', 
-                    ha='center', va='center', fontsize=12, color='red')
-        axes[1].set_title('Mask (n=0)', fontsize=12, fontweight='bold', color='red')
-    axes[1].axis('off')
-    
-    # 叠加图
-    axes[2].imshow(overlay)
-    axes[2].set_title('Segmentation Overlay', fontsize=12, fontweight='bold')
-    axes[2].axis('off')
-    
-    # 添加总标题
-    fig.suptitle(f'Prompt: "{text_prompt}" | Threshold: {threshold} | Masks: {num_masks}', 
-                 fontsize=14, y=0.98)
-    
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    return fig
+        mask_panel = np.full_like(image_np, 255)
+        no_mask_img = Image.fromarray(mask_panel)
+        draw = ImageDraw.Draw(no_mask_img)
+        draw.text((max(10, image_np.shape[1] // 4), image_np.shape[0] // 2), "No Mask", fill=(255, 0, 0))
+        mask_panel = np.array(no_mask_img)
+        mask_title = "Mask (n=0)"
+
+    panels = [
+        _panel_with_title(image_np, "Original"),
+        _panel_with_title(mask_panel, mask_title),
+        _panel_with_title(overlay, "Segmentation Overlay"),
+    ]
+    max_h = max(p.shape[0] for p in panels)
+    aligned = []
+    for p in panels:
+        if p.shape[0] < max_h:
+            pad = np.ones((max_h - p.shape[0], p.shape[1], 3), dtype=np.uint8) * 255
+            p = np.vstack([p, pad])
+        aligned.append(p)
+    comparison = np.hstack(aligned)
+
+    header_h = 40
+    out_h = comparison.shape[0] + header_h
+    out_w = comparison.shape[1]
+    canvas = np.ones((out_h, out_w, 3), dtype=np.uint8) * 255
+    canvas[header_h:] = comparison
+    header_img = Image.fromarray(canvas)
+    draw = ImageDraw.Draw(header_img)
+    header_text = f'Prompt: "{text_prompt}" | Threshold: {threshold} | Masks: {num_masks}'
+    draw.text((12, 10), header_text, fill=(0, 0, 0))
+    return Image.fromarray(np.array(header_img))
 
 
 def save_comparison_figure(image_np, masks, num_masks, save_path, text_prompt, threshold):
-    fig = render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold)
-    fig.savefig(save_path, dpi=150, bbox_inches="tight", pad_inches=0.1)
-    plt.close(fig)
+    render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold).save(save_path)
     print(f"  ✓ Saved: {save_path.name} (detected {num_masks} masks)")
 
 
 def comparison_figure_png_bytes(image_np, masks, num_masks, text_prompt, threshold) -> bytes:
-    fig = render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.1)
-    plt.close(fig)
+    render_comparison_figure(image_np, masks, num_masks, text_prompt, threshold).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_bbox_figure(image_np, masks, text_prompt, threshold):
+    image = Image.fromarray(image_np.astype(np.uint8)).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for points in _iter_bboxes_from_masks(masks):
+        draw.polygon([(p[0], p[1]) for p in points], outline=(255, 0, 0), width=3)
+    return image
+
+
+def save_bbox_figure(image_np, masks, save_path, text_prompt, threshold):
+    render_bbox_figure(image_np, masks, text_prompt, threshold).save(save_path)
+    print(f"  ✓ Saved: {save_path.name} (bbox view)")
+
+
+def bbox_figure_png_bytes(image_np, masks, text_prompt, threshold) -> bytes:
+    buf = io.BytesIO()
+    render_bbox_figure(image_np, masks, text_prompt, threshold).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_mask_figure(image_np, masks):
+    masks_iter = _iter_masks(masks)
+    if masks_iter:
+        stack = [m > 0.5 if getattr(m, "dtype", None) != bool else m for m in masks_iter]
+        merged = np.any(np.stack(stack, axis=0), axis=0).astype(np.uint8) * 255
+    else:
+        merged = np.zeros((image_np.shape[0], image_np.shape[1]), dtype=np.uint8)
+    mask_rgb = np.stack([merged] * 3, axis=-1)
+    return Image.fromarray(mask_rgb)
+
+
+def save_mask_figure(image_np, masks, save_path):
+    render_mask_figure(image_np, masks).save(save_path)
+    print(f"  ✓ Saved: {save_path.name} (mask view)")
+
+
+def mask_figure_png_bytes(image_np, masks) -> bytes:
+    buf = io.BytesIO()
+    render_mask_figure(image_np, masks).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_overlay_figure(image_np, masks, infer_mode: str = "mask"):
+    if infer_mode == "bbox":
+        return render_bbox_figure(image_np, masks, "", 0.0)
+    return Image.fromarray(create_overlay(image_np, masks))
+
+
+def save_overlay_figure(image_np, masks, save_path, infer_mode: str = "mask"):
+    render_overlay_figure(image_np, masks, infer_mode=infer_mode).save(save_path)
+    print(f"  ✓ Saved: {save_path.name} (overlay view)")
+
+
+def overlay_figure_png_bytes(image_np, masks, infer_mode: str = "mask") -> bytes:
+    buf = io.BytesIO()
+    render_overlay_figure(image_np, masks, infer_mode=infer_mode).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -125,21 +227,31 @@ def build_labelme_payload(
     masks,
     text_prompt: str,
     image_bytes: Optional[bytes] = None,
+    infer_mode: str = "mask",
+    include_image_data: bool = True,
+    processing_time_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     if image_bytes is None:
         raise ValueError("image_bytes 不能为空")
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8") if include_image_data else None
     image_height, image_width = int(image_np.shape[0]), int(image_np.shape[1])
-    return {
+    payload = {
         "version": "5.0.5",
         "flags": {},
-        "shapes": masks_to_polygon_shapes(masks, text_prompt),
+        "shapes": (
+            masks_to_rectangle_shapes(masks, text_prompt)
+            if infer_mode == "bbox"
+            else masks_to_polygon_shapes(masks, text_prompt)
+        ),
         "imagePath": image_name,
         "Path": image_name,
         "imageData": image_b64,
         "imageHeight": image_height,
         "imageWidth": image_width,
     }
+    if isinstance(processing_time_ms, int):
+        payload["processingTimeMs"] = processing_time_ms
+    return payload
 
 def get_image_files(input_dir):
     """
@@ -202,10 +314,41 @@ def masks_to_polygon_shapes(masks, label_text: str):
     return shapes
 
 
-def save_labelme_json(image_path: Path, image_np: np.ndarray, masks, text_prompt: str, json_save_path: Path):
+def masks_to_rectangle_shapes(masks, label_text: str):
+    shapes = []
+    for points in _iter_bboxes_from_masks(masks):
+        shapes.append({
+            "label": label_text,
+            "points": points,
+            "group_id": None,
+            "shape_type": "rectangle",
+            "flags": {},
+        })
+    return shapes
+
+
+def save_labelme_json(
+    image_path: Path,
+    image_np: np.ndarray,
+    masks,
+    text_prompt: str,
+    json_save_path: Path,
+    infer_mode: str = "mask",
+    include_image_data: bool = True,
+    processing_time_ms: Optional[int] = None,
+):
     with open(image_path, "rb") as f:
         image_bytes = f.read()
-    payload = build_labelme_payload(image_path.name, image_np, masks, text_prompt, image_bytes)
+    payload = build_labelme_payload(
+        image_path.name,
+        image_np,
+        masks,
+        text_prompt,
+        image_bytes,
+        infer_mode=infer_mode,
+        include_image_data=include_image_data,
+        processing_time_ms=processing_time_ms,
+    )
     payload["Path"] = str(image_path.resolve())
     with open(json_save_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -288,15 +431,25 @@ def main():
                 masks = masks.cpu().numpy()
             num_masks = len(masks)
             
-            save_filename = f"{base_name}_comparison.png"
-            save_path = Path(output_dir) / save_filename
-            
-            # 保存三图对比
-            save_comparison_figure(image_np, masks, num_masks, save_path, args.text, args.th)
+            if args.infer_mode == "mask":
+                save_mask_figure(image_np, masks, Path(output_dir) / f"{base_name}_mask.png")
+            save_overlay_figure(
+                image_np,
+                masks,
+                Path(output_dir) / f"{base_name}_overlay.png",
+                infer_mode=args.infer_mode,
+            )
 
             # 保存 LabelMe JSON（原图同名，后缀改为 .json）
             json_save_path = Path(output_dir) / img_path.with_suffix(".json").name
-            save_labelme_json(img_path, image_np, masks, args.text, json_save_path)
+            save_labelme_json(
+                img_path,
+                image_np,
+                masks,
+                args.text,
+                json_save_path,
+                infer_mode=args.infer_mode,
+            )
             
         except Exception as e:
             print(f"  ✗ Error: {str(e)}")
