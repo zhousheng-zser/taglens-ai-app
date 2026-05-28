@@ -1,0 +1,22 @@
+[Unit]
+Description=TagLens 统一 LLM 网关（千问/Gemini/Codex/MiMo）
+Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
+ExecStart=/bin/bash /opt/Traffic-LLM/zser/taglens-ai-app/start_llm_gateway.sh
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taglens-llm-gateway
+
+[Install]
+WantedBy=taglens.target

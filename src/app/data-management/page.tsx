@@ -43,6 +43,43 @@ function managementApiUrl(path: string): string {
     return `/api/backend/${normalized}`;
 }
 
+function isStreamDisconnectError(message: string): boolean {
+    const msg = (message || '').toLowerCase();
+    return (
+        msg.includes('network error')
+        || msg.includes('failed to fetch')
+        || msg.includes('load failed')
+        || msg.includes('networkerror')
+        || msg.includes('aborted')
+    );
+}
+
+function logStreamEndpointForTaskUrl(taskUrl: string): string | null {
+    if (taskUrl.includes('event-video-segment')) {
+        return managementApiUrl('/api/management/event-video-segment/log-stream?from_start=true');
+    }
+    if (taskUrl.includes('event-segment-desc-fill')) {
+        return managementApiUrl('/api/management/event-segment-desc-fill/log-stream?from_start=true');
+    }
+    if (taskUrl.includes('reextract-tags')) {
+        return managementApiUrl('/api/management/reextract-tags/log-stream?from_start=true');
+    }
+    return null;
+}
+
+function statusEndpointForTaskUrl(taskUrl: string): string | null {
+    if (taskUrl.includes('event-video-segment')) {
+        return managementApiUrl('/api/management/event-video-segment/status');
+    }
+    if (taskUrl.includes('event-segment-desc-fill')) {
+        return managementApiUrl('/api/management/event-segment-desc-fill/status');
+    }
+    if (taskUrl.includes('reextract-tags')) {
+        return managementApiUrl('/api/management/reextract-tags/status');
+    }
+    return null;
+}
+
 function DataManagementContent() {
     const { toast } = useToast();
 
@@ -65,6 +102,7 @@ function DataManagementContent() {
     const [isTaskDone, setIsTaskDone] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [isReextractRunning, setIsReextractRunning] = useState(false);
+    const [isEventVideoSegmentRunning, setIsEventVideoSegmentRunning] = useState(false);
     const [isSegmentDescFillRunning, setIsSegmentDescFillRunning] = useState(false);
     const logEndRef = useRef<HTMLDivElement>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -144,6 +182,38 @@ function DataManagementContent() {
         } catch (error: any) {
             if (error?.name === 'AbortError') {
                 addLog('任务已被用户手动结束。', 'warning');
+            } else if (isStreamDisconnectError(error?.message || '')) {
+                addLog(
+                    `浏览器日志连接已断开（${error.message}）。这通常不是 RLQ 重试失败；后台任务可能仍在运行。`,
+                    'warning',
+                );
+                const statusUrl = statusEndpointForTaskUrl(url);
+                const logStreamUrl = logStreamEndpointForTaskUrl(url);
+                if (statusUrl && logStreamUrl) {
+                    try {
+                        const res = await fetch(statusUrl);
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data.running) {
+                                addLog('检测到后台任务仍在运行，正在重新连接日志…', 'info');
+                                await attachLogStream(
+                                    logStreamUrl,
+                                    `${taskName} (重连)`,
+                                    undefined,
+                                    { clearLogs: false },
+                                );
+                                return;
+                            }
+                        }
+                    } catch {
+                        // fall through
+                    }
+                }
+                addLog(
+                    '后台任务已结束或未检测到运行中；完整记录见 data/event_video_segment.log、'
+                    + 'data/segment_desc_fill.log 或 data/reextract_missing_tags_gemini.log',
+                    'info',
+                );
             } else {
                 addLog(`Execution Error: ${error.message}`, 'error');
             }
@@ -158,11 +228,14 @@ function DataManagementContent() {
         endpoint: string,
         taskName: string,
         onDone?: () => void,
+        options?: { clearLogs?: boolean },
     ) => {
         setShowLogModal(true);
         setCurrentTaskName(taskName);
-        setLogs([]);
-        addLog('Re-attaching to 任务日志流...', 'system');
+        if (options?.clearLogs !== false) {
+            setLogs([]);
+            addLog('正在连接任务日志（将回放已有日志并继续跟踪）...', 'system');
+        }
         setIsTaskDone(false);
         setIsProcessing(true);
 
@@ -211,6 +284,24 @@ function DataManagementContent() {
         } catch (error: any) {
             if (error?.name === 'AbortError') {
                 addLog('日志查看已被用户中断。', 'warning');
+            } else if (isStreamDisconnectError(error?.message || '')) {
+                addLog(`日志连接断开（${error.message}），后台任务可能仍在运行。`, 'warning');
+                const statusUrl = statusEndpointForTaskUrl(endpoint);
+                if (statusUrl) {
+                    try {
+                        const res = await fetch(statusUrl);
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data.running) {
+                                addLog('正在再次尝试连接日志…', 'info');
+                                await attachLogStream(endpoint, taskName, onDone, { clearLogs: false });
+                                return;
+                            }
+                        }
+                    } catch {
+                        // fall through
+                    }
+                }
             } else {
                 addLog(`Execution Error: ${error.message}`, 'error');
             }
@@ -238,10 +329,46 @@ function DataManagementContent() {
         );
     };
 
+    const openEventVideoSegmentLogStream = async () => {
+        await attachLogStream(
+            managementApiUrl('/api/management/event-video-segment/log-stream'),
+            '事件视频分块 (进行中)',
+            () => setIsEventVideoSegmentRunning(false),
+        );
+    };
+
     const handleStopTask = () => {
-        if (abortControllerRef.current) {
-            abortControllerRef.current.abort();
-        }
+        const stopBackend = async () => {
+            try {
+                if (currentTaskName.includes('缺失标签补齐')) {
+                    await fetch(managementApiUrl('/api/management/reextract-tags/stop'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                    });
+                } else if (currentTaskName.includes('事件分段描述补齐')) {
+                    await fetch(managementApiUrl('/api/management/event-segment-desc-fill/stop'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                    });
+                } else if (currentTaskName.includes('事件视频分块')) {
+                    await fetch(managementApiUrl('/api/management/event-video-segment/stop'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                    });
+                }
+            } catch {
+                // ignore
+            }
+        };
+
+        void stopBackend().finally(() => {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+            }
+        });
     };
 
     const reextractModelLabels: Record<'gemini' | 'qwen' | 'codex' | 'mimo', string> = {
@@ -300,6 +427,31 @@ function DataManagementContent() {
         });
     };
 
+    const startEventVideoSegmentTask = () => {
+        const limit = parseInt(segmentLimit || '10', 10) || 10;
+        setIsEventVideoSegmentRunning(true);
+        runStreamTask(
+            '/api/management/event-video-segment',
+            {
+                limit,
+                eventTypeCodes: selectedSegmentEventTypes,
+            },
+            '事件视频分块',
+        ).finally(() => {
+            void (async () => {
+                try {
+                    const res = await fetch(managementApiUrl('/api/management/event-video-segment/status'));
+                    if (res.ok) {
+                        const data = await res.json();
+                        setIsEventVideoSegmentRunning(!!data.running);
+                    }
+                } catch {
+                    setIsEventVideoSegmentRunning(false);
+                }
+            })();
+        });
+    };
+
     // 页面加载时探测后台任务是否在运行
     useEffect(() => {
         const checkBackgroundTaskStatus = async () => {
@@ -308,6 +460,15 @@ function DataManagementContent() {
                 if (reextractRes.ok) {
                     const data = await reextractRes.json();
                     setIsReextractRunning(!!data.running);
+                }
+            } catch {
+                // ignore
+            }
+            try {
+                const segmentRes = await fetch(managementApiUrl('/api/management/event-video-segment/status'));
+                if (segmentRes.ok) {
+                    const data = await segmentRes.json();
+                    setIsEventVideoSegmentRunning(!!data.running);
                 }
             } catch {
                 // ignore
@@ -767,21 +928,24 @@ function DataManagementContent() {
                                         </DropdownMenuContent>
                                     </DropdownMenu>
                                 </div>
-                                <Button
-                                    className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-amber-100 hover:text-white border border-white/5 rounded-lg font-medium"
-                                    disabled={!segmentLimit.trim() || (isProcessing && showLogModal)}
-                                    onClick={() => runStreamTask(
-                                        '/api/management/event-video-segment',
-                                        {
-                                            limit: parseInt(segmentLimit || '10', 10) || 10,
-                                            eventTypeCodes: selectedSegmentEventTypes,
-                                        },
-                                        '事件视频分块'
-                                    )}
-                                >
-                                    <Scissors className="h-4 w-4 mr-2" />
-                                    开始分块
-                                </Button>
+                                {isEventVideoSegmentRunning ? (
+                                    <Button
+                                        className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-amber-100 hover:text-white border border-amber-500/40 rounded-lg font-medium flex items-center justify-center gap-2"
+                                        onClick={openEventVideoSegmentLogStream}
+                                    >
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        正在分块中，点击查看进度
+                                    </Button>
+                                ) : (
+                                    <Button
+                                        className="w-full h-10 text-sm bg-slate-800 hover:bg-slate-700 text-amber-100 hover:text-white border border-white/5 rounded-lg font-medium"
+                                        disabled={!segmentLimit.trim() || (isProcessing && showLogModal)}
+                                        onClick={startEventVideoSegmentTask}
+                                    >
+                                        <Scissors className="h-4 w-4 mr-2" />
+                                        开始分块
+                                    </Button>
+                                )}
                             </div>
                         </div>
                     </div>

@@ -6,6 +6,7 @@ if [[ "${ROOT}" != "/opt/Traffic-LLM/zser/taglens-ai-app" ]]; then
 fi
 sudo install -m 644 "${ROOT}/deploy/systemd/taglens-backend.service" /etc/systemd/system/
 sudo install -m 644 "${ROOT}/deploy/systemd/taglens-frontend.service" /etc/systemd/system/
+sudo install -m 644 "${ROOT}/deploy/systemd/taglens-llm-gateway.service" /etc/systemd/system/
 sudo install -m 644 "${ROOT}/deploy/systemd/taglens-dtc-v1.service" /etc/systemd/system/
 sudo install -m 644 "${ROOT}/deploy/systemd/taglens-dtc-v2.service" /etc/systemd/system/
 sudo install -m 644 "${ROOT}/deploy/systemd/taglens.target" /etc/systemd/system/
@@ -15,4 +16,4 @@ echo "  sudo systemctl enable --now taglens.target"
 echo "停止全部:"
 echo "  sudo systemctl stop taglens.target"
 echo "查看状态:"
-echo "  systemctl status taglens.target taglens-backend.service taglens-frontend.service taglens-dtc-v1.service taglens-dtc-v2.service"
+echo "  systemctl status taglens.target taglens-backend.service taglens-frontend.service taglens-llm-gateway.service taglens-dtc-v1.service taglens-dtc-v2.service"

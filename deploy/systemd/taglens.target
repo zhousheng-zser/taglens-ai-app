@@ -2,8 +2,8 @@
 Description=TagLens AI 前后端与分割服务 (DTC_v1 / DTC_v2)
 Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
 After=network-online.target
-Requires=taglens-backend.service taglens-frontend.service taglens-dtc-v1.service taglens-dtc-v2.service
+Requires=taglens-backend.service taglens-frontend.service taglens-llm-gateway.service taglens-dtc-v1.service taglens-dtc-v2.service
 
 [Install]
 WantedBy=multi-user.target
-Also=taglens-backend.service taglens-frontend.service taglens-dtc-v1.service taglens-dtc-v2.service
+Also=taglens-backend.service taglens-frontend.service taglens-llm-gateway.service taglens-dtc-v1.service taglens-dtc-v2.service

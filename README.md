@@ -87,15 +87,16 @@
 | SQLite | 文件 | 三张库：图片标签、事件记录、用户与审核 |
 | MinIO | 服务 | 存事件视频、叠框图、导入图片等大文件 |
 | 分割服务 | 8010 / 8011 | GPU 推理，仅「DTC 数据获取」页使用 |
-| 外部 AI | HTTPS | 图片打标、事件分段描述等，由后端代发请求 |
+| LLM 网关 | 8020 | 千问/Gemini/Codex/MiMo 统一视觉推理（独立进程） |
+| 外部 AI | HTTPS | 事件分段 RLQ 等，仍由主后端直连 |
 
 ### 三条主要业务线
 
 **A. 图片标签与搜索**
 
 1. 用户在「图片标签 / 标签搜索」页操作  
-2. 前端 → `/api/backend/analyze`、`/search` 等 → 主后端  
-3. 后端调 **Qwen / Gemini / MiMo**，结果写入 **taglens.db**，关键词向量进 **Faiss**  
+2. 前端 → `/api/backend/llm/infer`、`/search` 等 → 主后端  
+3. 前端 → 主后端 `POST /llm/infer`（代理）→ **8020 LLM 网关** → 外部模型；结果写入 **taglens.db**，向量进 **Faiss**  
 4. 图片文件在 **MinIO** 或本地 `data/local/img`
 
 **B. 事件查询与审核**
@@ -169,8 +170,10 @@ taglens-ai-app/
 │   │   ├── auth_api.py
 │   │   ├── event_api.py
 │   │   ├── management_api.py
+│   │   ├── llm_proxy_api.py      # 主后端代理 /llm/* → 8020
+│   ├── llm_gateway_server.py     # 独立 LLM 网关进程（8020）
 │   │   └── dtc_api.py
-│   ├── services/                 # Faiss、事件分段 AI、视频切分等
+│   ├── services/                 # Faiss、LLM 网关、事件分段 AI、视频切分等
 │   ├── prompts/                  # 事件分段 RLQ Prompt
 │   └── venv/
 ├── data/
@@ -307,7 +310,7 @@ python scripts/import_event_tree_to_db.py \
 | 页面路径 | 功能 |
 |----------|------|
 | `/` | 产品首页，入口导航 |
-| `/image-tagger` | 上传单张图片，调用后端 `/analyze` 生成关键词与描述，可保存入库 |
+| `/image-tagger` | 上传单张图片，调用统一接口 `POST /llm/infer` 生成关键词与描述，可保存入库 |
 | `/search` | 基于文本的 **语义标签搜索**（BGE + Faiss），支持相似图检索 |
 | `/tag-query` | 按 UUID、路径、标签等条件查询已入库图片 |
 | `/event-query` | **事件数据查询**（需登录）：多维筛选、表格/卡片视图、视频与分段预览、叠框图、审核状态勾选、分段描述编辑、**单段 AI 智能描述** |
@@ -372,7 +375,7 @@ python scripts/import_event_tree_to_db.py \
 | POST | `/api/management/event-segment-desc-fill` | 启动分段描述批量补齐（后台任务） |
 | GET | `/api/management/event-segment-desc-fill/status` | 任务是否在跑 |
 | GET | `/api/management/event-segment-desc-fill/log-stream` | 日志 NDJSON 流 |
-| POST | `/api/management/reextract-tags` | 启动 Gemini 补标签脚本 |
+| POST | `/api/management/reextract-tags` | 启动缺失标签补齐（统一 LLM 网关，可选四模型） |
 | GET | `/api/management/reextract-tags/status` | 补标签进程状态 |
 | GET | `/api/management/reextract-tags/log-stream` | 补标签日志流 |
 
@@ -390,7 +393,8 @@ python scripts/import_event_tree_to_db.py \
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/analyze` | 单图 AI 分析 |
+| POST | `/llm/infer` | 统一视觉分析（`provider`: qwen/gemini/codex/mimo） |
+| GET | `/llm/providers` | 支持的模型列表 |
 | POST | `/save-image` | 入库 |
 | POST | `/search` | 语义搜索 |
 | GET | `/images` | 列表 |

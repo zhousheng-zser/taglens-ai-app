@@ -68,6 +68,11 @@ from routers import management_api
 from routers import dtc_api
 from routers import event_api
 from routers import auth_api
+from routers import llm_proxy_api
+from schemas.llm_schemas import SemanticSearch, TrafficAnalysisOutput, TrainingData
+from services.llm_gateway_client import LLM_GATEWAY_URL, check_gateway_health, infer_traffic_image
+from services.llm_prompts import PROMPT_PART_1, PROMPT_PART_2_TEMPLATE, PROMPT_PART_3, build_default_analysis_prompt
+from services.text_embedding_service import encode_text_to_vector, get_bge_model
 from services.business_structure_manager import get_business_manager_for_project
 
 # 加载环境变量
@@ -87,170 +92,6 @@ def clean_numpy(data):
         return clean_numpy(data.tolist())
     return data
 
-# --- BGE 向量化模型初始化 ---
-BGE_MODEL_NAME = "BAAI/bge-base-zh-v1.5"
-BGE_MODEL_CACHE_DIR = Path(__file__).parent / "model"  # 模型存放路径: ./backend/model
-_bge_tokenizer = None
-_bge_model = None
-_bge_device = None  # 存储模型使用的设备
-
-def get_bge_model():
-    """获取BGE模型（懒加载，优先使用本地缓存）"""
-    global _bge_tokenizer, _bge_model, _bge_device
-    if _bge_tokenizer is None or _bge_model is None:
-        import time
-        load_start = time.time()
-        
-        # 确保模型目录存在
-        BGE_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        
-        # 临时清除代理环境变量，确保BGE模型加载时不使用代理
-        # transformers库会自动读取环境变量中的代理设置
-        original_http_proxy = os.environ.pop('HTTP_PROXY', None)
-        original_https_proxy = os.environ.pop('HTTPS_PROXY', None)
-        original_http_proxy_lower = os.environ.pop('http_proxy', None)
-        original_https_proxy_lower = os.environ.pop('https_proxy', None)
-        
-        try:
-            print("正在加载BGE向量化模型...")
-            print(f"  模型名称: {BGE_MODEL_NAME}")
-            print(f"  模型存放路径: {BGE_MODEL_CACHE_DIR}")
-            
-            # 检查模型是否已存在于本地缓存
-            # transformers库的缓存路径格式: cache_dir/models--ORG--MODEL_NAME/snapshots/HASH/
-            model_exists = False
-            try:
-                import glob
-                # 检查是否存在模型快照目录
-                cache_pattern = str(BGE_MODEL_CACHE_DIR / "models--*" / "snapshots" / "*")
-                cache_dirs = glob.glob(cache_pattern)
-                if cache_dirs:
-                    # 进一步检查关键文件是否存在
-                    snapshot_dir = cache_dirs[0]
-                    required_files = ['config.json', 'tokenizer_config.json']
-                    if all((Path(snapshot_dir) / f).exists() for f in required_files):
-                        model_exists = True
-                        print(f"  检测到本地模型缓存，将使用离线模式（不访问网络）")
-                    else:
-                        print(f"  警告: 模型目录存在但文件不完整，可能需要重新下载")
-                else:
-                    print(f"  未检测到本地模型缓存，将尝试从网络下载")
-            except Exception as e:
-                print(f"  检查模型缓存时出错: {e}")
-                # 如果检查出错，假设模型不存在，尝试在线加载
-            
-            # 如果模型已存在，使用local_files_only=True强制离线模式
-            # 如果模型不存在，会尝试下载（但此时网络可能不可用）
-            try:
-                _bge_tokenizer = AutoTokenizer.from_pretrained(
-                    BGE_MODEL_NAME,
-                    cache_dir=str(BGE_MODEL_CACHE_DIR),
-                    local_files_only=model_exists  # 如果模型存在，强制离线模式
-                )
-                _bge_model = AutoModel.from_pretrained(
-                    BGE_MODEL_NAME,
-                    cache_dir=str(BGE_MODEL_CACHE_DIR),
-                    local_files_only=model_exists  # 如果模型存在，强制离线模式
-                )
-                
-                # 自动检测并使用GPU（如果可用）
-                if torch.cuda.is_available():
-                    _bge_device = torch.device("cuda")
-                    _bge_model = _bge_model.to(_bge_device)
-                    print(f"  检测到GPU: {torch.cuda.get_device_name(0)}，将使用GPU加速")
-                else:
-                    _bge_device = torch.device("cpu")
-                    print(f"  未检测到GPU，将使用CPU")
-                
-                _bge_model.eval()  # 设置为评估模式
-                
-                load_time = time.time() - load_start
-                mode_str = "离线模式" if model_exists else "在线模式"
-                device_str = "GPU" if _bge_device.type == "cuda" else "CPU"
-                print(f"✓ BGE向量化模型加载完成（{mode_str},{device_str}）,耗时 {load_time:.2f}秒")
-            except Exception as e:
-                if "not found" in str(e).lower() or "local_files_only" in str(e).lower():
-                    print(f"  错误: 本地模型文件不存在,需要从网络下载")
-                    print(f"  如果网络不可用,请先下载模型到: {BGE_MODEL_CACHE_DIR}")
-                    raise
-                else:
-                    raise
-        finally:
-            # 恢复代理环境变量
-            if original_http_proxy:
-                os.environ['HTTP_PROXY'] = original_http_proxy
-            if original_https_proxy:
-                os.environ['HTTPS_PROXY'] = original_https_proxy
-            if original_http_proxy_lower:
-                os.environ['http_proxy'] = original_http_proxy_lower
-            if original_https_proxy_lower:
-                os.environ['https_proxy'] = original_https_proxy_lower
-    return _bge_tokenizer, _bge_model, _bge_device
-
-def encode_text_to_vector(text: str) -> bytes:
-    """
-    使用BGE模型将文本编码为768维向量
-    
-    参数:
-        text: 要编码的文本
-    
-    返回:
-        bytes: 768维float32向量的二进制表示
-    """
-    tokenizer, model, device = get_bge_model()
-    
-    # 对文本进行编码
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-    
-    # 将输入移动到模型所在的设备（GPU或CPU）
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    # 生成向量
-    with torch.no_grad():
-        output = model(**inputs)
-        embedding = output.last_hidden_state[:, 0]  # 使用CLS token
-        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)  # L2归一化
-    
-    # 转换为numpy数组并确保是float32（需要先移到CPU）
-    embedding_np = embedding.cpu().numpy().astype(np.float32)
-    
-    # 转换为bytes
-    return embedding_np.tobytes()
-
-# --- 模型和API定义 ---
-# 从环境变量读取模型配置,如果没有则使用默认值
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-vl-max")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-TEXT_MODEL = os.getenv("QWEN_TEXT_MODEL", "qwen-plus")  # 用于文本模型测试
-# 北京地域的兼容Endpoint
-BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5")
-MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
-
-
-def _resolve_mimo_endpoint(api_key: str) -> tuple[str, str, str]:
-    """返回 (api_key, base_url, model)。"""
-    mimo_key = (api_key or os.getenv("MIMO_API_KEY") or "").strip()
-    if not mimo_key:
-        raise HTTPException(status_code=500, detail="未配置 MIMO_API_KEY")
-    return mimo_key, MIMO_BASE_URL, MIMO_MODEL
-
-# --- Pydantic 模型定义 ---
-class ImageAnalysisRequest(BaseModel):
-    image: str # Base64 data URI
-    model: str = "qwen"  # 可选值: "qwen", "gemini", "codex", "mimo"
-
-class SemanticSearch(BaseModel):
-    description: str
-    keywords: list[str]
-
-class TrainingData(BaseModel):
-    qwen_captions: Dict[str, Any] | List[str]
-    yolo_objects: list[str]
-
-class TrafficAnalysisOutput(BaseModel):
-    semantic_search: SemanticSearch
-    training_data: TrainingData
 
 class SaveImageRequest(BaseModel):
     image: str  # Base64 data URI
@@ -454,6 +295,7 @@ app.include_router(management_api.router)
 app.include_router(dtc_api.router)
 app.include_router(event_api.router)
 app.include_router(auth_api.router)
+app.include_router(llm_proxy_api.router)
 
 # --- 批量导入相关常量与工具 ---
 BULK_IMPORT_DEFAULT_DIR = Path(__file__).parent.parent / "data" / "local" / "img"
@@ -569,8 +411,11 @@ def process_file_for_bulk_import(job_id: int, file_path: Path, threshold: float,
             
             # 使用concurrent.futures实现超时控制
             
+            bulk_prompt = build_default_analysis_prompt()
             with ThreadPoolExecutor(max_workers=1) as api_executor:
-                future = api_executor.submit(call_qwen_vision_api, qwen_key, data_uri)
+                future = api_executor.submit(
+                    lambda: infer_traffic_image("qwen", data_uri, bulk_prompt, allow_mock=True)[0]
+                )
                 try:
                     analysis_result = future.result(timeout=180.0)  # 3分钟超时
                 except FutureTimeoutError:
@@ -743,571 +588,13 @@ def run_bulk_import_job(job_id: int, directory: Path, threshold: float):
         traceback.print_exc()
         update_bulk_import_job_status(job_id, "error", last_error=str(e))
 
-# --- 提示词 ---
-PROMPT_PART_1 = """你是一个交通视频AI分析专家。请仔细分析用户提供的图片，并严格按照我要求的JSON格式输出分析结果。JSON对象必须包含 semantic_search 和 training_data 两个键。"""
-
-PROMPT_PART_2_TEMPLATE = """
-**[关键] 重要提示** 以下信息为系统已知条件，作为图像理解的上下文背景使用，必须在分析中自然融合，但不得质疑或重新判断其正确性
-	- 图片来源 :由{camera_name}相机拍摄
-	- 相机业态目录结构 :{camera_structure}
-"""
-
-PROMPT_PART_3 = """
-**重要说明:**
-- semantic_search.description：生成一段**高密度、连贯、包含所有细节**的自然语言描述,用于标签提取和语义搜索，要求**客观、正面、具体**地描述图像中存在的所有视觉元素，**避免使用否定性表述**。
-    **description写作要点：**
-    - **[关键] 车道信息**: 必须明确描述道路结构（如"双向六车道"、"单向三车道+应急车道"）。
-    - **[关键] 综合方向**: 结合OSD信息（如"上行/下行"）和视觉特征（如"由近及远"）进行综合描述。
-    - 必须自然地融合以下信息：时间(从OSD读取)、地点(路名/桩号)、天气(雨/晴/阴)、光线、路面状态(潮湿/积水)、交通流量。
-    - 必须详细描述基础设施：高架桥、声屏障、防眩板(颜色)、龙门架、路面文字标记(OCR内容)。
-    - 必须包含OCR信息：将读取到的OSD信息和路面/路牌文字自然地写入句子中。
-    - **[关键] 车辆位置**: 描述车辆时，必须精确指出其所在车道（如"在最左侧超车道"、"在中间行车道"、"在应急车道停靠"）。
-    - 目的：这段话将被向量化，用于检索任何细节（如搜"占用应急车道"或"双向八车道"）。
-    - 只描述**实际存在**的物体、环境、状态。
-    - 避免"没有"、"无"、"不存在"等否定表述,如果画面中没有某些元素，应省略不提，而不是说"没有"或"无"。例如，如果没有人，就不要提及"人"或"无人"。
-    - 禁止用"和"、"与"、"以及"、"并"、"还有"这样的连接词表述, 每句话只包含一个视觉元素,例如"左侧墙体设有检修口和金属栏杆，右侧墙面上方可见通风设备与照明设施。"
-    - 保持客观、准确、详尽。
-
-- semantic_search.keywords: 从description中提取10-15个核心标签词汇。
-
-- qwen_captions: 用于Qwen等多模态大模型微调,从图中分析得到, 包含以下内容。
-		"道路结构": {
-			"道路类型": "高架、地面道路、桥梁、隧道、匝道、立交桥、环岛、地下通道",
-			"车道信息": "主路、辅路、车道数量、是否有应急车道、非机动车道、人行道、潮汐车道",
-			"道路构造": "分隔带、中央隔离带、绿化带、护栏、路肩、车道分界线",
-			"特殊构造": "桥梁段、隧道口、桥下通道、桥墩、涵洞"
-		},
-		"交通设施": {
-			"标志标牌": "路牌、出口指示牌、限速牌、距离提示牌、导向标志、限高架、限宽架",
-			"控制设备": "红绿灯、电子显示屏、诱导屏、可变限速标志",
-			"安全设施": "龙门架、防撞桶、声屏障、防眩板、钢/水泥护栏",
-			"标线标识": "导流线、导向箭头、斑马线、人行横道、自行车道标识"
-		},
-		"环境信息": {
-			"视角": "正视、俯视、斜视、后视、制高点、全景",
-			"图像质量": "清晰、模糊、压缩严重、偏暗、反光强烈"
-		},
-		"特殊场所": {
-			"场景设施": "收费站、隧道口、服务区、停车区、上下客区",
-			"区域结构": "立交桥、桥段、桥下空间、上下匝道、合流/分流段",
-			"特殊用途区域": "公交专用道、潮汐车道、调头区、紧急停车带",
-		"图像文字信息": {
-			"包括": "路牌、标线文字、地面字样、限速信息、摄像头水印、电子屏内容、广告标语等"
-		}
-    - 避免"没有"、"无"、"不存在"等否定表述,如果画面中没有某些元素，应省略不提，而不是说"没有"或"无"。例如，如果没有人，就不要提及"人"或"无人"。
-    - **[必须] qwen_captions**: 宁缺毋滥，没有就不要写!!
-
-- yolo_objects:生成结构化的目标清单，格式为 "颜色-物体-状态/位置"。
-     - **位置必须精确**: 使用 "第一车道/超车道"、"中间车道"、"应急车道" 等精确描述。
-     - 例如: "黑色-轿车-中间行车道(背对镜头)", "黄色-工程车-应急车道(正对镜头)", "绿色-防眩板-中央隔离带"。
-
-**输出格式示例 (严格遵循此JSON结构):**
-```json
-
-{
-    "semantic_search": {
-        "description": "这是一张2025年12月24日09:03拍摄的城市高架桥监控画面。天气为阴天，光线均匀，河面平静，两岸可见高层住宅与商业建筑群。道路为双向四车道，车流方向由近及远，左侧车道车流背对镜头驶离，右侧车道车流正对镜头驶来。桥体结构为混凝土梁式桥，桥面两侧设有金属护栏与绿化带。桥下河道宽约二十米，水面呈灰绿色，两岸有步道与行道树。左上角OSD信息显示地点为‘长宁桥云台’，日期为周二，时间09:03。桥面上有多辆汽车行驶，包括一辆黑色轿车在右侧车道、一辆黄色轿车在中间车道、一辆深色轿车在最右侧车道。桥体上方未见龙门架或声屏障，路面无文字标记或防眩板。远处背景为密集的城市高层建筑群，部分楼体外立面为玻璃幕墙。",
-        "keywords": [
-            "阴天",
-            "长宁桥云台",
-            "双向四车道",
-            "混凝土高架桥",
-            "河面平静",
-            "高层建筑群",
-            "金属护栏",
-            "绿化带",
-            "09:03",
-            "黑色轿车",
-            "黄色轿车",
-            "深色轿车",
-            "城市桥梁",
-            "步道行道树",
-            "玻璃幕墙"
-        ]
-    },
-    "training_data": {
-        "yolo_objects": [
-            "黑色-轿车-右侧车道",
-            "黄色-轿车-中间车道",
-            "深色-轿车-最右侧车道",
-            "混凝土-高架桥-主体结构",
-            "金属-护栏-桥两侧",
-            "绿化带-桥面边缘",
-            "河水-桥下-灰绿色",
-            "高层建筑-背景-密集分布",
-            "行道树-河岸-沿岸排列"
-        ],
-        "qwen_captions": {
-            "道路结构": {
-                "道路类型": "地下通道",
-                "车道信息": "单向双车道、应急车道、非机动车道、潮汐车道",
-                "道路构造": "两侧设有水泥护栏、中央有隔离带、路面为红色沥青材质",
-                "特殊构造": "隧道段、墙体为白色面板配蓝色装饰带"
-            },
-            "交通设施": {
-                "标志标牌": "可见路牌、出口指示牌",
-                "控制设备": "红绿灯、电子显示屏、可变限速标志",
-                "安全设施": "两侧水泥护栏、防撞桶、声屏障、防眩板",
-                "标线标识": "导流线、导向箭头、斑马线、人行横道、自行车道标识"
-            },
-            "环境信息": {
-                "视角": "俯视角度拍摄、镜头位于通道上方制高点",
-                "图像质量": "清晰、有压缩痕迹、光线均匀、有反光现象、有偏暗现象",
-                "天气与路面": "室内环境、自然光照、路面干燥、有雨雪痕迹"
-            },
-            "特殊场所": {
-                "场景设施": "收费站、服务区、上下客区",
-                "区域结构": "通道呈缓弯曲线延伸、合流/分流段",
-                "特殊用途区域": "公交专用道、调头区、紧急停车带"
-            },
-            "图像文字信息": {
-                "OSD时间": "2025-12-24 09:46:03",
-                "OSD地点": "诸光路地道上层云台014",
-                "路面文字": "60、80、内环高架路,中山南一路"
-            }
-        }
-    }
-}
-"""
-
-def get_qwen_client(api_key: str):
-    """获取通义千问OpenAI兼容客户端"""
-    return OpenAI(
-        api_key=api_key, 
-        base_url=BASE_URL,
-        timeout=60.0  # 设置60秒超时
-    )
-
-# --- Qwen API 调用 ---
-def call_qwen_vision_api(api_key: str, data_uri: str, prompt: str):
-    """调用通义千问视觉模型进行图片分析"""
-    client = get_qwen_client(api_key)
-    try:
-        completion = client.chat.completions.create(
-            model=QWEN_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                    ],
-                }
-            ],
-            top_p=0.8
-        )
-        content_text = completion.choices[0].message.content
-        # 将 Qwen 原始响应写入日志文件，便于排查
-        try:
-            log_path = Path(__file__).parent.parent / "B_qwen_response.txt"
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n{'='*40}\nQwen response at {datetime.now().isoformat()}:\n")
-                f.write((content_text or "")[:800])
-                f.write("\n")
-        except Exception:
-            pass
-        # 清理返回的文本，提取纯JSON
-        if content_text and "```json" in content_text:
-            content_text = content_text.split("```json")[1].split("```")[0]
-        
-        return json.loads(content_text.strip())
-
-    except Exception as e:
-        print(f"Error calling Qwen Vision API: {e}")
-        raise HTTPException(status_code=500, detail=f"调用AI视觉模型时出错: {e}")
-
-# --- MiMo 图片理解 API（token-plan: mimo-v2.5；）---
-def call_mimo_vision_api(api_key: str, data_uri: str, prompt: str):
-    vision_key, base_url, vision_model = _resolve_mimo_endpoint(api_key)
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    payload = {
-        "model": vision_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                ],
-            }
-        ],
-        "max_completion_tokens": 4096,
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "stream": False,
-        "stop": None,
-        "frequency_penalty": 0,
-        "presence_penalty": 0,
-    }
-    headers = {
-        "api-key": vision_key,
-        "Content-Type": "application/json",
-    }
-    try:
-        with httpx.Client(trust_env=False, timeout=120.0) as client:
-            response = client.post(url, headers=headers, json=payload)
-        if response.status_code != 200:
-            try:
-                err_body = response.json()
-                err_msg = err_body.get("error", {}).get("message", response.text)
-            except Exception:
-                err_msg = response.text
-            raise HTTPException(
-                status_code=500,
-                detail=f"MiMo API 错误 ({response.status_code}): {err_msg}",
-            )
-        result = response.json()
-        choices = result.get("choices") or []
-        if not choices:
-            raise HTTPException(status_code=500, detail="MiMo API 返回格式异常：无 choices")
-        content_text = choices[0].get("message", {}).get("content") or ""
-        try:
-            log_path = Path(__file__).parent.parent / "B_mimo_response.txt"
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n{'='*40}\nMiMo response at {datetime.now().isoformat()}:\n")
-                f.write((content_text or "")[:800])
-                f.write("\n")
-        except Exception:
-            pass
-        if content_text and "```json" in content_text:
-            content_text = content_text.split("```json")[1].split("```")[0]
-        return json.loads(content_text.strip())
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error calling MiMo Vision API: {e}")
-        raise HTTPException(status_code=500, detail=f"调用 MiMo 视觉模型时出错: {e}")
-
-# --- Gemini API 调用（使用 REST API）---
-API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-#API_URL_TEMPLATE = "http://192.168.2.65:8045/v1beta/models/gemini-3-flash:generateContent"
-
-def get_proxies():
-    """从环境变量获取代理设置"""
-    proxies = {}
-    http_proxy = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
-    https_proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
-    
-    if http_proxy:
-        proxies['http'] = http_proxy
-    if https_proxy:
-        proxies['https'] = https_proxy
-    
-    return proxies if proxies else None
-
-def call_gemini_vision_api(api_key: str, data_uri: str, prompt: str):
-    """调用 Gemini 视觉模型进行图片分析（使用 REST API）"""
-    try:
-        # 构建请求 URL
-        url = API_URL_TEMPLATE.format(model=GEMINI_MODEL)
-        
-        # 设置请求头
-        headers = {
-            'Content-Type': 'application/json',
-            'X-goog-api-key': api_key
-        }
-        
-        # 从 data URI 提取 base64 数据
-        base64_data = data_uri.split(",")[1]
-        
-        # 确定 MIME 类型
-        mime_type = "image/jpeg"
-        if data_uri.startswith("data:image/png"):
-            mime_type = "image/png"
-        elif data_uri.startswith("data:image/webp"):
-            mime_type = "image/webp"
-        elif data_uri.startswith("data:image/gif"):
-            mime_type = "image/gif"
-        
-        # 构建请求体
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": base64_data
-                            }
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "response_mime_type": "application/json"
-            }
-        }
-        
-        # 获取代理设置
-        proxies = get_proxies()
-        
-        # 发送请求
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            proxies=proxies,
-            timeout=60
-        )
-        
-        # 无论成功或失败，先把状态码与部分响应体写入日志文件，便于排查
-        try:
-            log_path = Path(__file__).parent.parent / "A_gemini_response.txt"
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n{'='*40}\nGemini HTTP {response.status_code} at {datetime.now().isoformat()}:\n")
-                f.write(response.text[:800])
-                f.write("\n")
-        except Exception:
-            pass
-
-        response.raise_for_status()
-        result = response.json()
-        
-        # 提取响应内容
-        if "candidates" in result and len(result["candidates"]) > 0:
-            content_text = result["candidates"][0]["content"]["parts"][0]["text"]
-            
-            # 清理返回的文本，提取纯JSON
-            if content_text and "```json" in content_text:
-                content_text = content_text.split("```json")[1].split("```")[0]
-            elif content_text and "```" in content_text:
-                # 处理其他格式的代码块
-                parts = content_text.split("```")
-                for i, part in enumerate(parts):
-                    if "{" in part and "}" in part:
-                        content_text = part
-                        break
-            
-            return json.loads(content_text.strip())
-        else:
-            raise HTTPException(status_code=500, detail="Gemini API 返回格式异常")
-    
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling Gemini Vision API: {e}")
-        raise HTTPException(status_code=500, detail=f"调用Gemini视觉模型时出错: {e}")
-    except json.JSONDecodeError as e:
-        print(f"Error parsing Gemini API response: {e}")
-        raise HTTPException(status_code=500, detail=f"解析Gemini API响应时出错: {e}")
-    except Exception as e:
-        print(f"Error calling Gemini Vision API: {e}")
-        raise HTTPException(status_code=500, detail=f"调用Gemini视觉模型时出错: {e}")
-
-
-CODEX_LOCAL_WORKDIR = os.getenv("CODEX_WORKDIR", str(Path(__file__).resolve().parent.parent / "data" / "codex_tmp"))
-CODEX_LOCAL_HTTP_PROXY = os.getenv("HTTP_PROXY", "http://192.168.2.245:10808")
-CODEX_LOCAL_HTTPS_PROXY = os.getenv("HTTPS_PROXY", "http://192.168.2.245:10808")
-CODEX_MODEL = os.getenv("CODEX_MODEL", "").strip()
-
-
-def _run_cmd(cmd: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=cwd, env=env)
-
-
-def _ensure_local_codex_workdir() -> Path:
-    wd = Path(CODEX_LOCAL_WORKDIR).expanduser().resolve()
-    wd.mkdir(parents=True, exist_ok=True)
-    test_file = wd / ".codex_write_test"
-    test_file.write_text("ok", encoding="utf-8")
-    test_file.unlink(missing_ok=True)
-    return wd
-
-
-def _extract_json_from_text(text: str) -> dict[str, Any]:
-    raw = (text or "").strip()
-    if not raw:
-        raise ValueError("Codex 返回为空")
-    if "```json" in raw:
-        raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in raw:
-        raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        l = raw.find("{")
-        r = raw.rfind("}")
-        if l >= 0 and r > l:
-            return json.loads(raw[l : r + 1])
-        raise
-
-
-def _normalize_codex_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    semantic = payload.get("semantic_search")
-    training = payload.get("training_data")
-    if not isinstance(semantic, dict) or not isinstance(training, dict):
-        raise ValueError("Codex 返回缺少 semantic_search 或 training_data")
-
-    description = semantic.get("description", "")
-    keywords = semantic.get("keywords", [])
-    qwen_captions = training.get("qwen_captions", {})
-    yolo_objects = training.get("yolo_objects", [])
-
-    if not isinstance(description, str):
-        description = str(description)
-    if not isinstance(keywords, list):
-        keywords = []
-    if not isinstance(qwen_captions, (dict, list)):
-        qwen_captions = {}
-    if not isinstance(yolo_objects, list):
-        yolo_objects = []
-
-    return {
-        "semantic_search": {
-            "description": description,
-            "keywords": [str(k).strip() for k in keywords if str(k).strip()],
-        },
-        "training_data": {
-            "qwen_captions": qwen_captions,
-            "yolo_objects": [str(x).strip() for x in yolo_objects if str(x).strip()],
-        },
-    }
-
-
-def call_codex_vision_api(data_uri: str, prompt: str) -> dict[str, Any]:
-    """
-    通过本机 codex exec 分析单张图片。
-    """
-    if "," not in data_uri:
-        raise HTTPException(status_code=400, detail="无效图片数据")
-    if shutil.which("codex") is None:
-        raise HTTPException(status_code=500, detail="缺少依赖 codex CLI")
-
-    head, b64 = data_uri.split(",", 1)
-    ext = ".jpg"
-    if "image/png" in head:
-        ext = ".png"
-    elif "image/webp" in head:
-        ext = ".webp"
-    elif "image/gif" in head:
-        ext = ".gif"
-
-    workdir = _ensure_local_codex_workdir()
-    local_img: Path | None = None
-    local_out: Path | None = None
-    try:
-        unique = uuid.uuid4().hex[:10]
-        local_img = workdir / f"img_{unique}{ext}"
-        local_out = workdir / f"img_{unique}.result.txt"
-        local_img.write_bytes(base64.b64decode(b64))
-
-        cmd = [
-            "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "-i",
-            str(local_img),
-            "-o",
-            str(local_out),
-        ]
-        if CODEX_MODEL:
-            cmd.extend(["-m", CODEX_MODEL])
-        cmd.append(prompt)
-
-        env = os.environ.copy()
-        env["HTTP_PROXY"] = CODEX_LOCAL_HTTP_PROXY
-        env["HTTPS_PROXY"] = CODEX_LOCAL_HTTPS_PROXY
-        env["http_proxy"] = CODEX_LOCAL_HTTP_PROXY
-        env["https_proxy"] = CODEX_LOCAL_HTTPS_PROXY
-
-        ret = _run_cmd(cmd, cwd=str(workdir), env=env)
-        if ret.returncode != 0:
-            raise RuntimeError(f"本地 codex 执行失败: {(ret.stderr or ret.stdout).strip()}")
-        if not local_out.exists():
-            raise RuntimeError(f"本地 codex 输出文件不存在: {local_out}")
-
-        payload = _extract_json_from_text(local_out.read_text(encoding="utf-8", errors="replace"))
-        return _normalize_codex_payload(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error calling Codex Vision API: {e}")
-        raise HTTPException(status_code=500, detail=f"调用Codex视觉模型时出错: {e}")
-    finally:
-        try:
-            if local_img and local_img.exists():
-                local_img.unlink()
-            if local_out and local_out.exists():
-                local_out.unlink()
-        except Exception:
-            pass
-
-
 def test_qwen_connection():
-    """在启动时测试与通义千问的连接"""
-    print("-" * 50)
-    print("正在测试与通义千问 (DashScope) API 的连接...")
-    api_key = os.getenv("QWEN_API_KEY")
-    if not api_key :
-        print(">> 警告: 未找到或未配置有效的 QWEN_API_KEY 环境变量。")
-        print(">> 后端将只能返回模拟数据。")
-        print("-" * 50)
-        return
-    
-    # 检查所有可能的代理设置（包括系统环境变量）
-    http_proxy = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
-    https_proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
-    
-    # 检查系统环境变量（可能从shell或其他地方设置）
-    import sys
-    if hasattr(sys, 'environ'):
-        sys_http_proxy = sys.environ.get('HTTP_PROXY') or sys.environ.get('http_proxy')
-        sys_https_proxy = sys.environ.get('HTTPS_PROXY') or sys.environ.get('https_proxy')
-        if sys_http_proxy and not http_proxy:
-            http_proxy = sys_http_proxy
-        if sys_https_proxy and not https_proxy:
-            https_proxy = sys_https_proxy
-    
-    if http_proxy or https_proxy:
-        print(f">> 检测到代理设置: HTTP_PROXY={http_proxy}, HTTPS_PROXY={https_proxy}")
-        print(">> 注意: 如果代理未开启，可能会导致连接超时")
-        print(">> 建议: 如果不需要代理，请确保系统环境变量和.env文件中都没有代理设置")
+    """主后端启动时检查独立 LLM 网关是否可达。"""
+    if check_gateway_health():
+        print(f">> LLM 网关可用: {LLM_GATEWAY_URL}")
     else:
-        print(">> 未检测到代理设置，将直接连接API")
-    
-    try:
-        import time
-        start_time = time.time()
-        print(f">> 正在连接 DashScope API (base_url: {BASE_URL})...")
-        
-        client = get_qwen_client(api_key)
-        completion = client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[
-                {'role': 'system', 'content': 'You are a helpful assistant.'},
-                {'role': 'user', 'content': '你好'}
-            ],
-            timeout=30.0  # 测试连接使用30秒超时
-        )
-        elapsed_time = time.time() - start_time
-        reply = completion.choices[0].message.content
-        print(f">> ✓ 通义千问 ({TEXT_MODEL}) 连接成功！耗时 {elapsed_time:.2f}秒")
-        print(f">> 回复: \"{reply.strip()}\"")
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f">> ✗ 错误: 调用通义千问 API 失败。")
-        print(f">> 详细信息: {error_msg}")
-        
-        # 提供更具体的错误提示
-        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-            print(">> 可能原因:")
-            print(">>   1. 网络连接问题（无法访问 dashscope.aliyuncs.com）")
-            if http_proxy or https_proxy:
-                print(">>   2. 代理服务器未开启或无法连接（检测到代理设置但代理不可用）")
-                print(">>   3. 建议: 临时清除代理环境变量测试: unset HTTP_PROXY HTTPS_PROXY")
-            print(">>   4. API服务暂时不可用")
-        elif "api" in error_msg.lower() and "key" in error_msg.lower():
-            print(">> 可能原因: API密钥无效或未配置")
-        elif "proxy" in error_msg.lower():
-            print(">> 可能原因: 代理设置有问题，请检查代理服务器是否正常运行")
-        elif "connection" in error_msg.lower() or "connect" in error_msg.lower():
-            print(">> 可能原因: 网络连接失败，请检查:")
-            print(">>   1. 网络是否正常")
-            print(">>   2. 防火墙设置")
-            if http_proxy or https_proxy:
-                print(">>   3. 代理服务器状态")
-    finally:
-        print("-" * 50)
+        print(f">> 警告: LLM 网关不可用 ({LLM_GATEWAY_URL})，图片分析/补标签将失败")
+        print(">> 请启动: systemctl start taglens-llm-gateway 或 ./start_llm_gateway.sh")
 
 
 # --- API 路由 ---
@@ -1555,106 +842,6 @@ async def bulk_import_logs(
     logs, total = get_bulk_import_logs(job_id, page=page, page_size=page_size, status_filter=status)
     return BulkImportLogsResponse(success=True, logs=logs, total=total)
 
-@app.post("/analyze")
-async def analyze_image(request: ImageAnalysisRequest):
-    """分析图片，支持 Qwen、Gemini、Codex、MiMo"""
-    # 日志：记录调用来源的关键特征，方便对比前端“图片标签”和管理任务的请求形态
-    raw_model = (request.model or "gemini") if hasattr(request, "model") else "gemini"
-    img_str = request.image if hasattr(request, "image") and request.image else ""
-    try:
-        print("=" * 60)
-        print(f"[/analyze] Incoming request - model={raw_model}")
-        print(f"[/analyze] image_length={len(img_str)}, prefix={img_str[:80]!r}")
-    except Exception:
-        # 日志失败不影响主流程
-        pass
-
-    model = raw_model.lower()
-    if model not in ("qwen", "gemini", "codex", "mimo"):
-        raise HTTPException(status_code=400, detail=f"不支持的模型: {raw_model}")
-
-    if model == "gemini":
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key :
-            print("警告: 未找到有效的 GEMINI_API_KEY，将返回模拟数据。")
-            await asyncio.sleep(1)
-            return mock_analysis_data
-        
-        # 构造默认Prompt
-        default_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
-        try:
-            analysis_result = await asyncio.to_thread(
-                call_gemini_vision_api, 
-                api_key, 
-                request.image,
-                default_prompt
-            )
-            validated_result = TrafficAnalysisOutput(**analysis_result)
-            return validated_result
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            print(f"处理图片时发生错误: {e}")
-            raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
-    
-    elif model == "codex":
-        default_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
-        try:
-            analysis_result = await asyncio.to_thread(
-                call_codex_vision_api,
-                request.image,
-                default_prompt
-            )
-            validated_result = TrafficAnalysisOutput(**analysis_result)
-            return validated_result
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            print(f"处理图片时发生错误: {e}")
-            raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
-
-    elif model == "mimo":
-        api_key = os.getenv("MIMO_API_KEY")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="未配置有效的 MIMO_API_KEY")
-        default_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
-        try:
-            analysis_result = await asyncio.to_thread(
-                call_mimo_vision_api,
-                api_key,
-                request.image,
-                default_prompt,
-            )
-            validated_result = TrafficAnalysisOutput(**analysis_result)
-            return validated_result
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            print(f"处理图片时发生错误: {e}")
-            raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
-    else:  # qwen
-        api_key = os.getenv("QWEN_API_KEY")
-        if not api_key :
-            print("警告: 未找到有效的 QWEN_API_KEY，将返回模拟数据。")
-            await asyncio.sleep(1)
-            return mock_analysis_data
-
-        # 构造默认Prompt
-        default_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
-        try:
-            analysis_result = await asyncio.to_thread(
-                call_qwen_vision_api, 
-                api_key, 
-                request.image,
-                default_prompt
-            )
-            validated_result = TrafficAnalysisOutput(**analysis_result)
-            return validated_result
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            print(f"处理图片时发生错误: {e}")
-            raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
 
 @app.get("/")
 def read_root():
@@ -2258,48 +1445,27 @@ def _process_uploaded_image_sync(
         
         analysis_result = None
         
-        # 构造动态 Prompt
-        final_prompt = PROMPT_PART_1 + "\n" + PROMPT_PART_3
+        camera_name_ctx = None
+        camera_structure_ctx = None
         if camera_id:
             try:
                 bm = get_business_manager_for_project(project_name)
-                c_name, c_struct = bm.get_camera_info(camera_id)
-                # 只有当能获取到有效信息时才添加上下文
-                if c_struct and c_struct != "未知区域":
-                    part2 = PROMPT_PART_2_TEMPLATE.format(camera_name=c_name, camera_structure=c_struct)
-                    final_prompt = PROMPT_PART_1 + "\n" + part2 + "\n" + PROMPT_PART_3
+                camera_name_ctx, camera_structure_ctx = bm.get_camera_info(camera_id)
             except Exception as e:
                 print(f"构造动态Prompt失败: {e}")
 
         if should_call_api:
             try:
-                if use_model == 'qwen':
-                    qwen_key = os.getenv("QWEN_API_KEY")
-                    print(f"[DEBUG] Qwen API Key configured: {'Yes' if qwen_key else 'No'}")
-                    if not qwen_key:
-                        print("服务端未配置 QWEN_API_KEY，跳过 AI 分析")
-                        analysis_result = None
-                    else:
-                        analysis_result = call_qwen_vision_api(qwen_key, data_uri, final_prompt)
-                elif use_model == 'codex':
-                    analysis_result = call_codex_vision_api(data_uri, final_prompt)
-                elif use_model == 'mimo':
-                    mimo_key = os.getenv("MIMO_API_KEY")
-                    if not mimo_key:
-                        print("服务端未配置 MIMO_API_KEY，跳过 AI 分析")
-                        analysis_result = None
-                    else:
-                        analysis_result = call_mimo_vision_api(mimo_key, data_uri, final_prompt)
-                else:
-                    gemini_key = os.getenv("GEMINI_API_KEY")
-                    if not gemini_key:
-                        print("服务端未配置 GEMINI_API_KEY，跳过 AI 分析")
-                        analysis_result = None
-                    else:
-                        analysis_result = call_gemini_vision_api(gemini_key, data_uri, final_prompt)
+                analysis_result, _is_mock = infer_traffic_image(
+                    use_model,
+                    data_uri,
+                    allow_mock=True,
+                    camera_name=camera_name_ctx,
+                    camera_structure=camera_structure_ctx,
+                )
             except Exception as ai_e:
                 analysis_result = None
-                ai_error_message = str(ai_e)
+                ai_error_message = str(getattr(ai_e, "message", ai_e))
         else:
             print(f"[DEBUG] 跳过 AI 分析 (概率 {api_prob:.2f}): {file_name}")
 
@@ -2784,8 +1950,9 @@ if __name__ == "__main__":
         workers = 1
 
     print(f"启动 TagLens AI 后端服务于 http://{host}:{port}")
-    print(f"  - Qwen 模型: {QWEN_MODEL}")
-    print(f"  - Gemini 模型: {GEMINI_MODEL}")
+    print(f"  - Qwen 模型: {os.getenv('QWEN_MODEL', 'qwen-vl-max')}")
+    print(f"  - Gemini 模型: {os.getenv('GEMINI_MODEL', 'gemini-3-flash-preview')}")
+    print(f"  - LLM 网关: {LLM_GATEWAY_URL}（主后端代理 POST /llm/infer）")
     print(f"  - workers: {workers}, reload: {reload}")
     uvicorn.run(
         "main:app",

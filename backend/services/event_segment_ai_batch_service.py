@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -39,7 +40,8 @@ def get_batch_executor() -> ThreadPoolExecutor:
 
 
 def get_batch_max_workers() -> int:
-    return SEGMENT_DESC_FILL_MAX_WORKERS
+    """运行时读取 .env（main.py 在 import 本模块之后才 load_dotenv）。"""
+    return max(1, int(os.getenv("EVENT_SEGMENT_DESC_FILL_WORKERS", "4")))
 
 
 def _event_lock_key(item: Dict[str, Any]) -> Tuple[str, str, str]:
@@ -57,6 +59,31 @@ def _lock_for_event(key: Tuple[str, str, str]) -> threading.Lock:
         return _event_write_locks[key]
 
 
+class SegmentDescFillFatalNetworkError(Exception):
+    """网络故障重试耗尽后，终止整批分段描述补齐。"""
+
+
+def _is_network_error_message(message: str) -> bool:
+    msg = (message or "").lower()
+    if any(code in msg for code in ("502", "503", "504")):
+        return True
+    keywords = (
+        "network error",
+        "connection",
+        "connect",
+        "timeout",
+        "timed out",
+        "socket",
+        "dns",
+        "unreachable",
+        "temporary failure",
+        "connection reset",
+        "连接超时",
+        "连接失败",
+    )
+    return any(k in msg for k in keywords)
+
+
 @dataclass
 class SegmentFillResult:
     success: bool
@@ -68,26 +95,42 @@ class SegmentFillResult:
     segment_index: int = 0
 
 
-def fill_one_segment_description(item: Dict[str, Any]) -> SegmentFillResult:
+def fill_one_segment_description(
+    item: Dict[str, Any],
+    log_sink: Optional[list[tuple[str, str]]] = None,
+) -> SegmentFillResult:
     event_id = str(item["event_id"])
     project_id = str(item["project_id"])
     event_type = str(item["event_type_corrected"])
     segment_index = int(item["segment_index"])
 
+    def _log(message: str, level: str = "info") -> None:
+        if log_sink is not None:
+            log_sink.append((message, level))
+
     segment_video_url = build_public_media_url(item["segment_media_path"])
     overlay_path = item.get("overlay_media_path")
     overlay_image_url = build_public_media_url(overlay_path) if overlay_path else None
 
-    try:
-        video_bytes, video_ct = fetch_segment_video_bytes(segment_video_url)
-    except SegmentAiMediaError as exc:
-        return SegmentFillResult(
-            success=False,
-            error=f"媒体拉取失败: {exc}",
-            damage_log="损坏程度=未知（未能下载视频）",
-            event_id=event_id,
-            segment_index=segment_index,
-        )
+    video_bytes = None
+    video_ct = ""
+    for attempt in range(1, 4):
+        try:
+            video_bytes, video_ct = fetch_segment_video_bytes(segment_video_url)
+            break
+        except SegmentAiMediaError as exc:
+            err = f"媒体拉取失败: {exc}"
+            if _is_network_error_message(err) and attempt < 3:
+                _log(f"  -> 网络异常，2秒后重试: {err}", "warning")
+                time.sleep(2)
+                continue
+            return SegmentFillResult(
+                success=False,
+                error=err,
+                damage_log="损坏程度=未知（未能下载视频）",
+                event_id=event_id,
+                segment_index=segment_index,
+            )
 
     damage_report = inspect_video_damage(video_bytes)
     damage_log = damage_report.log_line()
@@ -102,40 +145,65 @@ def fill_one_segment_description(item: Dict[str, Any]) -> SegmentFillResult:
             segment_index=segment_index,
         )
 
-    try:
-        description = generate_segment_description_sync(
-            segment_video_url,
-            overlay_image_url,
-            video_bytes=video_bytes,
-            video_content_type=video_ct,
-        )
-    except SegmentAiMediaError as exc:
-        message = str(exc)
-        is_damaged = "视频损坏" in message or "跳过补齐" in message
-        return SegmentFillResult(
-            success=False,
-            skipped=is_damaged,
-            error=message,
-            damage_log=damage_log,
-            event_id=event_id,
-            segment_index=segment_index,
-        )
-    except SegmentAiModelError as exc:
-        return SegmentFillResult(
-            success=False,
-            error=format_model_error(exc),
-            damage_log=damage_log,
-            event_id=event_id,
-            segment_index=segment_index,
-        )
-    except Exception as exc:
-        return SegmentFillResult(
-            success=False,
-            error=str(exc),
-            damage_log=damage_log,
-            event_id=event_id,
-            segment_index=segment_index,
-        )
+    description = None
+    for attempt in range(1, 4):
+        try:
+            _log(f"  -> 正在调用 RLQ 视觉模型...（第 {attempt}/3 次）", "progress")
+            description = generate_segment_description_sync(
+                segment_video_url,
+                overlay_image_url,
+                video_bytes=video_bytes,
+                video_content_type=video_ct,
+            )
+            break
+        except SegmentAiMediaError as exc:
+            message = str(exc)
+            is_damaged = "视频损坏" in message or "跳过补齐" in message
+            return SegmentFillResult(
+                success=False,
+                skipped=is_damaged,
+                error=message,
+                damage_log=damage_log,
+                event_id=event_id,
+                segment_index=segment_index,
+            )
+        except SegmentAiModelError as exc:
+            err = format_model_error(exc)
+            if _is_network_error_message(err):
+                if attempt < 3:
+                    _log(f"  -> 网络异常，2秒后重试: {err}", "warning")
+                    time.sleep(2)
+                    continue
+                raise SegmentDescFillFatalNetworkError(
+                    "连续 3 次网络异常，终止整批事件分段描述补齐任务。"
+                ) from exc
+            return SegmentFillResult(
+                success=False,
+                error=err,
+                damage_log=damage_log,
+                event_id=event_id,
+                segment_index=segment_index,
+            )
+        except Exception as exc:
+            err = str(exc)
+            if _is_network_error_message(err):
+                if attempt < 3:
+                    _log(f"  -> 网络异常，2秒后重试: {err}", "warning")
+                    time.sleep(2)
+                    continue
+                raise SegmentDescFillFatalNetworkError(
+                    "连续 3 次网络异常，终止整批事件分段描述补齐任务。"
+                ) from exc
+            return SegmentFillResult(
+                success=False,
+                error=err,
+                damage_log=damage_log,
+                event_id=event_id,
+                segment_index=segment_index,
+            )
+
+    if description is None:
+        raise SegmentDescFillFatalNetworkError("模型调用未返回结果，终止任务。")
 
     lock_key = _event_lock_key(item)
     with _lock_for_event(lock_key):
