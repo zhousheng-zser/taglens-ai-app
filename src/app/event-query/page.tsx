@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Search, RotateCcw, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2, Sparkles } from 'lucide-react';
+import { Search, RotateCcw, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2, Sparkles } from 'lucide-react';
+import { QueryPaginationBar } from '@/components/QueryPaginationBar';
 import { useToast } from '@/hooks/use-toast';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -732,6 +733,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const [eventTypeOptions, setEventTypeOptions] = useState<EventOptionItem[]>([]);
   const [isMetaLoading, setIsMetaLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
+  const [jumpPageInput, setJumpPageInput] = useState('1');
   const [selectedRecord, setSelectedRecord] = useState<EventSearchResult | null>(null);
   const [hasUnsavedSegmentEdits, setHasUnsavedSegmentEdits] = useState(false);
   const [deletingEventKey, setDeletingEventKey] = useState<string>('');
@@ -743,6 +745,20 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const isReviewer = currentUser?.role === 'reviewer';
   const assignedRanges = currentUser?.timeRanges || [];
   const selectedAssignedRange = assignedRanges.find((item) => String(item.id) === selectedAssignedRangeId);
+
+  useEffect(() => {
+    setJumpPageInput(String(page));
+  }, [page]);
+
+  const clampPage = (p: number) => Math.min(Math.max(p, 1), totalPages);
+
+  const handleJump = () => {
+    const raw = jumpPageInput.trim();
+    if (!raw) return;
+    const target = clampPage(parseInt(raw, 10));
+    if (Number.isNaN(target)) return;
+    fetchResults(target);
+  };
 
   const handleQuickRangeSelect = (range: string) => {
     setSelectedAssignedRangeId('');
@@ -1300,34 +1316,17 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
         </Card>
 
         <Card className="border-border/40 bg-background/60 backdrop-blur-md shadow-xl overflow-hidden">
-          {total > 0 ? (
-            <div className="p-4 border-b border-border/20 flex flex-col gap-3 md:flex-row md:items-center md:justify-between bg-muted/20">
-              <div className="text-xs text-muted-foreground">
-                共 <span className="text-foreground font-medium">{total}</span> 条记录，
-                当前第 <span className="text-foreground font-medium">{safePage}</span> / {totalPages} 页
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => fetchResults(Math.max(1, safePage - 1))}
-                  disabled={safePage === 1 || isLoading}
-                  className="h-8 w-8 p-0 border-border/40"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => fetchResults(Math.min(totalPages, safePage + 1))}
-                  disabled={safePage === totalPages || isLoading}
-                  className="h-8 w-8 p-0 border-border/40"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          ) : null}
+          <QueryPaginationBar
+            total={total}
+            page={page}
+            totalPages={totalPages}
+            isLoading={isLoading}
+            jumpPageInput={jumpPageInput}
+            onJumpPageInputChange={setJumpPageInput}
+            onJump={handleJump}
+            onPageChange={fetchResults}
+            placement="top"
+          />
 
           <CardContent className="p-0">
             {viewMode === 'list' ? (
@@ -1487,6 +1486,17 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
               </div>
             )}
           </CardContent>
+          <QueryPaginationBar
+            total={total}
+            page={page}
+            totalPages={totalPages}
+            isLoading={isLoading}
+            jumpPageInput={jumpPageInput}
+            onJumpPageInputChange={setJumpPageInput}
+            onJump={handleJump}
+            onPageChange={fetchResults}
+            placement="bottom"
+          />
         </Card>
 
         {selectedRecord && (

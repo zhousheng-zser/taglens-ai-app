@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional, Tuple
 import pymysql
 import paramiko
+import re
 import time
 from datetime import datetime
 import json
@@ -17,6 +18,16 @@ if not hasattr(paramiko, "DSSKey"):
 from sshtunnel import SSHTunnelForwarder
 
 PDDY_PROJECT_NAMES = {"浦东道运视频质量诊断", "浦东道运"}
+PDGWTC_PROJECT_NAMES = {"浦东高位停车", "浦东高位停车服务器"}
+HPGWTC_PROJECT_NAMES = {"黄埔高位停车", "黄埔高位停车服务器"}
+
+# testmvp -querycameras 输出行示例（高位停车）:
+# [ 01 ] camera id: 100, ..., name: PDZ024CAM01, keyword: 张杨路（浦明路-滨江路）|10.200.106.51|PDZ024CAM01.
+# keyword 按 | 分隔共三段，前两段为业态目录（szTagRef1~2），第三段为相机名冗余，一律丢弃。
+_TESTMVP_CAMERA_LINE_RE = re.compile(
+    r"camera id:\s*(\d+).*?name:\s*([^,]+?)\s*,\s*keyword:\s*(.+)$",
+    re.IGNORECASE,
+)
 
 class BusinessStructureManager:
     """
@@ -402,9 +413,315 @@ class PDDYBusinessStructureManager(BusinessStructureManager):
         path_nodes.reverse()
         return path_nodes
 
+
+def parse_testmvp_querycameras_output(text: str) -> List[Dict[str, Any]]:
+    """
+    解析 testmvp -querycameras 文本输出为相机元数据列表。
+
+    高位停车 testmvp 约定：keyword 仅取前两段作为 szTagRef1、szTagRef2，szTagRef3 恒为空。
+    例如 keyword「张杨路（浦明路-滨江路）|10.200.106.51|PDZ024CAM01.」→
+    szTagRef1=张杨路（浦明路-滨江路）, szTagRef2=10.200.106.51, szTagRef3=""
+    """
+    results: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "camera id:" not in line:
+            continue
+        match = _TESTMVP_CAMERA_LINE_RE.search(line)
+        if not match:
+            continue
+
+        camera_id = match.group(1).strip()
+        sz_name = match.group(2).strip()
+        keyword = match.group(3).strip()
+        keyword_parts = [part.strip() for part in keyword.split("|")]
+
+        sz_tag_ref1 = keyword_parts[0] if len(keyword_parts) > 0 else ""
+        sz_tag_ref2 = keyword_parts[1] if len(keyword_parts) > 1 else ""
+        # 高位停车业态仅两级；keyword 第三段为相机名冗余，不使用
+        sz_tag_ref3 = ""
+
+        results.append(
+            {
+                "ubi_short_id": camera_id,
+                "sz_name": sz_name,
+                "szTagRef1": sz_tag_ref1,
+                "szTagRef2": sz_tag_ref2,
+                "szTagRef3": sz_tag_ref3,
+            }
+        )
+    return results
+
+
+class PDGWTCBusinessStructureManager(BusinessStructureManager):
+    """
+    浦东高位停车业务目录结构管理类
+    - 通过 SSH 到 MVP 跳板机执行 testmvp -querycameras 获取相机列表
+    - keyword 按 | 分隔共三段，仅前两段映射 szTagRef1~2；第三段为 name 冗余，szTagRef3 恒为空
+    """
+
+    SSH_HOST = "192.168.1.10"
+    SSH_PORT = 5020
+    SSH_USER = "root"
+    SSH_PASSWORD = "md@xinxi2022"
+
+    MVP_BIN = "/opt/MVP64/Tools/testmvp"
+    MVP_IP = "222.71.253.99"
+    MVP_USER = "1"
+    MVP_PWD = "0"
+
+    OUTPUT_FILE = BusinessStructureManager.DATA_DIR / "business_structure_map_pdgwtc.json"
+
+    @staticmethod
+    def _normalize_pdgwtc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """业态目录仅两层；忽略 keyword 第三段及缓存中可能遗留的 szTagRef3。"""
+        return {
+            "sz_name": entry.get("sz_name", "") or "",
+            "szTagRef1": entry.get("szTagRef1", "") or "",
+            "szTagRef2": entry.get("szTagRef2", "") or "",
+            "szTagRef3": "",
+        }
+
+    def _load_data(self):
+        """加载本地缓存时强制归一化为两层业态。"""
+        if self.OUTPUT_FILE.exists():
+            print(f"[PDGWTCBusinessStructureManager] 发现本地缓存文件: {self.OUTPUT_FILE}")
+            try:
+                with open(self.OUTPUT_FILE, "r", encoding="utf-8") as f:
+                    raw_map = json.load(f)
+                self._data_map = {
+                    str(k): self._normalize_pdgwtc_entry(v)
+                    for k, v in raw_map.items()
+                }
+                print(
+                    f"[PDGWTCBusinessStructureManager] 本地缓存加载成功，"
+                    f"共 {len(self._data_map)} 条记录（业态两层）"
+                )
+                return
+            except Exception as e:
+                print(f"[PDGWTCBusinessStructureManager] 本地缓存已损坏，将重新同步: {e}")
+        self.sync_from_remote()
+
+    def sync_from_remote(self):
+        print(f"[PDGWTCBusinessStructureManager] 开始从 testmvp 同步相机字典...")
+        super().sync_from_remote()
+        with self._lock:
+            self._data_map = {
+                k: self._normalize_pdgwtc_entry(v)
+                for k, v in self._data_map.items()
+            }
+
+    def get_camera_info(self, ubi_short_id: int | str) -> Tuple[str, str]:
+        key = str(ubi_short_id)
+        info = self._data_map.get(key)
+        if not info:
+            return (f"未知设备({key})", "未知区域")
+        sz_name = info.get("sz_name") or "未知名称"
+        path_parts = []
+        if info.get("szTagRef1"):
+            path_parts.append(info.get("szTagRef1"))
+        if info.get("szTagRef2"):
+            path_parts.append(info.get("szTagRef2"))
+        full_path = "->".join(path_parts) if path_parts else "未分组"
+        return (sz_name, full_path)
+
+    def get_camera_sz_and_tag_refs(self, ubi_short_id: int | str) -> Tuple[str, List[str]]:
+        key = str(ubi_short_id).strip()
+        if not key:
+            return ("未知设备", [])
+        info = self._data_map.get(key)
+        if not info:
+            return (f"未知设备({key})", [])
+        sz_name = (info.get("sz_name") or "").strip() or "未知名称"
+        refs: List[str] = []
+        for ref_key in ("szTagRef1", "szTagRef2"):
+            val = info.get(ref_key)
+            if val is not None and str(val).strip():
+                refs.append(str(val).strip())
+        return (sz_name, refs)
+
+    def _fetch_all_from_db(self) -> List[Dict[str, Any]]:
+        """SSH 到 MVP 机执行 testmvp -querycameras 并解析输出"""
+        print(
+            f"[PDGWTCBusinessStructureManager] 正在连接 SSH "
+            f"({self.SSH_HOST}:{self.SSH_PORT})..."
+        )
+        start_time = time.time()
+
+        command = (
+            f"{self.MVP_BIN} -ip {self.MVP_IP} -user {self.MVP_USER} "
+            f"-pwd {self.MVP_PWD} -querycameras"
+        )
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=self.SSH_HOST,
+                port=self.SSH_PORT,
+                username=self.SSH_USER,
+                password=self.SSH_PASSWORD,
+                timeout=30,
+            )
+            print(f"[PDGWTCBusinessStructureManager] 执行远程命令: {command}")
+            _stdin, stdout, stderr = client.exec_command(command, timeout=300)
+            output = stdout.read().decode("utf-8", errors="replace")
+            error = stderr.read().decode("utf-8", errors="replace").strip()
+            exit_status = stdout.channel.recv_exit_status()
+            if error:
+                print(f"[PDGWTCBusinessStructureManager] stderr: {error}")
+            if exit_status != 0:
+                raise RuntimeError(
+                    f"testmvp 退出码 {exit_status}: {error or output[:500]}"
+                )
+        finally:
+            client.close()
+
+        all_results = parse_testmvp_querycameras_output(output)
+        total_time = time.time() - start_time
+        print(
+            f"[PDGWTCBusinessStructureManager] 解析完成! 共 {len(all_results)} 条, "
+            f"总耗时: {total_time:.2f}秒"
+        )
+        return all_results
+
+
+class HPGWTCBusinessStructureManager(BusinessStructureManager):
+    """
+    黄埔高位停车业务目录结构管理类
+    - 通过 SSH 到 MVP 跳板机执行 testmvp -querycameras 获取相机列表
+    - keyword 按 | 分隔共三段，仅前两段映射 szTagRef1~2；第三段为 name 冗余，szTagRef3 恒为空
+    """
+
+    SSH_HOST = "192.168.1.10"
+    SSH_PORT = 5020
+    SSH_USER = "root"
+    SSH_PASSWORD = "md@xinxi2022"
+
+    MVP_BIN = "/opt/MVP64/Tools/testmvp"
+    MVP_IP = "127.0.0.1"
+    MVP_USER = "1"
+    MVP_PWD = "0"
+
+    OUTPUT_FILE = BusinessStructureManager.DATA_DIR / "business_structure_map_hpgwtc.json"
+
+    @staticmethod
+    def _normalize_hpgwtc_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """业态目录仅两层；忽略 keyword 第三段及缓存中可能遗留的 szTagRef3。"""
+        return {
+            "sz_name": entry.get("sz_name", "") or "",
+            "szTagRef1": entry.get("szTagRef1", "") or "",
+            "szTagRef2": entry.get("szTagRef2", "") or "",
+            "szTagRef3": "",
+        }
+
+    def _load_data(self):
+        """加载本地缓存时强制归一化为两层业态。"""
+        if self.OUTPUT_FILE.exists():
+            print(f"[HPGWTCBusinessStructureManager] 发现本地缓存文件: {self.OUTPUT_FILE}")
+            try:
+                with open(self.OUTPUT_FILE, "r", encoding="utf-8") as f:
+                    raw_map = json.load(f)
+                self._data_map = {
+                    str(k): self._normalize_hpgwtc_entry(v)
+                    for k, v in raw_map.items()
+                }
+                print(
+                    f"[HPGWTCBusinessStructureManager] 本地缓存加载成功，"
+                    f"共 {len(self._data_map)} 条记录（业态两层）"
+                )
+                return
+            except Exception as e:
+                print(f"[HPGWTCBusinessStructureManager] 本地缓存已损坏，将重新同步: {e}")
+        self.sync_from_remote()
+
+    def sync_from_remote(self):
+        print(f"[HPGWTCBusinessStructureManager] 开始从 testmvp 同步相机字典...")
+        super().sync_from_remote()
+        with self._lock:
+            self._data_map = {
+                k: self._normalize_hpgwtc_entry(v)
+                for k, v in self._data_map.items()
+            }
+
+    def get_camera_info(self, ubi_short_id: int | str) -> Tuple[str, str]:
+        key = str(ubi_short_id)
+        info = self._data_map.get(key)
+        if not info:
+            return (f"未知设备({key})", "未知区域")
+        sz_name = info.get("sz_name") or "未知名称"
+        path_parts = []
+        if info.get("szTagRef1"):
+            path_parts.append(info.get("szTagRef1"))
+        if info.get("szTagRef2"):
+            path_parts.append(info.get("szTagRef2"))
+        full_path = "->".join(path_parts) if path_parts else "未分组"
+        return (sz_name, full_path)
+
+    def get_camera_sz_and_tag_refs(self, ubi_short_id: int | str) -> Tuple[str, List[str]]:
+        key = str(ubi_short_id).strip()
+        if not key:
+            return ("未知设备", [])
+        info = self._data_map.get(key)
+        if not info:
+            return (f"未知设备({key})", [])
+        sz_name = (info.get("sz_name") or "").strip() or "未知名称"
+        refs: List[str] = []
+        for ref_key in ("szTagRef1", "szTagRef2"):
+            val = info.get(ref_key)
+            if val is not None and str(val).strip():
+                refs.append(str(val).strip())
+        return (sz_name, refs)
+
+    def _fetch_all_from_db(self) -> List[Dict[str, Any]]:
+        """SSH 到 MVP 机执行 testmvp -querycameras 并解析输出"""
+        print(
+            f"[HPGWTCBusinessStructureManager] 正在连接 SSH "
+            f"({self.SSH_HOST}:{self.SSH_PORT})..."
+        )
+        start_time = time.time()
+
+        command = (
+            f"{self.MVP_BIN} -ip {self.MVP_IP} -user {self.MVP_USER} "
+            f"-pwd {self.MVP_PWD} -querycameras"
+        )
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=self.SSH_HOST,
+                port=self.SSH_PORT,
+                username=self.SSH_USER,
+                password=self.SSH_PASSWORD,
+                timeout=30,
+            )
+            print(f"[HPGWTCBusinessStructureManager] 执行远程命令: {command}")
+            _stdin, stdout, stderr = client.exec_command(command, timeout=300)
+            output = stdout.read().decode("utf-8", errors="replace")
+            error = stderr.read().decode("utf-8", errors="replace").strip()
+            exit_status = stdout.channel.recv_exit_status()
+            if error:
+                print(f"[HPGWTCBusinessStructureManager] stderr: {error}")
+            if exit_status != 0:
+                raise RuntimeError(
+                    f"testmvp 退出码 {exit_status}: {error or output[:500]}"
+                )
+        finally:
+            client.close()
+
+        all_results = parse_testmvp_querycameras_output(output)
+        total_time = time.time() - start_time
+        print(
+            f"[HPGWTCBusinessStructureManager] 解析完成! 共 {len(all_results)} 条, "
+            f"总耗时: {total_time:.2f}秒"
+        )
+        return all_results
+
+
 # 单例实例，方便其他模块直接引用
 _instance = None
 _pddy_instance = None
+_pdgwtc_instance = None
+_hpgwtc_instance = None
 
 def get_business_manager():
     global _instance
@@ -420,9 +737,27 @@ def get_pddy_business_manager():
     return _pddy_instance
 
 
+def get_pdgwtc_business_manager():
+    global _pdgwtc_instance
+    if _pdgwtc_instance is None:
+        _pdgwtc_instance = PDGWTCBusinessStructureManager()
+    return _pdgwtc_instance
+
+
+def get_hpgwtc_business_manager():
+    global _hpgwtc_instance
+    if _hpgwtc_instance is None:
+        _hpgwtc_instance = HPGWTCBusinessStructureManager()
+    return _hpgwtc_instance
+
+
 def get_business_manager_for_project(project_name: Optional[str]):
     if project_name in PDDY_PROJECT_NAMES:
         return get_pddy_business_manager()
+    if project_name in PDGWTC_PROJECT_NAMES:
+        return get_pdgwtc_business_manager()
+    if project_name in HPGWTC_PROJECT_NAMES:
+        return get_hpgwtc_business_manager()
     return get_business_manager()
 
 # 方便测试的主函数

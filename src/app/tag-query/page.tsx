@@ -7,7 +7,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { Search, RotateCcw, ChevronLeft, ChevronRight, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid, Calendar, Trash2 } from 'lucide-react';
+import { Search, RotateCcw, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid, Calendar, Trash2 } from 'lucide-react';
+import { QueryPaginationBar } from '@/components/QueryPaginationBar';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths, endOfDay, startOfDay } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
@@ -492,85 +493,17 @@ export default function TagQueryPage() {
 
                 {/* 列表区域 */}
                 <Card className="border-border/40 bg-background/60 backdrop-blur-md shadow-xl overflow-hidden">
-                    {/* 分页 / 视图切换区域 */}
-                    {total > 0 ? (
-                        <div className="p-4 border-b border-border/20 flex flex-col gap-3 md:flex-row md:items-center md:justify-between bg-muted/20">
-                            <div className="text-xs text-muted-foreground">
-                                共 <span className="text-foreground font-medium">{total}</span> 条记录，
-                                当前第 <span className="text-foreground font-medium">{page}</span> / {totalPages} 页
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <div className="hidden md:flex items-center gap-1.5 text-xs text-muted-foreground">
-                                    <span>跳至</span>
-                                    <Input
-                                        value={jumpPageInput}
-                                        onChange={(e) =>
-                                            setJumpPageInput(e.target.value.replace(/[^\d]/g, ''))
-                                        }
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') {
-                                                e.preventDefault();
-                                                handleJump();
-                                            }
-                                        }}
-                                        inputMode="numeric"
-                                        className="h-8 w-[72px] text-center text-xs bg-background/30 border-border/40"
-                                        disabled={isLoading}
-                                    />
-                                    <span>页</span>
-                                    <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={handleJump}
-                                        disabled={isLoading}
-                                        className="h-8 px-3 border-border/40"
-                                    >
-                                        跳转
-                                    </Button>
-                                </div>
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => fetchResults(page - 1)}
-                                    disabled={page === 1 || isLoading}
-                                    className="h-8 w-8 p-0 border-border/40"
-                                >
-                                    <ChevronLeft className="h-4 w-4" />
-                                </Button>
-                                <div className="flex items-center gap-1">
-                                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                                        let pageNum;
-                                        if (totalPages <= 5) pageNum = i + 1;
-                                        else if (page <= 3) pageNum = i + 1;
-                                        else if (page >= totalPages - 2) pageNum = totalPages - 4 + i;
-                                        else pageNum = page - 2 + i;
-                                        return (
-                                            <Button
-                                                key={pageNum}
-                                                variant={page === pageNum ? 'default' : 'ghost'}
-                                                size="sm"
-                                                onClick={() => fetchResults(pageNum)}
-                                                disabled={isLoading}
-                                                className={`h-7 w-7 p-0 text-[10px] ${page === pageNum ? 'shadow-md shadow-primary/20' : ''}`}
-                                            >
-                                                {pageNum}
-                                            </Button>
-                                        );
-                                    })}
-                                </div>
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => fetchResults(page + 1)}
-                                    disabled={page === totalPages || isLoading}
-                                    className="h-8 w-8 p-0 border-border/40"
-                                >
-                                    <ChevronRight className="h-4 w-4" />
-                                </Button>
-                            </div>
-                        </div>
-                    ) : null}
+                    <QueryPaginationBar
+                        total={total}
+                        page={page}
+                        totalPages={totalPages}
+                        isLoading={isLoading}
+                        jumpPageInput={jumpPageInput}
+                        onJumpPageInputChange={setJumpPageInput}
+                        onJump={handleJump}
+                        onPageChange={fetchResults}
+                        placement="top"
+                    />
                     <CardContent className="p-0">
                         {viewMode === 'list' ? (
                             <Table>
@@ -840,6 +773,17 @@ export default function TagQueryPage() {
                             </div>
                         )}
                     </CardContent>
+                    <QueryPaginationBar
+                        total={total}
+                        page={page}
+                        totalPages={totalPages}
+                        isLoading={isLoading}
+                        jumpPageInput={jumpPageInput}
+                        onJumpPageInputChange={setJumpPageInput}
+                        onJump={handleJump}
+                        onPageChange={fetchResults}
+                        placement="bottom"
+                    />
                 </Card>
 
                 {/* 图片预览模态框 */}

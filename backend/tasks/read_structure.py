@@ -3,6 +3,8 @@ from datetime import datetime
 from services.business_structure_manager import (
     get_business_manager,
     get_pddy_business_manager,
+    get_pdgwtc_business_manager,
+    get_hpgwtc_business_manager,
 )
 
 def run_periodic_sync():
@@ -11,6 +13,8 @@ def run_periodic_sync():
     managers = [
         ("default", get_business_manager()),
         ("pddy", get_pddy_business_manager()),
+        ("pdgwtc", get_pdgwtc_business_manager()),
+        ("hpgwtc", get_hpgwtc_business_manager()),
     ]
     
     # Run immediately on start if not already loaded or just specific sync
