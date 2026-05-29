@@ -1,8 +1,9 @@
 [Unit]
-Description=TagLens AI 前后端与分割服务 (DTC_v1 / DTC_v2)
+Description=TagLens AI 前后端、LLM 网关与分割服务 (DTC_v1 / DTC_v2)
 Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
 After=network-online.target
-Requires=taglens-backend.service taglens-frontend.service taglens-llm-gateway.service taglens-dtc-v1.service taglens-dtc-v2.service
+Requires=taglens-llm-gateway.service taglens-backend.service taglens-frontend.service taglens-dtc-v1.service taglens-dtc-v2.service
+# stop/restart taglens.target 时，各子服务通过 PartOf=taglens.target 一并停止/重启
 
 [Install]
 WantedBy=multi-user.target

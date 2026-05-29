@@ -1,4 +1,4 @@
-"""事件分段 AI 描述：HTTP 拉取媒体 + RLQ 多模态（仿 qianwen_test/test.py，无 thinking、不落盘）。"""
+"""事件分段 AI 描述：HTTP 拉取媒体 + RLQ 多模态（流式采集 thinking，与 answer 合并后返回，不落盘）。"""
 from __future__ import annotations
 
 import base64
@@ -32,6 +32,8 @@ EVENT_SEGMENT_AI_TIMEOUT_SEC = float(os.getenv("EVENT_SEGMENT_AI_TIMEOUT_SEC", "
 EVENT_MEDIA_HTTP_ORIGIN = os.getenv("EVENT_MEDIA_HTTP_ORIGIN", "http://127.0.0.1:9002").rstrip("/")
 EVENT_MEDIA_FETCH_TIMEOUT_SEC = float(os.getenv("EVENT_MEDIA_FETCH_TIMEOUT_SEC", "120"))
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
+
+THINKING_ANSWER_SEPARATOR = "------------"
 
 
 def build_public_media_url(path: Optional[str]) -> str:
@@ -118,6 +120,65 @@ def _build_user_content(video_data_url: str, image_data_url: Optional[str]) -> L
     content.append({"type": "video_url", "video_url": {"url": video_data_url}})
     content.append({"type": "text", "text": _build_prompt(image_data_url is not None)})
     return content
+
+
+def _get_delta_text(delta, *field_names: str) -> Optional[str]:
+    """从流式 delta 读取 think/reasoning 等扩展字段（兼容 vLLM Qwen3）。"""
+    for name in field_names:
+        value = getattr(delta, name, None)
+        if value:
+            return value
+    if hasattr(delta, "model_dump"):
+        data = delta.model_dump(exclude_none=True)
+        for name in field_names:
+            if data.get(name):
+                return data[name]
+    return None
+
+
+def _combine_thinking_and_answer(think: str, answer: str) -> str:
+    think = think.strip()
+    answer = answer.strip()
+    if think and answer:
+        return f"{think}\n{THINKING_ANSWER_SEPARATOR}\n{answer}"
+    return answer or think
+
+
+def _stream_rlq_thinking_and_answer(client: OpenAI, video_data_url: str, image_data_url: Optional[str]) -> tuple[str, str]:
+    """流式调用 RLQ，分别采集 thinking 与最终 answer。"""
+    response = client.chat.completions.create(
+        model=EVENT_SEGMENT_AI_MODEL,
+        messages=[{"role": "user", "content": _build_user_content(video_data_url, image_data_url)}],
+        temperature=1.0,
+        top_p=0.95,
+        presence_penalty=1.5,
+        extra_body={
+            "repetition_penalty": 1.0,
+            "top_k": 20,
+            "chat_template_kwargs": {"enable_thinking": True},
+            "mm_processor_kwargs": {
+                "fps": 5,
+                "do_sample_frames": True,
+            },
+        },
+        stream=True,
+    )
+
+    think_parts: List[str] = []
+    answer_parts: List[str] = []
+    for chunk in response:
+        choices = chunk.choices or []
+        if not choices:
+            continue
+        delta = choices[0].delta
+        think = _get_delta_text(delta, "reasoning_content", "reasoning", "thinking")
+        answer = getattr(delta, "content", None)
+        if think:
+            think_parts.append(think)
+        if answer:
+            answer_parts.append(answer)
+
+    return "".join(think_parts), "".join(answer_parts)
 
 
 def inspect_video_damage(video_bytes: bytes) -> VideoDamageReport:
@@ -208,30 +269,11 @@ def generate_segment_description_sync(
     )
 
     try:
-        response = client.chat.completions.create(
-            model=EVENT_SEGMENT_AI_MODEL,
-            messages=[{"role": "user", "content": _build_user_content(video_data_url, image_data_url)}],
-            temperature=1.0,
-            top_p=0.95,
-            presence_penalty=1.5,
-            extra_body={
-                "repetition_penalty": 1.0,
-                "top_k": 20,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "mm_processor_kwargs": {
-                    "fps": 5,
-                    "do_sample_frames": True,
-                },
-            },
-            stream=False,
-        )
+        think_text, answer_text = _stream_rlq_thinking_and_answer(client, video_data_url, image_data_url)
     except Exception as exc:
         raise SegmentAiModelError(format_model_error(exc)) from exc
 
-    choices = response.choices or []
-    if not choices:
-        raise SegmentAiModelError("视觉模型返回为空")
-    answer = (choices[0].message.content or "").strip()
-    if not answer:
+    combined = _combine_thinking_and_answer(think_text, answer_text)
+    if not combined:
         raise SegmentAiModelError("视觉模型未返回描述内容")
-    return answer
+    return combined

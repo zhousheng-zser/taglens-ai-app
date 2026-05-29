@@ -3,6 +3,7 @@ Description=TagLens 统一 LLM 网关（千问/Gemini/Codex/MiMo）
 Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
 After=network-online.target
 Wants=network-online.target
+PartOf=taglens.target
 
 [Service]
 Type=simple

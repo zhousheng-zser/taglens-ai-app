@@ -3,6 +3,7 @@ Description=TagLens AI 后端 (start-backend.sh)
 Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
 After=network-online.target taglens-llm-gateway.service
 Wants=network-online.target taglens-llm-gateway.service
+PartOf=taglens.target
 
 [Service]
 Type=simple
