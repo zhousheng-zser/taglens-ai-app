@@ -632,12 +632,12 @@ async def _run_segment_desc_fill_job(
         rlq_err = await run_blocking(check_rlq_api_available)
         if rlq_err:
             await _log_segment_desc_fill(
-                f"RLQ 服务探测失败（将继续处理 {safe_limit} 段：损坏视频跳过，其余逐段尝试调用模型）: {rlq_err}",
+                f"QRL 服务探测失败（将继续处理 {safe_limit} 段：损坏视频跳过，其余逐段尝试调用模型）: {rlq_err}",
                 "warning",
             )
         else:
             await _log_segment_desc_fill(
-                f"RLQ 服务可用: {os.getenv('EVENT_SEGMENT_AI_BASE_URL', '')}",
+                f"QRL 服务可用: {os.getenv('EVENT_SEGMENT_AI_BASE_URL', '')}",
                 "info",
             )
 
@@ -724,9 +724,9 @@ async def _run_segment_desc_fill_job(
                 else:
                     async with count_lock:
                         failed_count += 1
-                    if "RLQ" in (result.error or "") or "404" in (result.error or ""):
+                    if "QRL" in (result.error or "") or "404" in (result.error or ""):
                         await _log_segment_desc_fill(
-                            f"  -> 补齐失败（RLQ API，视频已通过损坏检测）: {result.error}",
+                            f"  -> 补齐失败（QRL API，视频已通过损坏检测）: {result.error}",
                             "error",
                         )
                     else:

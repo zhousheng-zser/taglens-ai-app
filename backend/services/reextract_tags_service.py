@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 import threading
@@ -11,14 +12,21 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from core.minio_storage_client import MinIOStorageClient
-from services.llm_gateway_client import infer_traffic_image
+from services.llm_gateway_client import LLM_GATEWAY_HARD_TIMEOUT_SEC, infer_traffic_image
 from services.llm_gateway_service import LLMGatewayError
 from services.llm_prompts import build_default_analysis_prompt
+from services.sync_hard_timeout import HardTimeoutError, call_with_hard_timeout
 from services.text_embedding_service import encode_text_to_vector
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "taglens.db"
 MAX_WORKERS = 5
+# 单张推理 wall-clock 上限（略大于主后端→网关硬超时）
+REEXTRACT_INFER_HARD_TIMEOUT_SEC = float(
+    os.getenv("REEXTRACT_INFER_HARD_TIMEOUT_SEC", str(LLM_GATEWAY_HARD_TIMEOUT_SEC + 30))
+)
+# 连续无成功/失败完成则中止整批，避免 5 路全部挂死仍 running 一整夜
+REEXTRACT_STALL_ABORT_SEC = float(os.getenv("REEXTRACT_STALL_ABORT_SEC", "600"))
 
 LogCallback = Callable[[str, str], None]
 
@@ -31,6 +39,10 @@ class ReextractFatalNetworkError(Exception):
     """网络故障重试耗尽后，终止整批任务。"""
 
 
+class ReextractStallError(Exception):
+    """长时间无任何图片完成（疑似上游/网关挂死），终止整批任务。"""
+
+
 def _is_network_error(exc: LLMGatewayError) -> bool:
     msg = (exc.message or "").lower()
     if exc.status_code in (502, 503, 504):
@@ -41,6 +53,8 @@ def _is_network_error(exc: LLMGatewayError) -> bool:
         "connect",
         "timeout",
         "timed out",
+        "超时",
+        "硬超时",
         "socket",
         "dns",
         "unreachable",
@@ -48,6 +62,25 @@ def _is_network_error(exc: LLMGatewayError) -> bool:
         "connection reset",
     )
     return any(k in msg for k in keywords)
+
+
+def _infer_with_hard_timeout(
+    provider: str,
+    data_uri: str,
+    prompt: str,
+) -> dict:
+    try:
+        result, _mock = call_with_hard_timeout(
+            REEXTRACT_INFER_HARD_TIMEOUT_SEC,
+            infer_traffic_image,
+            provider,
+            data_uri,
+            prompt,
+            allow_mock=False,
+        )
+        return result
+    except HardTimeoutError as exc:
+        raise LLMGatewayError(f"推理硬超时: {exc}", status_code=504) from exc
 
 
 def get_images_missing_keywords(limit: int = 2000) -> list[dict]:
@@ -296,11 +329,10 @@ def run_reextract_batch(
                         f"  -> 正在调用统一 LLM 网关 ({provider})...（第 {attempt}/3 次）",
                         "progress",
                     )
-                    analysis_result, _mock = infer_traffic_image(
+                    analysis_result = _infer_with_hard_timeout(
                         provider,
                         data_uri,
                         prompt,
-                        allow_mock=False,
                     )
                     break
                 except LLMGatewayError as exc:
@@ -335,54 +367,100 @@ def run_reextract_batch(
     ok = 0
     fail = 0
     skipped = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        if stop_requested():
-            log("检测到已请求停止：不再提交新图片，等待当前任务结束。", "warning")
+    last_progress_at = time.monotonic()
 
-        futures: dict = {}
-        next_idx = 0
+    def touch_progress() -> None:
+        nonlocal last_progress_at
+        last_progress_at = time.monotonic()
 
-        def submit_more() -> None:
-            nonlocal next_idx
-            while next_idx < total and len(futures) < MAX_WORKERS and not stop_requested():
-                futures[executor.submit(process_one, next_idx, candidates[next_idx])] = next_idx
-                next_idx += 1
+    touch_progress()
 
-        submit_more()
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            if stop_requested():
+                log("检测到已请求停止：不再提交新图片，等待当前任务结束。", "warning")
 
-        while futures:
-            done, _pending = wait(list(futures.keys()), timeout=0.5, return_when=FIRST_COMPLETED)
-            for future in done:
-                futures.pop(future, None)
-                try:
-                    status = future.result()
-                    if status == "success":
-                        ok += 1
-                    elif status == "skipped":
-                        skipped += 1
-                    else:
-                        fail += 1
-                except ReextractFatalNetworkError as exc:
-                    # 若用户已请求停止，则允许当前已在跑的任务自然结束，不要强行取消其它 future
-                    if stop_requested():
-                        log(f"  -> 网络异常已触发致命错误（但已请求停止）：{exc}", "warning")
-                        fail += 1
-                    else:
-                        log(f"\n任务中止: {exc}", "error")
-                        # 尝试取消尚未完成的任务（正在运行的会自然结束）
+            futures: dict = {}
+            next_idx = 0
+
+            def submit_more() -> None:
+                nonlocal next_idx
+                while next_idx < total and len(futures) < MAX_WORKERS and not stop_requested():
+                    futures[executor.submit(process_one, next_idx, candidates[next_idx])] = (
+                        next_idx
+                    )
+                    next_idx += 1
+
+            submit_more()
+
+            while futures:
+                done, _pending = wait(
+                    list(futures.keys()),
+                    timeout=5.0,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    stalled_for = time.monotonic() - last_progress_at
+                    if stalled_for >= REEXTRACT_STALL_ABORT_SEC:
+                        pending_count = sum(1 for f in futures if not f.done())
+                        log(
+                            f"\n任务中止: 已连续 {stalled_for:.0f}s 无任何图片完成 "
+                            f"（阈值 {REEXTRACT_STALL_ABORT_SEC:.0f}s），"
+                            f"仍有 {pending_count} 个并发任务可能卡在 MiMo/网关。"
+                            "请重启 LLM 网关后重新运行本任务。",
+                            "error",
+                        )
                         for pending in futures:
                             if not pending.done():
                                 pending.cancel()
+                        raise ReextractStallError(
+                            f"无进展超过 {REEXTRACT_STALL_ABORT_SEC:.0f}s"
+                        )
+                    continue
+
+                for future in done:
+                    futures.pop(future, None)
+                    try:
+                        status = future.result()
+                        touch_progress()
+                        if status == "success":
+                            ok += 1
+                        elif status == "skipped":
+                            skipped += 1
+                        else:
+                            fail += 1
+                    except ReextractFatalNetworkError as exc:
+                        if stop_requested():
+                            log(
+                                f"  -> 网络异常已触发致命错误（但已请求停止）：{exc}",
+                                "warning",
+                            )
+                            fail += 1
+                        else:
+                            log(f"\n任务中止: {exc}", "error")
+                            for pending in futures:
+                                if not pending.done():
+                                    pending.cancel()
+                            raise
+                    except ReextractStallError:
                         raise
-                except Exception as exc:
-                    fail += 1
-                    log(f"  -> 失败: {exc}", "error")
+                    except Exception as exc:
+                        touch_progress()
+                        fail += 1
+                        log(f"  -> 失败: {exc}", "error")
 
-            if not stop_requested():
-                submit_more()
+                if not stop_requested():
+                    submit_more()
 
-        if stop_requested():
-            log("\n收到停止请求：已停止提交新图片，等待进行中的图片处理完成后退出。", "warning")
+            if stop_requested():
+                log(
+                    "\n收到停止请求：已停止提交新图片，等待进行中的图片处理完成后退出。",
+                    "warning",
+                )
+
+    except ReextractStallError:
+        log(f"\n补齐中止（无进展超时）: 已成功 {ok}，失败 {fail}，跳过 {skipped}", "done")
+        raise
 
     log(f"\n补齐完成: 成功 {ok}，失败 {fail}，跳过 {skipped}", "done")
     return ok, fail

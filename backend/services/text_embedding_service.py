@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import glob
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ BGE_MODEL_CACHE_DIR = Path(
 _bge_tokenizer = None
 _bge_model = None
 _bge_device = None
+_bge_infer_lock = threading.Lock()
 
 
 def _hf_hub_cache_root() -> Path:
@@ -159,13 +161,14 @@ def encode_text_to_vector(text: str) -> bytes:
     """
     tokenizer, model, device = get_bge_model()
 
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with _bge_infer_lock:
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    with torch.no_grad():
-        output = model(**inputs)
-        embedding = output.last_hidden_state[:, 0]
-        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
+        with torch.no_grad():
+            output = model(**inputs)
+            embedding = output.last_hidden_state[:, 0]
+            embedding = torch.nn.functional.normalize(embedding, p=2, dim=1)
 
-    embedding_np = embedding.cpu().numpy().astype(np.float32)
-    return embedding_np.tobytes()
+        embedding_np = embedding.cpu().numpy().astype(np.float32)
+        return embedding_np.tobytes()

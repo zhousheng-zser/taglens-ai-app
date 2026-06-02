@@ -184,7 +184,7 @@ function DataManagementContent() {
                 addLog('任务已被用户手动结束。', 'warning');
             } else if (isStreamDisconnectError(error?.message || '')) {
                 addLog(
-                    `浏览器日志连接已断开（${error.message}）。这通常不是 RLQ 重试失败；后台任务可能仍在运行。`,
+                    `浏览器日志连接已断开（${error.message}）。这通常不是 QRL 重试失败；后台任务可能仍在运行。`,
                     'warning',
                 );
                 const statusUrl = statusEndpointForTaskUrl(url);

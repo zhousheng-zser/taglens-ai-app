@@ -1,6 +1,6 @@
 # TagLens AI
 
-面向交通/安防场景的 **智能图片标签** 与 **事件视频审核** 一体化平台。前端基于 Next.js，后端基于 FastAPI，数据以本地 SQLite 为主，对象存储对接 MinIO，检索侧结合 **Faiss LSH** 与 **BGE 中文向量**；事件分段支持 **FFmpeg 切分**、**RLQ 多模态描述**，图片侧支持 **通义千问 / Gemini / MiMo** 等多模型标注。
+面向交通/安防场景的 **智能图片标签** 与 **事件视频审核** 一体化平台。前端基于 Next.js，后端基于 FastAPI，数据以本地 SQLite 为主，对象存储对接 MinIO，检索侧结合 **Faiss LSH** 与 **BGE 中文向量**；事件分段支持 **FFmpeg 切分**、**QRL多模态描述**，图片侧支持 **通义千问 / Gemini / MiMo** 等多模型标注。
 
 ---
 
@@ -71,7 +71,7 @@
 ┌─────────────┐ ┌──────────┐ ┌────────────────────────────────┐
 │ ④ 本地数据   │ │ MinIO    │ │ ⑤ 外部 / 独立服务（按需调用）   │
 │ taglens.db  │ │ 视频图片  │ │ · 通义千问 / Gemini / MiMo     │
-│ event.db    │ │ 桶名      │ │ · RLQ（事件分段描述）           │
+│ event.db    │ │ 桶名      │ │ · QRL（事件分段描述）           │
 │ manage.db   │ │ bucket-   │ │ · DTC :8010、SAM3 :8011（分割） │
 │ + Faiss索引 │ │ taglens   │ │                                 │
 └─────────────┘ └──────────┘ └────────────────────────────────┘
@@ -88,7 +88,7 @@
 | MinIO | 服务 | 存事件视频、叠框图、导入图片等大文件 |
 | 分割服务 | 8010 / 8011 | GPU 推理，仅「DTC 数据获取」页使用 |
 | LLM 网关 | 8020 | 千问/Gemini/Codex/MiMo 统一视觉推理（独立进程） |
-| 外部 AI | HTTPS | 事件分段 RLQ 等，仍由主后端直连 |
+| 外部 AI | HTTPS | 事件分段 QRL等，仍由主后端直连 |
 
 ### 三条主要业务线
 
@@ -104,7 +104,7 @@
 1. 用户登录后进入「事件数据查询」  
 2. 前端 → `/api/backend/events/search` → 主后端查 **event.db**  
 3. 列表里的视频地址多为 `/bucket-taglens/...`，浏览器经 **前端 9002** 播放  
-4. 审核状态写在 **manage.db**；单段/批量「智能描述」由后端调 **RLQ**，再写回 event.db 分段字段  
+4. 审核状态写在 **manage.db**；单段/批量「智能描述」由后端调 **QRL**，再写回 event.db 分段字段  
 
 **C. 数据管理与 DTC**
 
@@ -134,7 +134,7 @@
 | 对象存储 | MinIO（S3 兼容） |
 | 视频处理 | FFmpeg（事件视频分块） |
 | 分割推理 | DTC（自研 checkpoint）、SAM3（需 NVIDIA GPU） |
-| AI 标注 | Qwen-VL、Gemini、MiMo；事件分段 RLQ |
+| AI 标注 | Qwen-VL、Gemini、MiMo；事件分段 QRL|
 
 ---
 
@@ -174,7 +174,7 @@ taglens-ai-app/
 │   ├── llm_gateway_server.py     # 独立 LLM 网关进程（8020）
 │   │   └── dtc_api.py
 │   ├── services/                 # Faiss、LLM 网关、事件分段 AI、视频切分等
-│   ├── prompts/                  # 事件分段 RLQ Prompt
+│   ├── prompts/                  # 事件分段 QRLPrompt
 │   └── venv/
 ├── data/
 │   ├── taglens.db                # 图片标签主库
@@ -323,7 +323,7 @@ python scripts/import_event_tree_to_db.py \
 |----------|------|
 | `/bulk-import` | 扫描 `data/local/img` 批量分析入库，支持暂停/恢复/取消与任务日志 |
 | `/project-sync` | 管理 `projects` 表：添加/编辑同步脚本、定时执行、选择 Qwen/Gemini 模型与 API 调用概率 |
-| `/data-management` | **数据运维中心**（NDJSON 流式日志）：<br>• 按前缀删除 MinIO + 库内关联数据<br>• 配对一致性检查（JPG/JSON 孤立清理）<br>• 全库 Faiss 向量审计<br>• **事件视频分块**（FFmpeg，按条数/事件类型）<br>• **事件分段描述补齐**（RLQ 批量，可关页后台跑，实时日志流）<br>• **缺失标签补齐**（Gemini 子进程脚本） |
+| `/data-management` | **数据运维中心**（NDJSON 流式日志）：<br>• 按前缀删除 MinIO + 库内关联数据<br>• 配对一致性检查（JPG/JSON 孤立清理）<br>• 全库 Faiss 向量审计<br>• **事件视频分块**（FFmpeg，按条数/事件类型）<br>• **事件分段描述补齐**（QRL 批量，可关页后台跑，实时日志流）<br>• **缺失标签补齐**（Gemini 子进程脚本） |
 | `/dtc-data-fetch` | 上传图集、提交 DTC_v1(SAM3)/DTC_v2(DTC) 分割任务、查看结果与 ZIP |
 | `/user-management` | 用户 CRUD、审核员时间段、审核统计与时序图表 |
 
@@ -361,7 +361,7 @@ python scripts/import_event_tree_to_db.py \
 | GET | `/events/meta` | 项目/事件类型下拉字典 |
 | POST | `/events/search` | 分页检索（含审核状态、分段、问答筛选） |
 | POST | `/events/segment-annotations` | 保存分段描述与审核勾选 |
-| POST | `/events/segment-ai-description` | **单段** RLQ 智能描述（线程池，不落盘） |
+| POST | `/events/segment-ai-description` | **单段** QRL 智能描述（线程池，不落盘） |
 | POST | `/events/delete` | 删除事件记录（管理员） |
 
 ### 数据管理 ` /api/management`
@@ -424,10 +424,10 @@ MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 # HTTP_PROXY=...
 # HTTPS_PROXY=...
 
-# --- 事件分段 RLQ ---
+# --- 事件分段 QRL ---
 EVENT_SEGMENT_AI_BASE_URL=https://.../v1
 EVENT_SEGMENT_AI_API_KEY=EMPTY
-EVENT_SEGMENT_AI_MODEL=model/RLQ
+EVENT_SEGMENT_AI_MODEL=model/QRL
 EVENT_SEGMENT_AI_TIMEOUT_SEC=600
 # 媒体 URL 拼接根（与浏览器访问同源，如 http://192.168.x.x:9002）
 EVENT_MEDIA_HTTP_ORIGIN=http://127.0.0.1:9002
@@ -539,7 +539,7 @@ systemctl status taglens.target taglens-backend.service taglens-frontend.service
 
 | 场景 | 机制 |
 |------|------|
-| 事件查询页 · 单段按钮 | `POST /events/segment-ai-description`，15 线程池，HTTP 拉视频/叠框图，调用 RLQ，**不写库**（前端确认后再保存） |
+| 事件查询页 · 单段按钮 | `POST /events/segment-ai-description`，15 线程池，HTTP 拉视频/叠框图，调用 QRL，**不写库**（前端确认后再保存） |
 | 数据管理 · 批量补齐 | `POST /api/management/event-segment-desc-fill`，筛选：有效 mp4、描述为空、事件类型可选；**N 路并行**（`EVENT_SEGMENT_DESC_FILL_WORKERS`）；写库前 per-event 锁 + 快照防覆盖；日志 `data/segment_desc_fill.log` |
 
 Prompt 定义：`backend/prompts/event_segment_prompt.py`（与 `qianwen_test/test.py` 对齐）。

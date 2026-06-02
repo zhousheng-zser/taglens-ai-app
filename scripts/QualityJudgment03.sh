@@ -128,6 +128,8 @@ daily_cleanup() {
 }
 
 fetch_camera_list() {
+    local cwd
+    cwd="$(pwd)"
     log_msg "正在获取相机列表: ${MVP_BIN} -ip ${MVP_IP} -user ${MVP_USER} -pwd ${MVP_PWD} -querycameras"
     cd "${MVP_TOOLS_DIR}" || exit 1
     "${MVP_BIN}" -ip "${MVP_IP}" -user "${MVP_USER}" -pwd "${MVP_PWD}" -querycameras > "${CAMERAS_RAW_FILE}" 2>&1
@@ -143,6 +145,7 @@ fetch_camera_list() {
         exit 1
     fi
     log_msg "📊 相机总数: ${total}"
+    cd "${cwd}" || exit 1
 }
 
 multi_thread_grab_and_pack() {
@@ -231,7 +234,7 @@ final_pack_upload() {
     local files=()
     while IFS= read -r f; do
         files+=("$f")
-    done < <(find ./tmp -maxdepth 1 -name "*.tar.gz" -type f | sort)
+    done < <(find "${PROJECT_ROOT}/tmp" -maxdepth 1 -name "*.tar.gz" -type f | sort)
 
     local total_files=${#files[@]}
     log_msg "📦 最终有效子包数: ${total_files}"
@@ -241,7 +244,7 @@ final_pack_upload() {
         return
     fi
 
-    mkdir -p ./upload
+    mkdir -p "${PROJECT_ROOT}/upload"
     local files_per_pack=$(( (total_files + 9) / 10 ))
     local pack_num start i pack_dir final_name
 
@@ -251,14 +254,14 @@ final_pack_upload() {
             break
         fi
 
-        pack_dir="./tmp/pack_${pack_num}"
+        pack_dir="${PROJECT_ROOT}/tmp/pack_${pack_num}"
         mkdir -p "${pack_dir}"
 
         for ((i=start; i<start+files_per_pack && i<total_files; i++)); do
             cp "${files[$i]}" "${pack_dir}/"
         done
 
-        final_name="./upload/collection-${start_ts}-part${pack_num}.tar.gz"
+        final_name="${PROJECT_ROOT}/upload/collection-${start_ts}-part${pack_num}.tar.gz"
         tar -czf "${final_name}" -C "${pack_dir}" .
         rm -rf "${pack_dir}"
         log_msg "📦 已生成: ${final_name}"

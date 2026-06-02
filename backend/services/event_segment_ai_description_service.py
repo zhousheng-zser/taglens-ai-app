@@ -1,4 +1,4 @@
-"""事件分段 AI 描述：HTTP 拉取媒体 + RLQ 多模态（流式采集 thinking，与 answer 合并后返回，不落盘）。"""
+"""事件分段 AI 描述：HTTP 拉取媒体 + QRL 多模态（流式采集 thinking，与 answer 合并后返回，不落盘）。"""
 from __future__ import annotations
 
 import base64
@@ -23,10 +23,10 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="segm
 
 EVENT_SEGMENT_AI_BASE_URL = os.getenv(
     "EVENT_SEGMENT_AI_BASE_URL",
-    "https://u149890-jyv3-5b09aec6.westb.seetacloud.com:8443/v1",
+    "http://192.168.11.148:6006/v1",
 )
 EVENT_SEGMENT_AI_API_KEY = os.getenv("EVENT_SEGMENT_AI_API_KEY", "EMPTY")
-EVENT_SEGMENT_AI_MODEL = os.getenv("EVENT_SEGMENT_AI_MODEL", "model/RLQ")
+EVENT_SEGMENT_AI_MODEL = os.getenv("EVENT_SEGMENT_AI_MODEL", "models/QRL")
 EVENT_SEGMENT_AI_TIMEOUT_SEC = float(os.getenv("EVENT_SEGMENT_AI_TIMEOUT_SEC", "600"))
 
 EVENT_MEDIA_HTTP_ORIGIN = os.getenv("EVENT_MEDIA_HTTP_ORIGIN", "http://127.0.0.1:9002").rstrip("/")
@@ -145,7 +145,7 @@ def _combine_thinking_and_answer(think: str, answer: str) -> str:
 
 
 def _stream_rlq_thinking_and_answer(client: OpenAI, video_data_url: str, image_data_url: Optional[str]) -> tuple[str, str]:
-    """流式调用 RLQ，分别采集 thinking 与最终 answer。"""
+    """流式调用 QRL，分别采集 thinking 与最终 answer。"""
     response = client.chat.completions.create(
         model=EVENT_SEGMENT_AI_MODEL,
         messages=[{"role": "user", "content": _build_user_content(video_data_url, image_data_url)}],
@@ -187,18 +187,18 @@ def inspect_video_damage(video_bytes: bytes) -> VideoDamageReport:
 
 
 def get_video_damage_reason(video_bytes: bytes) -> Optional[str]:
-    """ffmpeg 检测损坏；None=可送 RLQ，非 None=损坏原因。"""
+    """ffmpeg 检测损坏；None=可送 QRL，非 None=损坏原因。"""
     report = inspect_video_damage(video_bytes)
     return report.skip_reason
 
 
 def fetch_segment_video_bytes(segment_video_url: str) -> tuple[bytes, str]:
-    """拉取分段视频（供批量任务：先检测再决定是否调 RLQ）。"""
+    """拉取分段视频（供批量任务：先检测再决定是否调 QRL）。"""
     return _fetch_media_bytes(segment_video_url)
 
 
 def check_rlq_api_available() -> Optional[str]:
-    """任务开始前探测 RLQ；None=可用，否则返回原因。"""
+    """任务开始前探测 QRL；None=可用，否则返回原因。"""
     url = f"{EVENT_SEGMENT_AI_BASE_URL.rstrip('/')}/models"
     try:
         with httpx.Client(trust_env=False, timeout=20.0) as client:
@@ -207,17 +207,17 @@ def check_rlq_api_available() -> Optional[str]:
                 headers={"Authorization": f"Bearer {EVENT_SEGMENT_AI_API_KEY}"},
             )
     except httpx.TimeoutException:
-        return f"RLQ API 连接超时: {url}"
+        return f"QRL API 连接超时: {url}"
     except httpx.HTTPError as exc:
-        return f"RLQ API 连接失败: {exc}"
+        return f"QRL API 连接失败: {exc}"
 
     if response.status_code == 404:
         return (
-            "RLQ 视觉 API 返回 404（常见于 AutoDL 实例关机或端口未映射），"
+            "QRL 视觉 API 返回 404（常见于 AutoDL 实例关机或端口未映射），"
             f"请检查 EVENT_SEGMENT_AI_BASE_URL={EVENT_SEGMENT_AI_BASE_URL}"
         )
     if response.status_code >= 400:
-        return f"RLQ API 返回 HTTP {response.status_code}"
+        return f"QRL API 返回 HTTP {response.status_code}"
     return None
 
 
@@ -227,12 +227,12 @@ def format_model_error(exc: Exception) -> str:
     lower = message.lower()
     if "<html" in lower or "not found" in lower and "404" in lower:
         return (
-            "RLQ 视觉 API 不可用(404)，未成功调用模型。"
+            "QRL 视觉 API 不可用(404)，未成功调用模型。"
             f"请检查 backend/.env 中 EVENT_SEGMENT_AI_BASE_URL={EVENT_SEGMENT_AI_BASE_URL}"
         )
     if len(message) > 400:
         return message[:400] + "…"
-    return f"RLQ 视觉模型调用失败: {message}"
+    return f"QRL 视觉模型调用失败: {message}"
 
 
 def generate_segment_description_sync(

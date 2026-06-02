@@ -392,7 +392,7 @@ def process_archive(archive_file):
                                 files = {'file': (subfile, img_file, 'image/jpeg')}
                                 data = {
                                     'project_name': PROJECT_NAME,
-                                    'threshold': 0.7409,
+                                    'threshold': 0.897409,
                                     'camera_id': camera_id
                                 }
                                 if sz_from_row:

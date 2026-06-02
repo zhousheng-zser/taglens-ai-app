@@ -26,6 +26,13 @@ SEGMENT_DESC_FILL_MAX_WORKERS = max(
     1,
     int(os.getenv("EVENT_SEGMENT_DESC_FILL_WORKERS", "7")),
 )
+# 本地 QRL 冷启动慢：网络类失败间隔重试，默认 2 分钟 × 5 次（运行时读 .env，见 get_batch_max_workers）
+def _max_retries() -> int:
+    return max(1, int(os.getenv("EVENT_SEGMENT_DESC_FILL_MAX_RETRIES", "5")))
+
+
+def _retry_wait_sec() -> int:
+    return max(1, int(os.getenv("EVENT_SEGMENT_DESC_FILL_RETRY_WAIT_SEC", "120")))
 _BATCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=SEGMENT_DESC_FILL_MAX_WORKERS,
     thread_name_prefix="segment-desc-fill",
@@ -61,6 +68,13 @@ def _lock_for_event(key: Tuple[str, str, str]) -> threading.Lock:
 
 class SegmentDescFillFatalNetworkError(Exception):
     """网络故障重试耗尽后，终止整批分段描述补齐。"""
+
+
+def _retry_wait_label() -> str:
+    sec = _retry_wait_sec()
+    if sec >= 60 and sec % 60 == 0:
+        return f"{sec // 60} 分钟后"
+    return f"{sec} 秒后"
 
 
 def _is_network_error_message(message: str) -> bool:
@@ -114,15 +128,20 @@ def fill_one_segment_description(
 
     video_bytes = None
     video_ct = ""
-    for attempt in range(1, 4):
+    max_retries = _max_retries()
+    retry_wait = _retry_wait_sec()
+    for attempt in range(1, max_retries + 1):
         try:
             video_bytes, video_ct = fetch_segment_video_bytes(segment_video_url)
             break
         except SegmentAiMediaError as exc:
             err = f"媒体拉取失败: {exc}"
-            if _is_network_error_message(err) and attempt < 3:
-                _log(f"  -> 网络异常，2秒后重试: {err}", "warning")
-                time.sleep(2)
+            if _is_network_error_message(err) and attempt < max_retries:
+                _log(
+                    f"  -> 网络异常，{_retry_wait_label()}重试: {err}",
+                    "warning",
+                )
+                time.sleep(retry_wait)
                 continue
             return SegmentFillResult(
                 success=False,
@@ -139,16 +158,19 @@ def fill_one_segment_description(
         return SegmentFillResult(
             success=False,
             skipped=True,
-            error=f"视频损坏，跳过补齐（未调用 RLQ）: {reason}",
+            error=f"视频损坏，跳过补齐（未调用 QRL）: {reason}",
             damage_log=damage_log,
             event_id=event_id,
             segment_index=segment_index,
         )
 
     description = None
-    for attempt in range(1, 4):
+    for attempt in range(1, max_retries + 1):
         try:
-            _log(f"  -> 正在调用 RLQ 视觉模型...（第 {attempt}/3 次）", "progress")
+            _log(
+                f"  -> 正在调用 QRL 视觉模型...（第 {attempt}/{max_retries} 次）",
+                "progress",
+            )
             description = generate_segment_description_sync(
                 segment_video_url,
                 overlay_image_url,
@@ -170,12 +192,16 @@ def fill_one_segment_description(
         except SegmentAiModelError as exc:
             err = format_model_error(exc)
             if _is_network_error_message(err):
-                if attempt < 3:
-                    _log(f"  -> 网络异常，2秒后重试: {err}", "warning")
-                    time.sleep(2)
+                if attempt < max_retries:
+                    _log(
+                        f"  -> 网络异常，{_retry_wait_label()}重试: {err}",
+                        "warning",
+                    )
+                    time.sleep(retry_wait)
                     continue
                 raise SegmentDescFillFatalNetworkError(
-                    "连续 3 次网络异常，终止整批事件分段描述补齐任务。"
+                    f"连续 {max_retries} 次网络异常，"
+                    "终止整批事件分段描述补齐任务。"
                 ) from exc
             return SegmentFillResult(
                 success=False,
@@ -187,12 +213,16 @@ def fill_one_segment_description(
         except Exception as exc:
             err = str(exc)
             if _is_network_error_message(err):
-                if attempt < 3:
-                    _log(f"  -> 网络异常，2秒后重试: {err}", "warning")
-                    time.sleep(2)
+                if attempt < max_retries:
+                    _log(
+                        f"  -> 网络异常，{_retry_wait_label()}重试: {err}",
+                        "warning",
+                    )
+                    time.sleep(retry_wait)
                     continue
                 raise SegmentDescFillFatalNetworkError(
-                    "连续 3 次网络异常，终止整批事件分段描述补齐任务。"
+                    f"连续 {max_retries} 次网络异常，"
+                    "终止整批事件分段描述补齐任务。"
                 ) from exc
             return SegmentFillResult(
                 success=False,

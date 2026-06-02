@@ -203,7 +203,7 @@ def _classify_severity(
     duration_sec: float,
 ) -> Tuple[str, bool, Optional[str]]:
     """
-    跳过规则（满足任一即不送 RLQ）：
+    跳过规则（满足任一即不送 QRL）：
     1. 有效时长 < _MIN_DURATION_SEC（默认 5s）
     2. 解码错误 ≥ _MIN_DECODE_ERRORS_SKIP（默认 3）
     3. 解码错误 ≥ 1 且（首帧失败 或 异常帧 ≥ _MIN_CORRUPT_FRAMES_SKIP）

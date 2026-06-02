@@ -16,7 +16,9 @@ import httpx
 import requests
 from openai import OpenAI
 
+from services.http_timeouts import mimo_upstream_timeout
 from services.llm_prompts import build_default_analysis_prompt
+from services.sync_hard_timeout import HardTimeoutError, call_with_hard_timeout
 
 LLMProviderName = Literal["qwen", "gemini", "codex", "mimo"]
 SUPPORTED_PROVIDERS: tuple[str, ...] = ("qwen", "gemini", "codex", "mimo")
@@ -26,6 +28,10 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5")
 MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+MIMO_HTTP_TIMEOUT_SEC = float(os.getenv("MIMO_HTTP_TIMEOUT_SEC", "120"))
+MIMO_HTTP_HARD_TIMEOUT_SEC = float(
+    os.getenv("MIMO_HTTP_HARD_TIMEOUT_SEC", str(MIMO_HTTP_TIMEOUT_SEC + 15))
+)
 GEMINI_API_URL_TEMPLATE = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
@@ -127,7 +133,7 @@ def _call_qwen(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:
     return _parse_json_from_model_text(content_text)
 
 
-def _call_mimo(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:
+def _call_mimo_once(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:
     url = f"{MIMO_BASE_URL.rstrip('/')}/chat/completions"
     payload = {
         "model": MIMO_MODEL,
@@ -146,7 +152,7 @@ def _call_mimo(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:
         "stream": False,
     }
     headers = {"api-key": api_key, "Content-Type": "application/json"}
-    with httpx.Client(trust_env=False, timeout=120.0) as client:
+    with httpx.Client(trust_env=False, timeout=mimo_upstream_timeout()) as client:
         response = client.post(url, headers=headers, json=payload)
     if response.status_code != 200:
         try:
@@ -161,6 +167,19 @@ def _call_mimo(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:
         raise LLMGatewayError("MiMo API 返回格式异常：无 choices")
     content_text = choices[0].get("message", {}).get("content") or ""
     return _parse_json_from_model_text(content_text)
+
+
+def _call_mimo(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:
+    try:
+        return call_with_hard_timeout(
+            MIMO_HTTP_HARD_TIMEOUT_SEC,
+            _call_mimo_once,
+            api_key,
+            data_uri,
+            prompt,
+        )
+    except HardTimeoutError as exc:
+        raise LLMGatewayError(f"MiMo API 硬超时: {exc}", status_code=504) from exc
 
 
 def _call_gemini(api_key: str, data_uri: str, prompt: str) -> dict[str, Any]:

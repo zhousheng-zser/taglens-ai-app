@@ -6,16 +6,22 @@ from typing import Any, Optional
 
 import httpx
 
+from services.http_timeouts import llm_gateway_client_timeout
 from services.llm_gateway_service import LLMGatewayError
+from services.sync_hard_timeout import HardTimeoutError, call_with_hard_timeout
 
 LLM_GATEWAY_URL = os.getenv("LLM_GATEWAY_URL", "http://127.0.0.1:8020").rstrip("/")
 LLM_GATEWAY_TIMEOUT_SEC = float(os.getenv("LLM_GATEWAY_TIMEOUT_SEC", "180"))
+# 略大于 httpx 整请求超时，防止客户端 read drip 导致永不返回
+LLM_GATEWAY_HARD_TIMEOUT_SEC = float(
+    os.getenv("LLM_GATEWAY_HARD_TIMEOUT_SEC", str(LLM_GATEWAY_TIMEOUT_SEC + 20))
+)
 
 
-def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _post_json_once(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     url = f"{LLM_GATEWAY_URL}{path}"
     try:
-        with httpx.Client(trust_env=False, timeout=LLM_GATEWAY_TIMEOUT_SEC) as client:
+        with httpx.Client(trust_env=False, timeout=llm_gateway_client_timeout()) as client:
             response = client.post(url, json=payload)
     except httpx.TimeoutException as exc:
         raise LLMGatewayError(f"LLM 网关连接超时: {url}", status_code=504) from exc
@@ -37,6 +43,18 @@ def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return response.json()
     except Exception as exc:
         raise LLMGatewayError(f"LLM 网关响应非 JSON: {exc}") from exc
+
+
+def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return call_with_hard_timeout(
+            LLM_GATEWAY_HARD_TIMEOUT_SEC,
+            _post_json_once,
+            path,
+            payload,
+        )
+    except HardTimeoutError as exc:
+        raise LLMGatewayError(f"LLM 网关硬超时: {exc}", status_code=504) from exc
 
 
 def infer_traffic_image(
