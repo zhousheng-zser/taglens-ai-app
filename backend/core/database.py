@@ -921,7 +921,21 @@ def update_project_stop_time_db(project_name_or_script: str):
         # Like operator to match partial path if needed, but safer to match basename if stored as full path
         # Assuming script_path column changes. 
         # Actually simplest is to fuzzy match script_path.
-        cursor.execute("UPDATE projects SET last_stopped_at = ? WHERE script_path LIKE ?", (now_str, f"%{script_name}"))
+        cursor.execute(
+            "UPDATE projects SET last_stopped_at = ?, status = 'idle' WHERE script_path LIKE ?",
+            (now_str, f"%{script_name}"),
+        )
+
+
+def update_project_status_by_script_db(script_path: str, status: str):
+    """按脚本路径更新 projects.status（running / idle）。"""
+    script_name = os.path.basename(script_path)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE projects SET status = ? WHERE script_path LIKE ?",
+            (status, f"%{script_name}"),
+        )
 
 def delete_project_db(project_id: str):
     with get_db_connection() as conn:

@@ -9,6 +9,7 @@ PartOf=taglens.target
 Type=simple
 WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
 ExecStart=/bin/bash /opt/Traffic-LLM/zser/taglens-ai-app/start-backend.sh
+KillMode=process
 
 Restart=on-failure
 RestartSec=5

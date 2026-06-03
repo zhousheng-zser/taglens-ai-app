@@ -78,6 +78,15 @@ TARGET_SSH_PASSWORD = "md@xinxi2022"
 TARGET_DIR = "/root/CollectionIMGJudgment/upload"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+from sync_upload_helpers import (
+    wait_for_backend_ready,
+    on_upload_connection_error,
+    reset_upload_connection_streak,
+)
+from sync_cycle_state import load_cycle_state, log_cycle_resume, save_cycle_state
+
 PROJECT_LOCAL_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "runtime", "sync_task_04"))
 DOWNLOAD_DIR = os.path.join(PROJECT_LOCAL_ROOT, "downloads")
 TMP_DIR = os.path.join(PROJECT_LOCAL_ROOT, "tmp")
@@ -293,6 +302,7 @@ def process_archive(archive_file):
 
         """处理下载的归档文件"""
         ensure_local_directories()
+        wait_for_backend_ready()
         shutil.rmtree(TMP_DIR, ignore_errors=True)
         shutil.rmtree(TMP_SECOND, ignore_errors=True)
         os.makedirs(TMP_DIR, exist_ok=True)
@@ -407,6 +417,7 @@ def process_archive(archive_file):
                                 )
                                 
                                 if response.status_code == 200:
+                                    reset_upload_connection_streak()
                                     res_json = response.json()
                                     status = res_json.get("status")
                                     if status == "success":
@@ -424,9 +435,9 @@ def process_archive(archive_file):
                                     print(f"    ❌ 请求失败: Status {response.status_code} - {response.text}")
                                     
                         except requests.exceptions.ConnectionError as e:
-                            print(f"    ❌ [CRITICAL] 无法连接到后端服务 (Connection Refused)。后端可能已崩溃或正在重启。")
-                            print(f"    详细错误: {e}")
-                            sys.exit(0)
+                            print(f"    ❌ 无法连接到后端，跳过本张并继续")
+                            on_upload_connection_error(e)
+                            continue
                         except requests.exceptions.Timeout:
                             print(f"    ❌ 请求超时 (300s)。后端处理时间过长。")
                         except Exception as e:
@@ -805,7 +816,11 @@ def reset_cycle_state():
 def main():
     """主函数"""
     ensure_local_directories()
-    cycle = reset_cycle_state()
+    cycle = load_cycle_state(PROJECT_LOCAL_ROOT)
+    if cycle is None:
+        cycle = reset_cycle_state()
+    else:
+        log_cycle_resume(cycle)
 
     while True:
         try:
@@ -869,6 +884,11 @@ def main():
             import traceback
             traceback.print_exc()
             time.sleep(10)
+
+        try:
+            save_cycle_state(PROJECT_LOCAL_ROOT, cycle)
+        except Exception as save_err:
+            print(f"⚠️ 保存 cycle_state 失败: {save_err}")
 
         delete_tar_gz_in_cwd()
         delete_directory(TMP_DIR)

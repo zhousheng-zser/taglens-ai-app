@@ -157,7 +157,7 @@ def _stream_rlq_thinking_and_answer(client: OpenAI, video_data_url: str, image_d
             "top_k": 20,
             "chat_template_kwargs": {"enable_thinking": True},
             "mm_processor_kwargs": {
-                "fps": 5,
+                #"fps": 5,
                 "do_sample_frames": True,
             },
         },

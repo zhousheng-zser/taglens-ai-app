@@ -43,7 +43,16 @@ from core.database import (
     update_project_model_db,
     update_project_probability_db,
     update_project_stop_time_db,
+    update_project_status_by_script_db,
     delete_image_by_uuid,
+)
+from services.project_sync_systemd import (
+    is_managed_sync_script,
+    is_running as sync_script_is_running,
+    log_file_for_script,
+    read_log_tail,
+    start_script as sync_start_script,
+    stop_script as sync_stop_script,
 )
 from core.event_database import init_event_database
 from core.manage_database import init_manage_database
@@ -847,6 +856,11 @@ async def bulk_import_logs(
 def read_root():
     return {"message": "欢迎使用 TagLens AI 后端服务 (Qwen-Powered)"}
 
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
 def extract_image_format_from_data_uri(data_uri: str) -> tuple[str, bytes]:
     """
     从 data URI 中提取图片格式和二进制数据
@@ -1610,85 +1624,61 @@ async def run_project_script_api(
     script_path: str = Form(...),
     project_name: str = Form(...)
 ):
-    """执行指定的 Python 脚本"""
+    """执行指定的 Python 脚本（sync_task_01~04 经 systemd 独立单元）"""
     print(f"[DEBUG] Received run request for: {script_path}, project: {project_name}")
-    
+
     if not script_path.endswith('.py') and not script_path.endswith('.sh'):
         return {"success": False, "message": "仅支持 .py 或 .sh 脚本"}
-    
-    if ".." in script_path or script_path.startswith("/"):
-        abs_path = os.path.abspath(script_path)
-        project_root = os.path.abspath(PROJECT_ROOT)
-        if not abs_path.startswith(project_root):
-             return {"success": False, "message": "非法脚本路径"}
-    
-    # 1. 确定工作目录（使用当前代码所在项目根目录，避免机器迁移后路径失效）
+
+    if ".." in script_path:
+        return {"success": False, "message": "非法脚本路径"}
+
     cwd = PROJECT_ROOT
-    
-    # 2. 准备日志文件
-    log_dir = os.path.join(cwd, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"{os.path.basename(script_path)}.log")
-    
-    # 3. 检查是否已经在运行
-    check_cmd = ["pgrep", "-f", f"python.*{os.path.basename(script_path)}"]
-    try:
-        subprocess.check_output(check_cmd)
+    running, _ = sync_script_is_running(script_path)
+    if running:
         return {"success": False, "message": "该脚本正在运行中", "running": True}
-    except subprocess.CalledProcessError:
-        pass
-        
-    # 4. 构建命令 (使用 nohup 后台运行)
-    # 这里的关键是 'python -u' 确保无缓冲输出，以便日志实时写入
-    # 4. 启动进程 (使用 subprocess.Popen 接管输出)
+
+    if is_managed_sync_script(script_path):
+        ok, msg = sync_start_script(cwd, script_path)
+        if not ok:
+            return {"success": False, "message": msg}
+        update_project_status_by_script_db(script_path, "running")
+        return {"success": True, "message": msg}
+
+    log_file = log_file_for_script(cwd, script_path)
     try:
-        # 确保日志文件可写，先写入启动头 (使用 'w' 模式清空旧日志)
-        with open(log_file, 'w') as f:
+        with open(log_file, 'w', encoding='utf-8') as f:
             f.write(f"\n{'='*30}\n")
             f.write(f"[{datetime.now()}] 启动脚本: {script_path}\n")
-        
-        # 打开文件句柄传递给子进程
+
         f_out = open(log_file, 'a')
-        
-        # 构建命令
-        # 使用固定 venv 解释器，避免 activate 后仍命中系统 python3
         venv_python = os.path.join(cwd, "backend", "venv", "bin", "python")
         if not os.path.exists(venv_python):
             return {"success": False, "message": f"未找到虚拟环境解释器: {venv_python}"}
-        # 使用 exec 确保 python 进程替换 bash，这样 PID 才是 python 的，方便 pkill
         run_cmd = f"exec {shlex.quote(venv_python)} -u {shlex.quote(script_path)}"
-        
         process = subprocess.Popen(
             ["bash", "-c", run_cmd],
             cwd=cwd,
             stdout=f_out,
-            stderr=f_out,  # stderr 也重定向到同一个日志
-            preexec_fn=os.setsid, # 关键：开启新会话，即使后端关闭，脚本仍运行
+            stderr=f_out,
+            preexec_fn=os.setsid,
         )
-        
         pid = process.pid
-        
-        # 不等待子进程，直接记录并返回
-        # 父进程可以安全关闭文件句柄，子进程已经继承
-        # f_out.close() # 可以在 finally 中关闭
-        
         with process_store_lock:
             process_store[script_path] = {
                 'pid': pid,
                 'log_file': log_file,
                 'start_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
-            
+        update_project_status_by_script_db(script_path, "running")
         return {"success": True, "message": "脚本启动成功", "pid": pid}
-        
     except Exception as e:
         return {"success": False, "message": f"启动失败: {str(e)}"}
     finally:
-        # 尝试关闭文件句柄 (如果是局部变量需要检查是否存在)
         try:
             if 'f_out' in locals() and not f_out.closed:
                 f_out.close()
-        except:
+        except Exception:
             pass
 
 
@@ -1718,28 +1708,26 @@ async def update_project_probability_api(
 async def stop_project_script_api(
     script_path: str = Form(...)
 ):
-    """停止指定的脚本"""
-    # 直接使用 pkill 匹配命令行查杀，简单粗暴且有效
-    # 匹配 'python -u {script_path}'
+    """停止指定的脚本（sync 单元用 systemctl stop）"""
+    cwd = PROJECT_ROOT
     try:
-        # pkill -f Returns 0 if at least one process matched and was signaled
-        # 使用 -9 强制终止，防止脚本挂起或捕获信号后不退出
+        if is_managed_sync_script(script_path):
+            ok, msg = sync_stop_script(cwd, script_path)
+            update_project_stop_time_db(script_path)
+            return {"success": ok, "message": msg}
+
         cmd = ["pkill", "-9", "-f", f"python.*{os.path.basename(script_path)}"]
         subprocess.check_call(cmd)
-        
-        # 记录停止操作到日志（如果可能）
-        cwd = PROJECT_ROOT
-        log_file = os.path.join(cwd, "logs", f"{os.path.basename(script_path)}.log")
+        log_file = log_file_for_script(cwd, script_path)
         if os.path.exists(log_file):
-            with open(log_file, "a") as f:
-                f.write(f"\n[{datetime.now().strftime('%H:%M:%S')}] 用户请求停止脚本 (backend API)\n")
-        
-        # 记录停止时间
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(
+                    f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"用户请求停止脚本 (backend API)\n"
+                )
         update_project_stop_time_db(script_path)
-                
         return {"success": True, "message": "已发送停止信号"}
     except subprocess.CalledProcessError:
-        # 即使进程未找到（可能已自行退出），我们也视为“停止”，更新时间
         update_project_stop_time_db(script_path)
         return {"success": True, "message": "进程已停止 (更新了停止时间)"}
     except Exception as e:
@@ -1749,40 +1737,12 @@ async def stop_project_script_api(
 @app.get("/project/logs")
 async def get_project_logs_api(script_path: str = Query(...)):
     """获取脚本日志"""
-    
-    # 1. 确定日志路径
     cwd = PROJECT_ROOT
-    log_file = os.path.join(cwd, "logs", f"{os.path.basename(script_path)}.log")
-    
-    # 2. 检查进程状态
-    # 修复：不使用 shell=True，避免 pgrep 匹配到 shell 命令本身
-    check_cmd = ["pgrep", "-a", "-f", f"python.*{os.path.basename(script_path)}"]
-    status = "idle"
-    try:
-        output = subprocess.check_output(check_cmd).decode().strip()
-        if output:
-            # 再次检查，确保不是编辑器或无关进程
-            status = "running"
-            # print(f"[DEBUG] 发现进程: {output}")
-    except subprocess.CalledProcessError:
-        status = "idle"
-        
-    # 3. 读取日志
-    logs = []
-    if os.path.exists(log_file):
-        try:
-            # 读取最后 300 行
-            # 使用 tail 命令可能更高效，避免读取整个大文件
-            tail_cmd = f"tail -n 300 {log_file}"
-            log_output = subprocess.check_output(tail_cmd, shell=True).decode('utf-8', errors='replace')
-            logs = log_output.splitlines()
-        except Exception as e:
-            logs = [f"读取日志错误: {e}"]
-    else:
-        logs = ["等待日志生成..."]
-
+    running, _ = sync_script_is_running(script_path)
+    status = "running" if running else "idle"
+    logs = read_log_tail(cwd, script_path)
     return {
-        "success": True, 
+        "success": True,
         "logs": logs,
         "status": status
     }
@@ -1857,16 +1817,8 @@ async def get_projects_api():
         
         script_exists = os.path.exists(full_path) and os.path.isfile(full_path)
         
-        # 实时检查进程状态
-        real_status = 'idle'
-        try:
-             # 我们在 run 接口启动时用的是 exec python3 -u {script_path}
-             # 为了稳健，使用 script_path 的文件名进行模糊匹配，不使用 shell=True 以避免自匹配
-             check_cmd = ["pgrep", "-f", f"python.*{os.path.basename(p['script_path'])}"]
-             subprocess.check_output(check_cmd)
-             real_status = 'running'
-        except subprocess.CalledProcessError:
-             real_status = 'idle'
+        running, _ = sync_script_is_running(p['script_path'])
+        real_status = 'running' if running else 'idle'
 
         # 转换 naming convention
         item = {

@@ -1,0 +1,22 @@
+[Unit]
+Description=TagLens 项目同步 sync_task_01 (视频质量诊断)
+Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
+After=network-online.target
+Wants=network-online.target taglens-backend.service taglens-llm-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
+ExecStartPre=/bin/mkdir -p /opt/Traffic-LLM/zser/taglens-ai-app/logs
+ExecStart=/opt/Traffic-LLM/zser/taglens-ai-app/backend/venv/bin/python -u /opt/Traffic-LLM/zser/taglens-ai-app/scripts/sync_task_01.py
+
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+
+StandardOutput=append:/opt/Traffic-LLM/zser/taglens-ai-app/logs/sync_task_01.py.log
+StandardError=append:/opt/Traffic-LLM/zser/taglens-ai-app/logs/sync_task_01.py.log
+SyslogIdentifier=taglens-sync-01
+
+[Install]
+WantedBy=multi-user.target

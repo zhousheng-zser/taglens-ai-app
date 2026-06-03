@@ -4,6 +4,8 @@ sudo systemctl enable taglens.target
 sudo systemctl restart taglens.target
 
 systemctl status taglens.target taglens-backend.service taglens-frontend.service taglens-llm-gateway.service taglens-dtc-v1.service taglens-dtc-v2.service
+systemctl status taglens-sync-01.service taglens-sync-02.service taglens-sync-03.service taglens-sync-04.service
+curl -s http://127.0.0.1:8000/health
 curl -s http://127.0.0.1:8020/health
 curl -s http://127.0.0.1:8010/health
 curl -s http://127.0.0.1:8011/health
@@ -15,3 +17,18 @@ taglens-dtc-v2.service
 taglens-frontend.service
 taglens-llm-gateway.service
 taglens.target
+taglens-sync-01.service
+taglens-sync-02.service
+taglens-sync-03.service
+taglens-sync-04.service
+
+# 项目同步（独立于 taglens.target，install 后默认不 enable）
+# sudo systemctl start taglens-sync-03.service
+# sudo systemctl stop taglens-sync-03.service
+# tail -f logs/sync_task_03.py.log
+
+
+taglens-sync-01.service
+taglens-sync-02.service
+taglens-sync-03.service
+taglens-sync-04.service

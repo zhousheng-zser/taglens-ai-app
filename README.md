@@ -521,8 +521,11 @@ systemctl status taglens.target taglens-backend.service taglens-frontend.service
 | `taglens-dtc-v1.service` | SAM3 :8011 |
 | `taglens-dtc-v2.service` | DTC :8010 |
 | `taglens.target` | 聚合启动上述服务 |
+| `taglens-sync-01.service` ~ `taglens-sync-04.service` | 项目同步脚本（**独立单元**，不 `PartOf` target，**默认不开机 enable**） |
 
 **注意**：单元文件内路径默认为 `/opt/Traffic-LLM/zser/taglens-ai-app`，若仓库路径不同需先修改 `.service` 再 `install.sh`。
+
+`systemctl stop taglens.target` **不会**停止 `taglens-sync-0X`；同步由 UI（`/project/run|stop`）或 `systemctl start|stop taglens-sync-03.service` 控制。日志：`logs/sync_task_0X.py.log`。入库仍依赖 `taglens-backend`（:8000）与 `taglens-llm-gateway`（:8020）。
 
 ---
 
