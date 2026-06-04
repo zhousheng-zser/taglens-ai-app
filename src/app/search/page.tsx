@@ -1,16 +1,22 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Search, X, Image as ImageIcon, ChevronLeft, ChevronRight, Download, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Search, X, Image as ImageIcon, ChevronLeft, ChevronRight, Download, ChevronDown, Square } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import { ParticleBackground } from '@/components/ParticleBackground';
 import { getImageUrl } from '@/lib/imageStorage';
+import { fetchSearchWithProgress } from '@/lib/searchStream';
+import {
+  fetchExportImagesWithProgress,
+  triggerExportZipDownload,
+} from '@/lib/exportImagesStream';
 import {
   Select,
   SelectContent,
@@ -157,12 +163,149 @@ export default function SearchPage() {
   const [totalCount, setTotalCount] = useState(0);  // 数据库中总图片数
   const [searchTotalCount, setSearchTotalCount] = useState(0);  // 搜索结果总数
   const [selectedImage, setSelectedImage] = useState<ImageSearchResult | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isPageLoading, setIsPageLoading] = useState(false);
+  const [searchProgress, setSearchProgress] = useState(0);
+  const [searchProgressMessage, setSearchProgressMessage] = useState('');
+  const [isExportingImages, setIsExportingImages] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportProgressMessage, setExportProgressMessage] = useState('');
   const [similarityThreshold, setSimilarityThreshold] = useState([0.6]);  // 默认阈值0.6
   const [currentPage, setCurrentPage] = useState(1);  // 当前页码
   const [pageSize, setPageSize] = useState(20);  // 每页数量
   const [goToPageInput, setGoToPageInput] = useState('');  // 跳转页码输入
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const allSearchResultsRef = useRef<ImageSearchResult[]>([]);
+  const searchTotalCountRef = useRef(0);
+  const currentPageRef = useRef(1);
+  const pageSizeRef = useRef(20);
+  const loadAllPromiseRef = useRef<Promise<void> | null>(null);
+  const loadAllGenerationRef = useRef(0);
   const { toast } = useToast();
+
+  useEffect(() => {
+    allSearchResultsRef.current = allSearchResults;
+  }, [allSearchResults]);
+
+  useEffect(() => {
+    searchTotalCountRef.current = searchTotalCount;
+  }, [searchTotalCount]);
+
+  useEffect(() => {
+    currentPageRef.current = currentPage;
+  }, [currentPage]);
+
+  useEffect(() => {
+    pageSizeRef.current = pageSize;
+  }, [pageSize]);
+
+  const applyPageFromCache = (page: number, size: number): boolean => {
+    const cached = allSearchResultsRef.current;
+    const total = searchTotalCountRef.current;
+    const start = (page - 1) * size;
+    const end = start + size;
+
+    if (total > 0 && cached.length >= total) {
+      setSearchResults(cached.slice(start, end));
+      return true;
+    }
+    if (cached.length >= end) {
+      setSearchResults(cached.slice(start, end));
+      return true;
+    }
+    return false;
+  };
+
+  // 加载全部搜索结果（用于翻页/导出），返回 Promise 供翻页等待
+  const loadAllSearchResults = (): Promise<void> => {
+    const generation = loadAllGenerationRef.current;
+
+    const promise = (async () => {
+      try {
+        const total = searchTotalCountRef.current;
+        const requestBody = {
+          tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),
+          page: 1,
+          pageSize: Math.max(total, 10000),
+          similarityThreshold: similarityThreshold[0],
+        };
+
+        const response = await fetch('/api/backend/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (generation !== loadAllGenerationRef.current) return;
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && generation === loadAllGenerationRef.current) {
+            setAllSearchResults(data.results);
+            allSearchResultsRef.current = data.results;
+            if (typeof data.total === 'number' && data.total > 0) {
+              setSearchTotalCount(data.total);
+              searchTotalCountRef.current = data.total;
+            }
+            applyPageFromCache(currentPageRef.current, pageSizeRef.current);
+          }
+        }
+      } catch (error) {
+        console.error('加载所有搜索结果失败:', error);
+      }
+    })();
+
+    loadAllPromiseRef.current = promise;
+    promise.finally(() => {
+      if (loadAllPromiseRef.current === promise) {
+        loadAllPromiseRef.current = null;
+      }
+    });
+    return promise;
+  };
+
+  // 翻页：优先从已缓存的全部结果切片，避免重复向量搜索
+  const loadPage = async (page: number, size: number) => {
+    if (applyPageFromCache(page, size)) return;
+
+    if (selectedTags.length === 0) return;
+
+    setIsPageLoading(true);
+    try {
+      if (loadAllPromiseRef.current) {
+        await loadAllPromiseRef.current.catch(() => {});
+      }
+      if (applyPageFromCache(page, size)) return;
+
+      if (!loadAllPromiseRef.current) {
+        await loadAllSearchResults();
+      }
+      if (applyPageFromCache(page, size)) return;
+
+      const response = await fetch('/api/backend/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tags: selectedTags.map((item) => ({ tag: item.tag, weight: item.weight })),
+          page,
+          pageSize: size,
+          similarityThreshold: similarityThreshold[0],
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setSearchResults(data.results);
+        }
+      }
+    } catch (error) {
+      console.error('翻页加载失败:', error);
+    } finally {
+      setIsPageLoading(false);
+    }
+  };
 
   // 从数据库加载所有图片
   useEffect(() => {
@@ -293,33 +436,10 @@ export default function SearchPage() {
     setSelectedTags(updatedTags);
   };
 
-  // 加载所有搜索结果（用于导出）
-  const loadAllSearchResults = async () => {
-    try {
-      const requestBody = {
-        tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),
-        page: 1,
-        pageSize: 10000,  // 设置一个很大的值以获取所有结果
-        similarityThreshold: similarityThreshold[0],
-      };
-
-      const response = await fetch('/api/backend/search', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success) {
-          setAllSearchResults(data.results);
-        }
-      }
-    } catch (error) {
-      console.error('加载所有搜索结果失败:', error);
-    }
+  // 中断当前搜索
+  const handleCancelSearch = () => {
+    searchAbortRef.current?.abort();
+    setSearchProgressMessage('正在停止搜索…');
   };
 
   // 执行搜索
@@ -345,7 +465,14 @@ export default function SearchPage() {
       return;
     }
 
-    setIsLoading(true);
+    setIsSearching(true);
+    setSearchProgress(0);
+    setSearchProgressMessage('正在准备搜索…');
+    searchAbortRef.current?.abort();
+    const abortController = new AbortController();
+    searchAbortRef.current = abortController;
+    loadAllGenerationRef.current += 1;
+    loadAllPromiseRef.current = null;
     // 搜索时重置到第一页
     const pageToUse = 1;
     setCurrentPage(1);
@@ -366,37 +493,32 @@ export default function SearchPage() {
         pageSize: pageSize,
         similarityThreshold: similarityThreshold[0],
       };
-      console.log('发送请求到 /api/backend/search，请求体:', requestBody);
+      console.log('发送请求到 /api/backend/search/stream，请求体:', requestBody);
 
-      const response = await fetch('/api/backend/search', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const data = await fetchSearchWithProgress(
+        requestBody,
+        (event) => {
+          setSearchProgress(event.percent);
+          setSearchProgressMessage(event.message);
         },
-        body: JSON.stringify(requestBody),
-      });
+        abortController.signal,
+      );
 
-      console.log('收到响应，状态:', response.status, response.statusText);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`搜索失败: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log('搜索返回数据:', data); // 调试日志
+      console.log('搜索返回数据:', data);
       if (data.success) {
         // 调试：检查相似度字段
         if (data.results && data.results.length > 0) {
-          console.log('第一个结果的相似度:', data.results[0].similarity);
-          console.log('完整结果示例:', JSON.stringify(data.results[0], null, 2));
+          console.log('第一个结果的相似度:', (data.results[0] as ImageSearchResult).similarity);
         }
 
-        setSearchResults(data.results);
-        setSearchTotalCount(data.total);  // 搜索结果总数
+        const firstPageResults = data.results as ImageSearchResult[];
+        setSearchResults(firstPageResults);
+        setSearchTotalCount(data.total);
+        searchTotalCountRef.current = data.total;
+        setAllSearchResults(firstPageResults);
+        allSearchResultsRef.current = firstPageResults;
 
-        // 搜索时（第一页），获取所有结果用于导出
-        loadAllSearchResults();
+        void loadAllSearchResults();
 
         if (data.results.length === 0) {
           toast({
@@ -404,11 +526,18 @@ export default function SearchPage() {
             description: `没有找到匹配的图片（阈值: ${similarityThreshold[0]}）`,
           });
         } else {
-          // 显示找到的结果数量
           console.log(`找到 ${data.results.length} 个结果，阈值: ${similarityThreshold[0]}`);
         }
       }
     } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        toast({
+          title: '已停止搜索',
+          description: '搜索已被中断',
+        });
+        return;
+      }
+
       console.error('搜索失败:', error);
       let errorMessage = error.message || '搜索时发生错误';
 
@@ -424,7 +553,12 @@ export default function SearchPage() {
       });
       setSearchResults([]);
     } finally {
-      setIsLoading(false);
+      if (searchAbortRef.current === abortController) {
+        searchAbortRef.current = null;
+      }
+      setIsSearching(false);
+      setSearchProgress(0);
+      setSearchProgressMessage('');
     }
   };
 
@@ -438,10 +572,14 @@ export default function SearchPage() {
 
   // 清除所有标签
   const handleClear = () => {
+    loadAllGenerationRef.current += 1;
+    loadAllPromiseRef.current = null;
     setSelectedTags([]);
     setTagInput('');
     setSearchResults([]);
     setAllSearchResults([]);
+    allSearchResultsRef.current = [];
+    searchTotalCountRef.current = 0;
     setSearchTotalCount(0);
     setCurrentPage(1);
     setSelectedImage(null);
@@ -451,6 +589,7 @@ export default function SearchPage() {
   const handlePageChange = (newPage: number) => {
     if (newPage >= 1 && newPage <= Math.ceil(searchTotalCount / pageSize)) {
       setCurrentPage(newPage);
+      void loadPage(newPage, pageSize);
     }
   };
 
@@ -460,6 +599,7 @@ export default function SearchPage() {
     if (page >= 1 && page <= Math.ceil(searchTotalCount / pageSize)) {
       setCurrentPage(page);
       setGoToPageInput('');
+      void loadPage(page, pageSize);
     } else {
       toast({
         variant: 'destructive',
@@ -502,12 +642,12 @@ export default function SearchPage() {
   const exportAllResults = async () => {
     if (allSearchResults.length === 0 && searchTotalCount > 0) {
       // 如果没有加载全部结果，先加载
-      setIsLoading(true);
+      setIsPageLoading(true);
       try {
         const requestBody = {
           tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),
           page: 1,
-          pageSize: 10000,  // 设置一个很大的值以获取所有结果
+          pageSize: 10000,
           similarityThreshold: similarityThreshold[0],
         };
 
@@ -523,7 +663,8 @@ export default function SearchPage() {
           const data = await response.json();
           if (data.success && data.results.length > 0) {
             doExport(data.results);
-            setAllSearchResults(data.results);  // 保存以便下次使用
+            setAllSearchResults(data.results);
+            allSearchResultsRef.current = data.results;
           } else {
             toast({
               variant: 'destructive',
@@ -540,7 +681,7 @@ export default function SearchPage() {
           description: '导出时发生错误',
         });
       } finally {
-        setIsLoading(false);
+        setIsPageLoading(false);
       }
     } else if (allSearchResults.length > 0) {
       doExport(allSearchResults);
@@ -581,45 +722,127 @@ export default function SearchPage() {
     });
   };
 
-  // 当页码或每页数量改变时，重新搜索（但不重新加载全部结果）
-  useEffect(() => {
-    if (selectedTags.length > 0 && searchTotalCount > 0) {
-      // 只重新搜索当前页，不重新加载全部结果
-      const performSearch = async () => {
-        setIsLoading(true);
-        try {
-          const requestBody = {
-            tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),
-            page: currentPage,
-            pageSize: pageSize,
-            similarityThreshold: similarityThreshold[0],
-          };
-
-          const response = await fetch('/api/backend/search', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            if (data.success) {
-              setSearchResults(data.results);
-            }
-          }
-        } catch (error) {
-          console.error('搜索失败:', error);
-        } finally {
-          setIsLoading(false);
-        }
-      };
-
-      performSearch();
+  // 获取全部搜索结果（JSON，用于导出，不做向量搜索进度）
+  const fetchAllSearchItems = async (): Promise<ImageSearchResult[]> => {
+    const total = searchTotalCountRef.current;
+    const cached = allSearchResultsRef.current;
+    if (total > 0 && cached.length >= total) {
+      return cached;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPage, pageSize]);
+
+    if (loadAllPromiseRef.current) {
+      await loadAllPromiseRef.current.catch(() => {});
+      if (allSearchResultsRef.current.length >= total && total > 0) {
+        return allSearchResultsRef.current;
+      }
+    }
+
+    await loadAllSearchResults();
+    return allSearchResultsRef.current;
+  };
+
+  const handleCancelExportImages = () => {
+    exportAbortRef.current?.abort();
+    setExportProgressMessage('正在停止导出…');
+  };
+
+  // 导出全部图片（经 bucket-taglens HTTP 下载并打包 zip）
+  const exportAllImages = async () => {
+    if (selectedTags.length === 0) {
+      toast({
+        variant: 'default',
+        title: '请先搜索',
+        description: '请添加标签并搜索后再导出图片',
+      });
+      return;
+    }
+
+    const totalWeight = calculateTotalWeight(selectedTags);
+    if (Math.abs(totalWeight - 1.0) > 0.001) {
+      toast({
+        variant: 'destructive',
+        title: '权重错误',
+        description: `所有标签的权重之和必须等于1，当前为 ${totalWeight.toFixed(3)}`,
+      });
+      return;
+    }
+
+    if (searchTotalCount === 0) {
+      toast({
+        variant: 'default',
+        title: '没有数据',
+        description: '当前没有可导出的图片',
+      });
+      return;
+    }
+
+    exportAbortRef.current?.abort();
+    const abortController = new AbortController();
+    exportAbortRef.current = abortController;
+
+    setIsExportingImages(true);
+    setExportProgress(0);
+    setExportProgressMessage('正在准备图片列表…');
+
+    try {
+      const results = await fetchAllSearchItems();
+      if (results.length === 0) {
+        toast({
+          variant: 'default',
+          title: '没有数据',
+          description: '没有可导出的图片',
+        });
+        return;
+      }
+
+      setExportProgress(3);
+      setExportProgressMessage(`共 ${results.length} 张图片，开始下载…`);
+
+      const result = await fetchExportImagesWithProgress(
+        {
+          items: results.map((r) => ({
+            filePath: r.filePath,
+            uuid: r.uuid,
+            fileName: r.fileName,
+          })),
+        },
+        (event) => {
+          setExportProgress(event.percent);
+          setExportProgressMessage(event.message);
+        },
+        abortController.signal,
+      );
+
+      triggerExportZipDownload(result.fileName);
+
+      const failHint =
+        result.failed > 0 ? `，${result.failed} 张下载失败` : '';
+      toast({
+        title: '图片导出完成',
+        description: `已打包 ${result.downloaded} 张图片${failHint}`,
+      });
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        toast({
+          title: '已停止导出',
+          description: '图片导出已被中断',
+        });
+        return;
+      }
+      toast({
+        variant: 'destructive',
+        title: '导出失败',
+        description: error.message || '导出图片时发生错误',
+      });
+    } finally {
+      if (exportAbortRef.current === abortController) {
+        exportAbortRef.current = null;
+      }
+      setIsExportingImages(false);
+      setExportProgress(0);
+      setExportProgressMessage('');
+    }
+  };
 
   // 打开图片预览
   const handleImageClick = (image: ImageSearchResult) => {
@@ -684,7 +907,7 @@ export default function SearchPage() {
                   onClick={handleSearch}
                   size="lg"
                   className="px-8"
-                  disabled={selectedTags.length === 0 || Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001}
+                  disabled={isSearching || selectedTags.length === 0 || Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001}
                 >
                   <Search className="mr-2 h-5 w-5" />
                   搜索
@@ -823,17 +1046,52 @@ export default function SearchPage() {
                   variant="outline"
                   size="sm"
                   onClick={exportAllResults}
-                  disabled={searchTotalCount === 0}
+                  disabled={searchTotalCount === 0 || isExportingImages}
                 >
                   <Download className="h-4 w-4 mr-2" />
                   导出全部
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={exportAllImages}
+                  disabled={searchTotalCount === 0 || isSearching || isExportingImages}
+                >
+                  <Download className="h-4 w-4 mr-2" />
+                  导出全部图片
                 </Button>
               </div>
             </div>
           )}
 
+          {isExportingImages && (
+            <Card className="p-8 mb-6">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-4 text-sm">
+                  <span className="font-medium text-foreground">正在导出图片…</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-muted-foreground tabular-nums">{exportProgress.toFixed(0)}%</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCancelExportImages}
+                      className="h-8 text-destructive hover:text-destructive"
+                    >
+                      <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                      停止
+                    </Button>
+                  </div>
+                </div>
+                <Progress value={exportProgress} className="h-2" />
+                <p className="text-sm text-muted-foreground">
+                  {exportProgressMessage || '正在下载并打包，请稍候…'}
+                </p>
+              </div>
+            </Card>
+          )}
+
           {/* 搜索结果 */}
-          {selectedTags.length > 0 && searchResults.length === 0 && (
+          {selectedTags.length > 0 && searchResults.length === 0 && !isSearching && !isPageLoading && searchTotalCount === 0 && (
             <Card className="p-12 text-center">
               <ImageIcon className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg text-muted-foreground">
@@ -845,7 +1103,7 @@ export default function SearchPage() {
             </Card>
           )}
 
-          {selectedTags.length === 0 && totalCount === 0 && !isLoading && (
+          {selectedTags.length === 0 && totalCount === 0 && !isSearching && (
             <Card className="p-12 text-center">
               <ImageIcon className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg text-muted-foreground">
@@ -860,9 +1118,29 @@ export default function SearchPage() {
             </Card>
           )}
 
-          {isLoading && (
-            <Card className="p-12 text-center">
-              <p className="text-lg text-muted-foreground">搜索中...</p>
+          {isSearching && (
+            <Card className="p-8 mb-6">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-4 text-sm">
+                  <span className="font-medium text-foreground">搜索进行中…</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-muted-foreground tabular-nums">{searchProgress.toFixed(0)}%</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCancelSearch}
+                      className="h-8 text-destructive hover:text-destructive"
+                    >
+                      <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+                      停止
+                    </Button>
+                  </div>
+                </div>
+                <Progress value={searchProgress} className="h-2" />
+                <p className="text-sm text-muted-foreground">
+                  {searchProgressMessage || '正在处理，请稍候…'}
+                </p>
+              </div>
             </Card>
           )}
 
@@ -929,8 +1207,10 @@ export default function SearchPage() {
                     <Select
                       value={pageSize.toString()}
                       onValueChange={(value) => {
-                        setPageSize(parseInt(value));
-                        setCurrentPage(1);  // 重置到第一页
+                        const size = parseInt(value);
+                        setPageSize(size);
+                        setCurrentPage(1);
+                        void loadPage(1, size);
                       }}
                     >
                       <SelectTrigger className="w-24 h-8">

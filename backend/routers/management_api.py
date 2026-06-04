@@ -41,6 +41,7 @@ from services.event_video_segment_service import (
 from core.sync_executor import run_blocking
 from services.event_segment_ai_description_service import check_rlq_api_available
 from services.segment_media_validator import is_playability_check_enabled
+from services.segment_damaged_video_registry import reload_cache
 from services.reextract_tags_service import run_reextract_batch
 
 router = APIRouter(prefix="/api/management", tags=["management"])
@@ -621,6 +622,11 @@ async def _run_segment_desc_fill_job(
         if is_playability_check_enabled():
             await _log_segment_desc_fill(
                 "已启用送模型前视频损坏检测（ffmpeg）；损坏分段将跳过，不调用 AI",
+                "info",
+            )
+            known_damaged = await run_blocking(reload_cache)
+            await _log_segment_desc_fill(
+                f"已加载损坏视频历史记录 {known_damaged} 条（data/segment_damaged_videos.txt，命中则跳过下载与 ffmpeg 检测）",
                 "info",
             )
         else:

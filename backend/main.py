@@ -18,8 +18,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form, Request
-from fastapi.responses import Response
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form, Request, Request
+from fastapi.responses import Response, StreamingResponse, FileResponse
 import mimetypes
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -83,6 +83,8 @@ from schemas.llm_schemas import SemanticSearch, TrafficAnalysisOutput, TrainingD
 from services.llm_gateway_client import LLM_GATEWAY_URL, check_gateway_health, infer_traffic_image
 from services.llm_prompts import PROMPT_PART_1, PROMPT_PART_2_TEMPLATE, PROMPT_PART_3, build_default_analysis_prompt
 from services.text_embedding_service import encode_text_to_vector, get_bge_model
+from services.search_progress import SearchProgress, SearchProgressCallback, SearchCancellation, SearchCancelledError
+from services.search_images_export_service import export_search_images_zip, resolve_export_zip_path
 from services.business_structure_manager import get_business_manager_for_project
 
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -133,6 +135,24 @@ class SearchRequest(BaseModel):
     cameraName: Optional[str] = None  # 相机名模糊匹配（sz_name）
     bizCategory: Optional[str] = None  # 业态目录模糊匹配（sz_tag_ref_json）
     similarityThreshold: Optional[float] = 0.6  # 相似度阈值,范围0-1
+
+class ExportImageItem(BaseModel):
+    filePath: str
+    uuid: Optional[str] = None
+    fileName: Optional[str] = None
+
+
+class ExportImagesRequest(BaseModel):
+    """导出图片：优先使用 items（跳过重复搜索），否则按 search 条件重新搜索。"""
+    items: Optional[List[ExportImageItem]] = None
+    tags: Optional[List[TagWithWeight]] = None
+    query: Optional[str] = None
+    queries: Optional[List[str]] = None
+    similarityThreshold: Optional[float] = 0.6
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    cameraName: Optional[str] = None
+    bizCategory: Optional[str] = None
 
 class ImageSearchResult(BaseModel):
     id: int
@@ -1010,8 +1030,13 @@ async def save_image(request: SaveImageRequest):
 
 
 # --- 搜索 API ---
-def _search_images_sync(request: SearchRequest) -> SearchResponse:
+def _search_images_sync(
+    request: SearchRequest,
+    progress_callback: Optional[SearchProgressCallback] = None,
+    cancellation: Optional[SearchCancellation] = None,
+) -> SearchResponse:
     """同步：向量搜索（在线程池中执行）"""
+    progress = SearchProgress(progress_callback, cancellation)
     print("=" * 60)
     print("收到搜索请求!")
     
@@ -1042,14 +1067,24 @@ def _search_images_sync(request: SearchRequest) -> SearchResponse:
     print(f"请求内容: tags={tags_with_weights}, threshold={request.similarityThreshold}, limit={request.limit}")
     print("=" * 60)
     try:
+        progress.report("encode", 1, "正在准备搜索…")
         # 对每个查询标签进行向量化
         query_embeddings = []
         if queries:
             try:
-                for query in queries:
+                for idx, query in enumerate(queries):
+                    progress.check_cancelled()
+                    progress.report(
+                        "encode",
+                        2 + (idx / max(len(queries), 1)) * 8,
+                        f"正在向量化标签「{query}」…",
+                    )
                     embedding = encode_text_to_vector(query)
                     query_embeddings.append(embedding)
                     print(f"已生成查询向量: '{query}' (维度: {len(embedding) // 4})")
+                progress.report("encode", 10, "查询标签向量化完成")
+            except SearchCancelledError:
+                raise
             except Exception as e:
                 print(f"向量化查询文本时出错: {e}")
                 import traceback
@@ -1081,10 +1116,12 @@ def _search_images_sync(request: SearchRequest) -> SearchResponse:
             camera_name=request.cameraName,
             biz_category=request.bizCategory,
             query_embeddings=query_embeddings if query_embeddings else None,  # 传递多个向量
+            query_tags=queries if queries else None,
             query_weights=weights if weights else None,  # 传递权重列表
             similarity_threshold=similarity_threshold,
             page=page if use_limit is None else None,  # 如果使用limit，则不使用分页
-            page_size=page_size if use_limit is None else None
+            page_size=page_size if use_limit is None else None,
+            on_progress=progress,
         )
         
         print(f"搜索结果数量: {len(results)}, 总数: {total_count}")
@@ -1123,6 +1160,9 @@ def _search_images_sync(request: SearchRequest) -> SearchResponse:
             results=image_results,
             total=total_count  # 返回总数，而不是当前页的数量
         )
+    except SearchCancelledError:
+        print("搜索已被用户取消")
+        raise
     except HTTPException as e:
         print(f"搜索图片时发生HTTP异常: {e}")
         raise e
@@ -1136,6 +1176,191 @@ def _search_images_sync(request: SearchRequest) -> SearchResponse:
 @app.post("/search", response_model=SearchResponse)
 async def search_images_api(request: SearchRequest):
     return await run_blocking(_search_images_sync, request)
+
+
+@app.post("/search/stream")
+async def search_images_stream_api(request: SearchRequest, http_request: Request):
+    """流式搜索：NDJSON 推送进度，最后一行 type=result 为完整搜索结果。"""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    cancellation = SearchCancellation()
+
+    def progress_callback(event: dict) -> None:
+        if cancellation.is_cancelled():
+            return
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def worker() -> None:
+        try:
+            result = await run_blocking(
+                _search_images_sync,
+                request,
+                progress_callback,
+                cancellation,
+            )
+            if cancellation.is_cancelled():
+                return
+            await queue.put({"type": "result", **result.model_dump()})
+        except SearchCancelledError:
+            print("[search/stream] 客户端中断搜索")
+        except HTTPException as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": exc.detail, "status": exc.status_code})
+        except Exception as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 500})
+        finally:
+            await queue.put(None)
+
+    worker_task = asyncio.create_task(worker())
+
+    async def generate():
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    cancellation.cancel()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        finally:
+            cancellation.cancel()
+            if not worker_task.done():
+                worker_task.cancel()
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+def _export_search_images_sync(
+    request: ExportImagesRequest,
+    progress_callback: Optional[SearchProgressCallback] = None,
+    cancellation: Optional[SearchCancellation] = None,
+) -> Dict[str, Any]:
+    progress = SearchProgress(progress_callback, cancellation)
+
+    if request.items:
+        items = [
+            {
+                "filePath": item.filePath,
+                "uuid": item.uuid,
+                "fileName": item.fileName,
+            }
+            for item in request.items
+            if item.filePath
+        ]
+        progress.report("prepare", 5, f"共 {len(items)} 张图片待下载（跳过重复搜索）…")
+    else:
+        progress.report("search", 1, "正在获取全部搜索结果…")
+        search_request = SearchRequest(
+            tags=request.tags,
+            query=request.query,
+            queries=request.queries,
+            similarityThreshold=request.similarityThreshold,
+            startDate=request.startDate,
+            endDate=request.endDate,
+            cameraName=request.cameraName,
+            bizCategory=request.bizCategory,
+            page=1,
+            pageSize=10000,
+        )
+        search_result = _search_images_sync(
+            search_request,
+            progress_callback=progress_callback,
+            cancellation=cancellation,
+        )
+        items = [
+            {
+                "filePath": r.filePath,
+                "uuid": r.uuid,
+                "fileName": r.fileName,
+            }
+            for r in search_result.results
+        ]
+        progress.report("search", 5, f"共 {len(items)} 张图片待下载…")
+
+    export_info = export_search_images_zip(items, progress=progress)
+    return {
+        "success": True,
+        "fileName": export_info["fileName"],
+        "downloadPath": f"/search/export-images/file/{export_info['fileName']}",
+        "total": export_info["total"],
+        "downloaded": export_info["downloaded"],
+        "failed": export_info["failed"],
+        "errors": export_info.get("errors") or [],
+    }
+
+
+@app.post("/search/export-images/stream")
+async def export_search_images_stream_api(request: ExportImagesRequest, http_request: Request):
+    """流式导出搜索结果图片为 zip（经 bucket-taglens HTTP 地址下载）。"""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    cancellation = SearchCancellation()
+
+    def progress_callback(event: dict) -> None:
+        if cancellation.is_cancelled():
+            return
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def worker() -> None:
+        try:
+            result = await run_blocking(
+                _export_search_images_sync,
+                request,
+                progress_callback,
+                cancellation,
+            )
+            if cancellation.is_cancelled():
+                return
+            await queue.put({"type": "result", **result})
+        except SearchCancelledError:
+            print("[search/export-images/stream] 客户端中断导出")
+        except HTTPException as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": exc.detail, "status": exc.status_code})
+        except Exception as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 500})
+        finally:
+            await queue.put(None)
+
+    worker_task = asyncio.create_task(worker())
+
+    async def generate():
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    cancellation.cancel()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        finally:
+            cancellation.cancel()
+            if not worker_task.done():
+                worker_task.cancel()
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@app.get("/search/export-images/file/{filename}")
+async def download_search_export_zip(filename: str):
+    zip_path = resolve_export_zip_path(filename)
+    if not zip_path:
+        raise HTTPException(status_code=404, detail="压缩包不存在或文件名无效")
+    return FileResponse(
+        path=str(zip_path),
+        media_type="application/zip",
+        filename=filename,
+    )
 
 
 def _get_all_images_sync(limit: int) -> SearchResponse:

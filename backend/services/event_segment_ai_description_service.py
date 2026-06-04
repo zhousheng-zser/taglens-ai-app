@@ -6,7 +6,7 @@ import mimetypes
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
@@ -30,10 +30,35 @@ EVENT_SEGMENT_AI_MODEL = os.getenv("EVENT_SEGMENT_AI_MODEL", "models/QRL")
 EVENT_SEGMENT_AI_TIMEOUT_SEC = float(os.getenv("EVENT_SEGMENT_AI_TIMEOUT_SEC", "600"))
 
 EVENT_MEDIA_HTTP_ORIGIN = os.getenv("EVENT_MEDIA_HTTP_ORIGIN", "http://127.0.0.1:9002").rstrip("/")
+# 后端批量任务直拉 MinIO，不经 Next 代理（避免 :9002 并发/重启导致拉取失败）
+MINIO_HTTP_ORIGIN = os.getenv("MINIO_HTTP_ORIGIN", "http://192.168.1.117:9000").rstrip("/")
 EVENT_MEDIA_FETCH_TIMEOUT_SEC = float(os.getenv("EVENT_MEDIA_FETCH_TIMEOUT_SEC", "120"))
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
 
 THINKING_ANSWER_SEPARATOR = "------------"
+
+
+def _normalize_storage_path(path_or_url: str) -> str:
+    """统一为 /bucket-taglens/... 形式。"""
+    raw = (path_or_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https"):
+        return parsed.path or raw
+    if raw.startswith("/"):
+        return raw
+    if raw.startswith(f"{MINIO_BUCKET}/"):
+        return f"/{raw}"
+    return f"/{MINIO_BUCKET}/{raw.lstrip('/')}"
+
+
+def _build_minio_fetch_url(path_or_url: str) -> str:
+    """后端拉取媒体：直连 MinIO HTTP，不经过前端 Next 代理。"""
+    storage_path = _normalize_storage_path(path_or_url)
+    if not storage_path:
+        raise SegmentAiMediaError("媒体路径为空")
+    return f"{MINIO_HTTP_ORIGIN}{storage_path}"
 
 
 def build_public_media_url(path: Optional[str]) -> str:
@@ -63,26 +88,18 @@ def get_executor() -> ThreadPoolExecutor:
 
 
 def _resolve_media_url(url: str) -> str:
-    raw = (url or "").strip()
-    if not raw:
-        raise SegmentAiMediaError("媒体 URL 为空")
-    parsed = urlparse(raw)
-    if parsed.scheme in ("http", "https"):
-        return raw
-    if raw.startswith("/"):
-        return f"{EVENT_MEDIA_HTTP_ORIGIN}{raw}"
-    return urljoin(f"{EVENT_MEDIA_HTTP_ORIGIN}/", raw)
+    return _build_minio_fetch_url(url)
 
 
 def _fetch_media_bytes(url: str) -> tuple[bytes, str]:
-    resolved = _resolve_media_url(url)
+    resolved = _build_minio_fetch_url(url)
     try:
         with httpx.Client(trust_env=False, timeout=EVENT_MEDIA_FETCH_TIMEOUT_SEC) as client:
             response = client.get(resolved)
     except httpx.TimeoutException as exc:
         raise SegmentAiMediaError(f"媒体拉取超时: {resolved}") from exc
     except httpx.HTTPError as exc:
-        raise SegmentAiMediaError(f"媒体拉取失败: {resolved}") from exc
+        raise SegmentAiMediaError(f"媒体拉取失败: {resolved} ({exc})") from exc
 
     if response.status_code == 404:
         raise SegmentAiMediaError(f"媒体不存在: {resolved}")

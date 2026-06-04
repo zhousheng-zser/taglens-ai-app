@@ -21,6 +21,7 @@ from services.event_segment_ai_description_service import (
     generate_segment_description_sync,
     inspect_video_damage,
 )
+from services.segment_damaged_video_registry import is_known_damaged, record_damaged
 
 SEGMENT_DESC_FILL_MAX_WORKERS = max(
     1,
@@ -117,10 +118,21 @@ def fill_one_segment_description(
     project_id = str(item["project_id"])
     event_type = str(item["event_type_corrected"])
     segment_index = int(item["segment_index"])
+    segment_media_path = str(item.get("segment_media_path") or "").strip()
 
     def _log(message: str, level: str = "info") -> None:
         if log_sink is not None:
             log_sink.append((message, level))
+
+    if segment_media_path and is_known_damaged(segment_media_path):
+        return SegmentFillResult(
+            success=False,
+            skipped=True,
+            error="视频损坏（历史记录，跳过检测与补齐）",
+            damage_log="损坏程度=已记录（跳过 ffmpeg 检测）",
+            event_id=event_id,
+            segment_index=segment_index,
+        )
 
     segment_video_url = build_public_media_url(item["segment_media_path"])
     overlay_path = item.get("overlay_media_path")
@@ -135,8 +147,8 @@ def fill_one_segment_description(
             video_bytes, video_ct = fetch_segment_video_bytes(segment_video_url)
             break
         except SegmentAiMediaError as exc:
-            err = f"媒体拉取失败: {exc}"
-            if _is_network_error_message(err) and attempt < max_retries:
+            err = str(exc)
+            if (_is_network_error_message(err) or "媒体拉取" in err) and attempt < max_retries:
                 _log(
                     f"  -> 网络异常，{_retry_wait_label()}重试: {err}",
                     "warning",
@@ -155,6 +167,8 @@ def fill_one_segment_description(
     damage_log = damage_report.log_line()
     if damage_report.should_skip:
         reason = damage_report.skip_reason or "视频损坏"
+        if segment_media_path:
+            record_damaged(segment_media_path, reason)
         return SegmentFillResult(
             success=False,
             skipped=True,
