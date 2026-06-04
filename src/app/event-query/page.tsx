@@ -1009,7 +1009,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     const eventKey = `${item.eventId}|${item.projectId}|${item.eventTypeCode}`;
     if (deletingEventKey === eventKey) return;
     const confirmed = window.confirm(
-      `确认删除该事件吗？\n\n将同时删除：\n1) event.db 中记录\n2) MinIO(bucket-taglens) 对应事件目录全部文件`,
+      `确认删除该事件吗？\n\n将同时删除：\n1) MySQL taglens_event 中记录\n2) MinIO(bucket-taglens) 对应事件目录全部文件`,
     );
     if (!confirmed) return;
     try {

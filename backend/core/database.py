@@ -1,31 +1,54 @@
 # -*- coding: utf-8 -*-
 """
-数据库模块 - 使用 SQLite 存储图片标签和元数据
+数据库模块 - 使用 MySQL taglens_taglens 存储图片标签和元数据
 """
-import sqlite3
 import json
-import time
 import os
-import shutil
-from pathlib import Path
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+import subprocess
+import time
 from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# 数据库文件路径
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "taglens.db"
+import pymysql
+import pymysql.cursors
+import pymysql.err
+from dotenv import load_dotenv
 
-BACKUP_DIR = DB_PATH.parent / "backup"
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+BACKUP_DIR = Path(__file__).parent.parent.parent / "data" / "backup"
 BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
 _backup_checked = False
 
 
+def _mysql_connect_kwargs() -> Dict[str, Any]:
+    return {
+        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+        "port": int(os.getenv("MYSQL_PORT", "3306")),
+        "user": os.getenv("MYSQL_USER", "root"),
+        "password": os.getenv("MYSQL_PASSWORD", ""),
+        "database": os.getenv("MYSQL_TAGLENS_DATABASE", "taglens_taglens"),
+        "charset": os.getenv("MYSQL_CHARSET", "utf8mb4"),
+    }
+
+
+def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """,
+        (table, column),
+    )
+    if int(cursor.fetchone()["cnt"]) == 0:
+        cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}")
+        print(f"已添加 {column} 字段到 {table} 表")
+
+
 def _backup_db_if_needed() -> None:
-    """
-    本地数据库备份策略：
-    - 每次启动（首次访问 DB 时）检查是否已有当天备份；没有则创建
-    - 清理 7 天前备份（可用环境变量 DB_BACKUP_KEEP_DAYS 覆盖）
-    """
+    """按天 mysqldump 备份 MySQL taglens_taglens，并清理过期 .sql 备份（保留原有 .db 文件）。"""
     global _backup_checked
     if _backup_checked:
         return
@@ -33,45 +56,49 @@ def _backup_db_if_needed() -> None:
 
     try:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-
         today = datetime.now().strftime("%Y-%m-%d")
-        backup_path = BACKUP_DIR / f"taglens.{today}.db"
+        backup_path = BACKUP_DIR / f"taglens.{today}.sql"
+        db_name = os.getenv("MYSQL_TAGLENS_DATABASE", "taglens_taglens")
 
-        # 没有当天备份则创建（数据库不存在就不备份）
-        if DB_PATH.exists() and not backup_path.exists():
-            shutil.copy2(DB_PATH, backup_path)
-            print(f"已创建本地数据库备份: {backup_path}")
+        if not backup_path.exists():
+            kwargs = _mysql_connect_kwargs()
+            cmd = [
+                "mysqldump",
+                f"-h{kwargs['host']}",
+                f"-P{kwargs['port']}",
+                f"-u{kwargs['user']}",
+                f"-p{kwargs['password']}",
+                "--single-transaction",
+                "--quick",
+                "--set-gtid-purged=OFF",
+                db_name,
+            ]
+            with open(backup_path, "w", encoding="utf-8") as outfile:
+                subprocess.run(cmd, stdout=outfile, stderr=subprocess.PIPE, check=True)
+            print(f"已创建本地数据库 MySQL 备份: {backup_path}")
 
-        # 清理过期备份（按文件 mtime 判断更稳健）
         now_ts = time.time()
         keep_seconds = BACKUP_KEEP_DAYS * 24 * 60 * 60
-        for p in BACKUP_DIR.glob("taglens.*.db"):
+        for path in list(BACKUP_DIR.glob("taglens.*.sql")) + list(BACKUP_DIR.glob("taglens.*.sql.gz")):
             try:
-                if now_ts - p.stat().st_mtime > keep_seconds:
-                    p.unlink()
-                    print(f"已删除过期数据库备份: {p.name}")
+                if now_ts - path.stat().st_mtime > keep_seconds:
+                    path.unlink()
+                    print(f"已删除过期数据库备份: {path.name}")
             except Exception as e:
-                print(f"删除过期备份失败: {p} err={e}")
+                print(f"删除过期备份失败: {path} err={e}")
     except Exception as e:
-        # 备份失败不应阻塞服务启动
         print(f"数据库备份检查失败(忽略): {e}")
-
-
-def get_db_path() -> Path:
-    """获取数据库文件路径，确保目录存在"""
-    db_path = DB_PATH
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    _backup_db_if_needed()
-    return db_path
 
 
 @contextmanager
 def get_db_connection():
-    """获取数据库连接的上下文管理器"""
-    db_path = get_db_path()
-    # 增加超时时间到60秒，以减少并发写入时的 "database is locked" 错误
-    conn = sqlite3.connect(str(db_path), timeout=60.0)
-    conn.row_factory = sqlite3.Row  # 使结果可以通过列名访问
+    """获取 MySQL 数据库连接的上下文管理器。"""
+    _backup_db_if_needed()
+    conn = pymysql.connect(
+        **_mysql_connect_kwargs(),
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=False,
+    )
     try:
         yield conn
         conn.commit()
@@ -83,152 +110,99 @@ def get_db_connection():
 
 
 def init_database():
-    """初始化数据库，创建表结构"""
-    db_path = get_db_path()
-    
+    """初始化数据库，创建表结构。"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # 创建图片表
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT UNIQUE NOT NULL,
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                uuid VARCHAR(128) NOT NULL,
                 file_path TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
-                file_name TEXT,
-                camera_id TEXT,
-                sz_name TEXT,
-                sz_tag_ref_json TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
+                file_name VARCHAR(512) NULL,
+                camera_id VARCHAR(128) NULL,
+                sz_name VARCHAR(512) NULL,
+                sz_tag_ref_json LONGTEXT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                updated_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_images_uuid (uuid),
+                KEY idx_images_uuid (uuid),
+                KEY idx_images_created_at (created_at),
+                KEY idx_images_relative_path (relative_path(255))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
-        
-        # 创建标签表
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tags (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id INTEGER NOT NULL,
-                tag TEXT NOT NULL,
-                tag_type TEXT NOT NULL,  -- 'keyword' 或 'yolo_object'
-                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
-                UNIQUE(image_id, tag, tag_type)
-            )
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                image_id INT NOT NULL,
+                tag VARCHAR(512) NOT NULL,
+                tag_type VARCHAR(32) NOT NULL,
+                UNIQUE KEY uk_tags_image_tag_type (image_id, tag(191), tag_type),
+                KEY idx_tags_image_id (image_id),
+                KEY idx_tags_tag (tag(191)),
+                KEY idx_tags_type (tag_type),
+                CONSTRAINT fk_tags_image FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
-        
-        # 创建分析结果表
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS analysis_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id INTEGER NOT NULL UNIQUE,
-                description TEXT NOT NULL,
-                keywords_json TEXT NOT NULL,  -- JSON 格式的关键词数组
-                qwen_captions_json TEXT NOT NULL,  -- JSON 格式的 Qwen 描述数组
-                yolo_objects_json TEXT NOT NULL,  -- JSON 格式的 YOLO 对象数组
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
-            )
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                image_id INT NOT NULL,
+                description LONGTEXT NOT NULL,
+                keywords_json LONGTEXT NOT NULL,
+                qwen_captions_json LONGTEXT NOT NULL,
+                yolo_objects_json LONGTEXT NOT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_analysis_image_id (image_id),
+                KEY idx_analysis_image_id (image_id),
+                CONSTRAINT fk_analysis_image FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
-        
-        # 创建keyword向量表（每个keyword对应一个向量）
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS keyword_embeddings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id INTEGER NOT NULL,
-                keyword TEXT NOT NULL,
-                embedding BLOB NOT NULL,  -- BGE向量化后的768维float32向量（BLOB格式）
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
-                UNIQUE(image_id, keyword)
-            )
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                image_id INT NOT NULL,
+                keyword VARCHAR(512) NOT NULL,
+                embedding LONGBLOB NOT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_keyword_embeddings_image_keyword (image_id, keyword(191)),
+                KEY idx_keyword_embeddings_image_id (image_id),
+                KEY idx_keyword_embeddings_keyword (keyword(191)),
+                CONSTRAINT fk_keyword_embeddings_image FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
-        
-        # 如果表已存在但没有某些字段，则添加该字段
-        try:
-            cursor.execute("ALTER TABLE analysis_results ADD COLUMN qwen_captions_json TEXT DEFAULT '[]'")
-            print("已添加 qwen_captions_json 字段到 analysis_results 表")
-        except Exception:
-            # 字段已存在，忽略错误
-            pass
 
-        for _sql, _label in (
-            ("ALTER TABLE images ADD COLUMN camera_id TEXT", "camera_id"),
-            ("ALTER TABLE images ADD COLUMN sz_name TEXT", "sz_name"),
-            ("ALTER TABLE images ADD COLUMN sz_tag_ref_json TEXT", "sz_tag_ref_json"),
+        _ensure_column(cursor, "analysis_results", "qwen_captions_json", "LONGTEXT NOT NULL DEFAULT '[]'")
+        for col, definition in (
+            ("camera_id", "VARCHAR(128) NULL"),
+            ("sz_name", "VARCHAR(512) NULL"),
+            ("sz_tag_ref_json", "LONGTEXT NULL"),
         ):
-            try:
-                cursor.execute(_sql)
-                print(f"已添加 {_label} 字段到 images 表")
-            except Exception:
-                pass
-        
-        # 创建索引以提高搜索性能
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_images_uuid ON images(uuid)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_images_relative_path ON images(relative_path)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_tags_image_id ON tags(image_id)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag)
-        """)
-        
-        # 尝试添加 ai_model 字段到 projects 表 (Schema Migration)
-        try:
-            cursor.execute("ALTER TABLE projects ADD COLUMN ai_model TEXT DEFAULT 'gemini'")
-            print("已添加 ai_model 字段到 projects 表")
-        except Exception:
-            pass
+            _ensure_column(cursor, "images", col, definition)
 
-        try:
-            cursor.execute("ALTER TABLE projects ADD COLUMN api_probability REAL DEFAULT 1.0")
-            print("已添加 api_probability 字段到 projects 表")
-        except Exception:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE projects ADD COLUMN last_stopped_at TEXT")
-            print("已添加 last_stopped_at 字段到 projects 表")
-        except Exception:
-            pass
-
-        # 创建项目同步表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS projects (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
+                id VARCHAR(128) NOT NULL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
                 script_path TEXT NOT NULL,
-                schedule_enabled INTEGER DEFAULT 0,
-                schedule_interval INTEGER DEFAULT 1,
-                last_run TEXT,
-                created_at TEXT NOT NULL,
-                status TEXT DEFAULT 'idle',
-                ai_model TEXT DEFAULT 'gemini',
-                api_probability REAL DEFAULT 1.0,
-                last_stopped_at TEXT
-            )
+                schedule_enabled TINYINT DEFAULT 0,
+                schedule_interval INT DEFAULT 1,
+                last_run VARCHAR(64) NULL,
+                created_at VARCHAR(64) NOT NULL,
+                status VARCHAR(32) DEFAULT 'idle',
+                ai_model VARCHAR(64) DEFAULT 'gemini',
+                api_probability DOUBLE DEFAULT 1.0,
+                last_stopped_at VARCHAR(64) NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_tags_type ON tags(tag_type)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_analysis_image_id ON analysis_results(image_id)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_keyword_embeddings_image_id ON keyword_embeddings(image_id)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_keyword_embeddings_keyword ON keyword_embeddings(keyword)
-        """)
-        
-        # 本地数据库不再与 MinIO 同步，无需标记修改
+
+        _ensure_column(cursor, "projects", "ai_model", "VARCHAR(64) DEFAULT 'gemini'")
+        _ensure_column(cursor, "projects", "api_probability", "DOUBLE DEFAULT 1.0")
+        _ensure_column(cursor, "projects", "last_stopped_at", "VARCHAR(64) NULL")
 
 
 def _sz_tag_refs_from_db_value(sz_tag_ref_json: Optional[str]) -> List[str]:
@@ -276,7 +250,7 @@ def save_image_to_db(
                 camera_id, sz_name, sz_tag_ref_json,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             image_uuid, file_path, relative_path, file_name,
             camera_id, sz_name, sz_tag_ref_json,
@@ -290,9 +264,9 @@ def save_image_to_db(
             try:
                 cursor.execute("""
                     INSERT INTO tags (image_id, tag, tag_type)
-                    VALUES (?, ?, ?)
+                    VALUES (%s, %s, %s)
                 """, (image_id, keyword, 'keyword'))
-            except sqlite3.IntegrityError:
+            except pymysql.err.IntegrityError:
                 # 如果标签已存在，忽略
                 pass
         
@@ -301,9 +275,9 @@ def save_image_to_db(
             try:
                 cursor.execute("""
                     INSERT INTO tags (image_id, tag, tag_type)
-                    VALUES (?, ?, ?)
+                    VALUES (%s, %s, %s)
                 """, (image_id, yolo_obj, 'yolo_object'))
-            except sqlite3.IntegrityError:
+            except pymysql.err.IntegrityError:
                 # 如果标签已存在，忽略
                 pass
         
@@ -313,7 +287,7 @@ def save_image_to_db(
                 image_id, description, keywords_json, 
                 qwen_captions_json, yolo_objects_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             image_id,
             description,
@@ -329,14 +303,14 @@ def save_image_to_db(
                 try:
                     cursor.execute("""
                         INSERT INTO keyword_embeddings (image_id, keyword, embedding, created_at)
-                        VALUES (?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s)
                     """, (image_id, keyword, embedding_bytes, now))
-                except sqlite3.IntegrityError:
+                except pymysql.err.IntegrityError:
                     # 如果keyword向量已存在，更新它
                     cursor.execute("""
                         UPDATE keyword_embeddings 
-                        SET embedding = ?, created_at = ?
-                        WHERE image_id = ? AND keyword = ?
+                        SET embedding = %s, created_at = %s
+                        WHERE image_id = %s AND keyword = %s
                     """, (embedding_bytes, now, image_id, keyword))
         
         return image_id
@@ -383,32 +357,32 @@ def search_images(
         
         # 时间范围条件
         if start_date:
-            where_conditions.append("i.created_at >= ?")
+            where_conditions.append("i.created_at >= %s")
             params.append(start_date)
         
         if end_date:
-            where_conditions.append("i.created_at <= ?")
+            where_conditions.append("i.created_at <= %s")
             params.append(end_date)
 
         if camera_name:
-            where_conditions.append("i.sz_name LIKE ?")
+            where_conditions.append("i.sz_name LIKE %s")
             params.append(f"%{camera_name}%")
 
         if biz_category:
-            where_conditions.append("i.sz_tag_ref_json LIKE ?")
+            where_conditions.append("i.sz_tag_ref_json LIKE %s")
             params.append(f"%{biz_category}%")
 
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         
         # 先计算总数（用于分页显示）
         count_sql = f"""
-            SELECT COUNT(DISTINCT i.id)
+            SELECT COUNT(DISTINCT i.id) AS cnt
             FROM images i
             LEFT JOIN analysis_results ar ON i.id = ar.image_id
             WHERE {where_clause}
         """
         cursor.execute(count_sql, params)
-        total_count = cursor.fetchone()[0]
+        total_count = int(cursor.fetchone()['cnt'])
         
         # 查询符合条件的图片（根据是否使用向量搜索决定是否一次性查询所有）
         sql = f"""
@@ -437,7 +411,7 @@ def search_images(
             # 不使用向量搜索，按时间范围查询，直接在 SQL 层面分页
             if page is not None and page_size is not None:
                 # 有分页参数，在 SQL 层面分页
-                sql += " ORDER BY i.created_at DESC LIMIT ? OFFSET ?"
+                sql += " ORDER BY i.created_at DESC LIMIT %s OFFSET %s"
                 offset = (page - 1) * page_size
                 cursor.execute(sql, params + [page_size, offset])
             else:
@@ -452,7 +426,7 @@ def search_images(
             for row in rows:
                 # 获取该图片的所有标签
                 cursor.execute("""
-                    SELECT tag, tag_type FROM tags WHERE image_id = ?
+                    SELECT tag, tag_type FROM tags WHERE image_id = %s
                 """, (row['id'],))
                 
                 tags = []
@@ -539,7 +513,7 @@ def search_images(
                 cursor.execute("""
                     SELECT keyword, embedding
                     FROM keyword_embeddings
-                    WHERE image_id = ?
+                    WHERE image_id = %s
                 """, (row['id'],))
                 
                 keyword_vectors = cursor.fetchall()
@@ -615,7 +589,7 @@ def search_images(
             for similarity, row, query_similarities in results_with_similarity:
                 # 获取该图片的所有标签
                 cursor.execute("""
-                    SELECT tag, tag_type FROM tags WHERE image_id = ?
+                    SELECT tag, tag_type FROM tags WHERE image_id = %s
                 """, (row['id'],))
                 
                 tags = []
@@ -665,7 +639,7 @@ def search_images(
             for row in rows:
                 # 获取该图片的所有标签
                 cursor.execute("""
-                    SELECT tag, tag_type FROM tags WHERE image_id = ?
+                    SELECT tag, tag_type FROM tags WHERE image_id = %s
                 """, (row['id'],))
                 
                 tags = []
@@ -747,7 +721,7 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
                 ar.yolo_objects_json
             FROM images i
             LEFT JOIN analysis_results ar ON i.id = ar.image_id
-            WHERE i.uuid = ?
+            WHERE i.uuid = %s
         """, (image_uuid,))
         
         row = cursor.fetchone()
@@ -756,7 +730,7 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
         
         # 获取标签
         cursor.execute("""
-            SELECT tag, tag_type FROM tags WHERE image_id = ?
+            SELECT tag, tag_type FROM tags WHERE image_id = %s
         """, (row['id'],))
         
         tags = []
@@ -794,27 +768,6 @@ def get_image_by_uuid(image_uuid: str) -> Optional[Dict[str, Any]]:
 
 
 # --- 项目管理 ---
-
-def get_all_projects_db() -> List[Dict[str, Any]]:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT
-                i.id,
-                i.uuid,
-                i.relative_path,
-                i.file_name,
-                i.created_at,
-                ar.keywords_json
-            FROM images i
-            LEFT JOIN analysis_results ar ON i.id = ar.image_id
-            WHERE ar.keywords_json IS NULL OR TRIM(ar.keywords_json) = '[]'
-            ORDER BY i.created_at DESC
-            LIMIT ?
-        """, (limit,))
-        return [dict(row) for row in cursor.fetchall()]
-
-
 def upsert_analysis_results_and_tags_no_vectors(
     image_id: int,
     description: str,
@@ -833,13 +786,13 @@ def upsert_analysis_results_and_tags_no_vectors(
     with get_db_connection() as conn:
         cursor = conn.cursor()
 
-        cursor.execute("SELECT id FROM analysis_results WHERE image_id = ?", (image_id,))
+        cursor.execute("SELECT id FROM analysis_results WHERE image_id = %s", (image_id,))
         existing = cursor.fetchone()
         if existing:
             cursor.execute("""
                 UPDATE analysis_results
-                SET description = ?, keywords_json = ?, qwen_captions_json = ?, yolo_objects_json = ?, created_at = ?
-                WHERE image_id = ?
+                SET description = %s, keywords_json = %s, qwen_captions_json = %s, yolo_objects_json = %s, created_at = %s
+                WHERE image_id = %s
             """, (
                 description or "",
                 json.dumps(keywords, ensure_ascii=False),
@@ -851,7 +804,7 @@ def upsert_analysis_results_and_tags_no_vectors(
         else:
             cursor.execute("""
                 INSERT INTO analysis_results (image_id, description, keywords_json, qwen_captions_json, yolo_objects_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 image_id,
                 description or "",
@@ -862,28 +815,154 @@ def upsert_analysis_results_and_tags_no_vectors(
             ))
 
         # 重建 tags（避免旧的空/脏数据）
-        cursor.execute("DELETE FROM tags WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM tags WHERE image_id = %s", (image_id,))
         for k in keywords:
             try:
                 cursor.execute(
-                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (?, ?, ?)",
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (%s, %s, %s)",
                     (image_id, k, "keyword"),
                 )
-            except sqlite3.IntegrityError:
+            except pymysql.err.IntegrityError:
                 pass
         for o in yolo_objects:
             try:
                 cursor.execute(
-                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (?, ?, ?)",
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (%s, %s, %s)",
                     (image_id, o, "yolo_object"),
                 )
-            except sqlite3.IntegrityError:
+            except pymysql.err.IntegrityError:
                 pass
 
-        conn.commit()
+
+def get_images_missing_keywords(limit: int = 2000) -> List[Dict[str, Any]]:
+    """查询 keywords_json 为空的最新图片列表。"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                i.id,
+                i.uuid,
+                i.relative_path,
+                i.file_name,
+                i.created_at,
+                i.camera_id,
+                ar.keywords_json
+            FROM images i
+            LEFT JOIN analysis_results ar ON i.id = ar.image_id
+            WHERE ar.keywords_json IS NULL OR TRIM(ar.keywords_json) = '[]'
+            ORDER BY i.created_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
 
-# --- 项目管理 ---
+def update_image_analysis_with_embeddings(
+    image_id: int,
+    description: str,
+    keywords: List[str],
+    qwen_captions: Any,
+    yolo_objects: List[str],
+    keyword_embeddings: List[tuple[str, bytes]],
+) -> Dict[str, Any]:
+    """
+    更新 analysis_results、tags、keyword_embeddings。
+    返回 images 表字段供调用方上传 MinIO JSON。
+    """
+    if not keyword_embeddings:
+        raise ValueError("keyword_embeddings 不能为空")
+
+    now = datetime.now().isoformat()
+    keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    yolo_objects = [str(o).strip() for o in (yolo_objects or []) if str(o).strip()]
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT relative_path, uuid, file_name FROM images WHERE id = %s",
+            (image_id,),
+        )
+        img_row = cursor.fetchone()
+        if not img_row:
+            raise ValueError(f"图片 ID {image_id} 不存在于数据库中")
+
+        cursor.execute("SELECT id FROM analysis_results WHERE image_id = %s", (image_id,))
+        existing = cursor.fetchone()
+        keywords_json_str = json.dumps(keywords, ensure_ascii=False)
+        qwen_captions_json_str = json.dumps(qwen_captions or [], ensure_ascii=False)
+        yolo_objects_json_str = json.dumps(yolo_objects, ensure_ascii=False)
+
+        if existing:
+            cursor.execute(
+                """
+                UPDATE analysis_results
+                SET description = %s, keywords_json = %s, qwen_captions_json = %s,
+                    yolo_objects_json = %s, created_at = %s
+                WHERE image_id = %s
+                """,
+                (
+                    description or "",
+                    keywords_json_str,
+                    qwen_captions_json_str,
+                    yolo_objects_json_str,
+                    now,
+                    image_id,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO analysis_results
+                (image_id, description, keywords_json, qwen_captions_json, yolo_objects_json, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    image_id,
+                    description or "",
+                    keywords_json_str,
+                    qwen_captions_json_str,
+                    yolo_objects_json_str,
+                    now,
+                ),
+            )
+
+        cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = %s", (image_id,))
+        for keyword, embedding_bytes in keyword_embeddings:
+            cursor.execute(
+                """
+                INSERT INTO keyword_embeddings (image_id, keyword, embedding, created_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (image_id, keyword, embedding_bytes, now),
+            )
+
+        cursor.execute("DELETE FROM tags WHERE image_id = %s", (image_id,))
+        for k in keywords:
+            try:
+                cursor.execute(
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (%s, %s, %s)",
+                    (image_id, k, "keyword"),
+                )
+            except pymysql.err.IntegrityError:
+                pass
+        for o in yolo_objects:
+            try:
+                cursor.execute(
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (%s, %s, %s)",
+                    (image_id, o, "yolo_object"),
+                )
+            except pymysql.err.IntegrityError:
+                pass
+
+        return {
+            "relative_path": img_row["relative_path"],
+            "uuid": img_row["uuid"],
+            "file_name": img_row["file_name"],
+            "created_at": now,
+        }
+
 
 def get_all_projects_db() -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
@@ -896,19 +975,19 @@ def add_project_db(project_id: str, name: str, script_path: str):
         cursor = conn.cursor()
         created_at = datetime.now().isoformat()
         cursor.execute(
-            "INSERT INTO projects (id, name, script_path, created_at, status, ai_model) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, script_path, created_at, status, ai_model) VALUES (%s, %s, %s, %s, %s, %s)",
             (project_id, name, script_path, created_at, 'idle', 'gemini')
         )
 
 def update_project_model_db(project_id: str, model: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE projects SET ai_model = ? WHERE id = ?", (model, project_id))
+        cursor.execute("UPDATE projects SET ai_model = %s WHERE id = %s", (model, project_id))
         
 def update_project_probability_db(project_id: str, prob: float):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE projects SET api_probability = ? WHERE id = ?", (prob, project_id))
+        cursor.execute("UPDATE projects SET api_probability = %s WHERE id = %s", (prob, project_id))
 
 def update_project_stop_time_db(project_name_or_script: str):
     """Update last_stopped_at for a project based on script path match"""
@@ -922,7 +1001,7 @@ def update_project_stop_time_db(project_name_or_script: str):
         # Assuming script_path column changes. 
         # Actually simplest is to fuzzy match script_path.
         cursor.execute(
-            "UPDATE projects SET last_stopped_at = ?, status = 'idle' WHERE script_path LIKE ?",
+            "UPDATE projects SET last_stopped_at = %s, status = 'idle' WHERE script_path LIKE %s",
             (now_str, f"%{script_name}"),
         )
 
@@ -933,14 +1012,14 @@ def update_project_status_by_script_db(script_path: str, status: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE projects SET status = ? WHERE script_path LIKE ?",
+            "UPDATE projects SET status = %s WHERE script_path LIKE %s",
             (status, f"%{script_name}"),
         )
 
 def delete_project_db(project_id: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
 
 def update_project_db(project_id: str, updates: Dict[str, Any]):
     # columns: name, schedule_enabled, schedule_interval, last_run, status, script_path
@@ -950,14 +1029,14 @@ def update_project_db(project_id: str, updates: Dict[str, Any]):
     values = []
     for col, val in updates.items():
         if col in allowed_cols:
-            set_clauses.append(f"{col} = ?")
+            set_clauses.append(f"{col} = %s")
             values.append(int(val) if isinstance(val, bool) else val)
             
     if not set_clauses:
         return
         
     values.append(project_id)
-    sql = f"UPDATE projects SET {', '.join(set_clauses)} WHERE id = ?"
+    sql = f"UPDATE projects SET {', '.join(set_clauses)} WHERE id = %s"
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -970,7 +1049,7 @@ def delete_image_by_uuid(image_uuid: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         t0 = time.time()
-        cursor.execute("SELECT id FROM images WHERE uuid = ?", (image_uuid,))
+        cursor.execute("SELECT id FROM images WHERE uuid = %s", (image_uuid,))
         row = cursor.fetchone()
         print(f"[delete_image_by_uuid] select image id cost={time.time()-t0:.3f}s")
         if not row:
@@ -980,19 +1059,19 @@ def delete_image_by_uuid(image_uuid: str) -> bool:
         print(f"[delete_image_by_uuid] image_id={image_id}")
 
         t1 = time.time()
-        cursor.execute("DELETE FROM tags WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM tags WHERE image_id = %s", (image_id,))
         print(f"[delete_image_by_uuid] delete tags affected={cursor.rowcount} cost={time.time()-t1:.3f}s")
 
         t2 = time.time()
-        cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = %s", (image_id,))
         print(f"[delete_image_by_uuid] delete keyword_embeddings affected={cursor.rowcount} cost={time.time()-t2:.3f}s")
 
         t3 = time.time()
-        cursor.execute("DELETE FROM analysis_results WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM analysis_results WHERE image_id = %s", (image_id,))
         print(f"[delete_image_by_uuid] delete analysis_results affected={cursor.rowcount} cost={time.time()-t3:.3f}s")
 
         t4 = time.time()
-        cursor.execute("DELETE FROM images WHERE id = ?", (image_id,))
+        cursor.execute("DELETE FROM images WHERE id = %s", (image_id,))
         affected = cursor.rowcount
         print(f"[delete_image_by_uuid] delete images affected={affected} cost={time.time()-t4:.3f}s")
         print(f"[delete_image_by_uuid] done uuid={image_uuid} total_cost={time.time()-started_at:.3f}s")
@@ -1007,7 +1086,7 @@ def get_images_by_path_prefix(prefix: str) -> List[Dict[str, Any]]:
         cursor.execute("""
             SELECT id, uuid, relative_path, file_name, created_at, file_path
             FROM images 
-            WHERE relative_path LIKE ?
+            WHERE relative_path LIKE %s
         """, (f"{prefix}%",))
         
         return [dict(row) for row in cursor.fetchall()]
@@ -1023,6 +1102,6 @@ def check_keyword_vector_exists(image_id: int) -> bool:
     """检查图片是否存在 keyword 向量 (DB中)"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM keyword_embeddings WHERE image_id = ?", (image_id,))
-        count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) AS cnt FROM keyword_embeddings WHERE image_id = %s", (image_id,))
+        count = int(cursor.fetchone()['cnt'])
         return count > 0

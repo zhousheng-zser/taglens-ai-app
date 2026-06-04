@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-事件数据库模块 - 使用 SQLite 存储事件检索数据
+事件数据库模块 - 使用 MySQL taglens_event 存储事件检索数据
 """
 import json
 import os
 import random
-import shutil
-import sqlite3
+import subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-EVENT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "event.db"
-BACKUP_DIR = EVENT_DB_PATH.parent / "backup"
+import pymysql
+import pymysql.cursors
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+BACKUP_DIR = Path(__file__).parent.parent.parent / "data" / "backup"
 BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
 _event_backup_checked = False
@@ -71,8 +75,36 @@ STANDARD_EVENT_TYPE_OPTIONS: List[Tuple[str, str]] = [
 ]
 
 
+def _mysql_connect_kwargs() -> Dict[str, Any]:
+    return {
+        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+        "port": int(os.getenv("MYSQL_PORT", "3306")),
+        "user": os.getenv("MYSQL_USER", "root"),
+        "password": os.getenv("MYSQL_PASSWORD", ""),
+        "database": os.getenv("MYSQL_EVENT_DATABASE", "taglens_event"),
+        "charset": os.getenv("MYSQL_CHARSET", "utf8mb4"),
+    }
+
+
+def _in_clause(size: int) -> str:
+    return ",".join(["%s"] * size)
+
+
+def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """,
+        (table, column),
+    )
+    if int(cursor.fetchone()["cnt"]) == 0:
+        cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}")
+        print(f"已添加 {column} 字段到 {table} 表")
+
+
 def _backup_event_db_if_needed() -> None:
-    """按天备份事件数据库，并清理过期备份。"""
+    """按天 mysqldump 备份 MySQL taglens_event，并清理过期 .sql 备份（保留原有 .db 文件）。"""
     global _event_backup_checked
     if _event_backup_checked:
         return
@@ -81,15 +113,29 @@ def _backup_event_db_if_needed() -> None:
     try:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         today = datetime.now().strftime("%Y-%m-%d")
-        backup_path = BACKUP_DIR / f"event.{today}.db"
+        backup_path = BACKUP_DIR / f"event.{today}.sql"
+        db_name = os.getenv("MYSQL_EVENT_DATABASE", "taglens_event")
 
-        if EVENT_DB_PATH.exists() and not backup_path.exists():
-            shutil.copy2(EVENT_DB_PATH, backup_path)
-            print(f"已创建事件数据库备份: {backup_path}")
+        if not backup_path.exists():
+            kwargs = _mysql_connect_kwargs()
+            cmd = [
+                "mysqldump",
+                f"-h{kwargs['host']}",
+                f"-P{kwargs['port']}",
+                f"-u{kwargs['user']}",
+                f"-p{kwargs['password']}",
+                "--single-transaction",
+                "--quick",
+                "--set-gtid-purged=OFF",
+                db_name,
+            ]
+            with open(backup_path, "w", encoding="utf-8") as outfile:
+                subprocess.run(cmd, stdout=outfile, stderr=subprocess.PIPE, check=True)
+            print(f"已创建事件数据库 MySQL 备份: {backup_path}")
 
         now_ts = time.time()
         keep_seconds = BACKUP_KEEP_DAYS * 24 * 60 * 60
-        for path in BACKUP_DIR.glob("event.*.db"):
+        for path in list(BACKUP_DIR.glob("event.*.sql")) + list(BACKUP_DIR.glob("event.*.sql.gz")):
             try:
                 if now_ts - path.stat().st_mtime > keep_seconds:
                     path.unlink()
@@ -100,19 +146,15 @@ def _backup_event_db_if_needed() -> None:
         print(f"事件数据库备份检查失败(忽略): {exc}")
 
 
-def get_event_db_path() -> Path:
-    """获取事件数据库文件路径，确保目录存在并完成首次备份。"""
-    EVENT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _backup_event_db_if_needed()
-    return EVENT_DB_PATH
-
-
 @contextmanager
 def get_event_db_connection():
-    """获取事件数据库连接。"""
-    db_path = get_event_db_path()
-    conn = sqlite3.connect(str(db_path), timeout=60.0)
-    conn.row_factory = sqlite3.Row
+    """获取事件 MySQL 数据库连接。"""
+    _backup_event_db_if_needed()
+    conn = pymysql.connect(
+        **_mysql_connect_kwargs(),
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=False,
+    )
     try:
         yield conn
         conn.commit()
@@ -124,101 +166,114 @@ def get_event_db_connection():
 
 
 def init_event_database() -> None:
-    """初始化事件数据库所需索引，并触发备份。"""
+    """初始化事件 MySQL 表结构、索引与字典数据，并触发备份。"""
+    kwargs = _mysql_connect_kwargs()
+    server_conn = pymysql.connect(
+        host=kwargs["host"],
+        port=kwargs["port"],
+        user=kwargs["user"],
+        password=kwargs["password"],
+        charset=kwargs["charset"],
+        autocommit=True,
+    )
+    try:
+        with server_conn.cursor() as cursor:
+            cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{kwargs['database']}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+    finally:
+        server_conn.close()
+
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS event_project_dict (
-                project_id TEXT PRIMARY KEY,
-                project_name TEXT NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
-            )
+                project_id VARCHAR(100) NOT NULL PRIMARY KEY,
+                project_name VARCHAR(200) NOT NULL,
+                sort_order INT NOT NULL DEFAULT 0,
+                updated_at VARCHAR(64) NOT NULL,
+                KEY idx_event_project_dict_sort (sort_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS event_type_dict (
-                event_type_code TEXT PRIMARY KEY,
-                event_type_name TEXT NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
-            )
+                event_type_code VARCHAR(50) NOT NULL PRIMARY KEY,
+                event_type_name VARCHAR(200) NOT NULL,
+                sort_order INT NOT NULL DEFAULT 0,
+                updated_at VARCHAR(64) NOT NULL,
+                questions_list LONGTEXT NULL,
+                KEY idx_event_type_dict_sort (sort_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
         cursor.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_event_records_event_id
-            ON event_records(event_id)
+            CREATE TABLE IF NOT EXISTS event_records (
+                event_id VARCHAR(100) NOT NULL,
+                project_id VARCHAR(100) NOT NULL,
+                project_name VARCHAR(200) NULL,
+                camera_name VARCHAR(200) NULL,
+                mvp_camera_id VARCHAR(100) NULL,
+                event_type VARCHAR(50) NULL,
+                start_time VARCHAR(64) NULL,
+                video_url LONGTEXT NULL,
+                mvp_ip VARCHAR(100) NULL,
+                task_id VARCHAR(100) NULL,
+                source_id VARCHAR(100) NULL,
+                source_name VARCHAR(200) NULL,
+                event_name VARCHAR(200) NULL,
+                event_type_corrected VARCHAR(50) NOT NULL,
+                event_name_corrected VARCHAR(200) NULL,
+                event_level VARCHAR(10) NULL,
+                event_position VARCHAR(100) NULL,
+                end_time VARCHAR(64) NULL,
+                detect_time VARCHAR(64) NULL,
+                vehicle_plate VARCHAR(50) NULL,
+                vehicle_plate_color VARCHAR(10) NULL,
+                vehicle_confidence VARCHAR(10) NULL,
+                vehicle_type VARCHAR(10) NULL,
+                vehicle_category VARCHAR(10) NULL,
+                vehicle_color VARCHAR(10) NULL,
+                vehicle_speed VARCHAR(10) NULL,
+                lane_number VARCHAR(10) NULL,
+                process_status VARCHAR(10) NULL,
+                event_confidence VARCHAR(10) NULL,
+                scene_match VARCHAR(10) NULL,
+                scene_match_degree VARCHAR(10) NULL,
+                analysis_server VARCHAR(100) NULL,
+                management_server VARCHAR(100) NULL,
+                debugging_info_json LONGTEXT NULL,
+                image_paths LONGTEXT NULL,
+                video_path LONGTEXT NULL,
+                download_source VARCHAR(50) NULL,
+                status VARCHAR(20) NULL,
+                created_at VARCHAR(64) NULL,
+                segment_count INT NULL DEFAULT 0,
+                segment_paths_json LONGTEXT NULL,
+                segment_descriptions_json LONGTEXT NULL,
+                segment_statuses_json LONGTEXT NULL,
+                questions_answers_list LONGTEXT NULL,
+                PRIMARY KEY (event_id, project_id, event_type_corrected),
+                KEY idx_event_records_event_id (event_id),
+                KEY idx_event_records_project_id (project_id),
+                KEY idx_event_records_event_type_corrected (event_type_corrected),
+                KEY idx_event_records_start_time (start_time),
+                KEY idx_event_records_source_name (source_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_records_project_id
-            ON event_records(project_id)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_records_event_type_corrected
-            ON event_records(event_type_corrected)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_records_start_time
-            ON event_records(start_time)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_records_source_name
-            ON event_records(source_name)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_project_dict_sort
-            ON event_project_dict(sort_order)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_type_dict_sort
-            ON event_type_dict(sort_order)
-            """
-        )
-        try:
-            cursor.execute("ALTER TABLE event_records ADD COLUMN segment_count INTEGER DEFAULT 0")
-            print("已添加 segment_count 字段到 event_records 表")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE event_records ADD COLUMN segment_paths_json TEXT DEFAULT '[]'")
-            print("已添加 segment_paths_json 字段到 event_records 表")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE event_records ADD COLUMN segment_descriptions_json TEXT DEFAULT '[]'")
-            print("已添加 segment_descriptions_json 字段到 event_records 表")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE event_records ADD COLUMN segment_statuses_json TEXT DEFAULT '[]'")
-            print("已添加 segment_statuses_json 字段到 event_records 表")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE event_type_dict ADD COLUMN questions_list TEXT DEFAULT '[]'")
-            print("已添加 questions_list 字段到 event_type_dict 表")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE event_records ADD COLUMN questions_answers_list TEXT DEFAULT '[]'")
-            print("已添加 questions_answers_list 字段到 event_records 表")
-        except Exception:
-            pass
+
+        _ensure_column(cursor, "event_records", "segment_count", "INT NULL DEFAULT 0")
+        _ensure_column(cursor, "event_records", "segment_paths_json", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_records", "segment_descriptions_json", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_records", "segment_statuses_json", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_type_dict", "questions_list", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_records", "questions_answers_list", "LONGTEXT NULL")
+
         cursor.execute(
             """
             UPDATE event_records
@@ -267,11 +322,11 @@ def init_event_database() -> None:
             cursor.execute(
                 """
                 INSERT INTO event_project_dict (project_id, project_name, sort_order, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(project_id) DO UPDATE SET
-                    project_name = excluded.project_name,
-                    sort_order = excluded.sort_order,
-                    updated_at = excluded.updated_at
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    project_name = VALUES(project_name),
+                    sort_order = VALUES(sort_order),
+                    updated_at = VALUES(updated_at)
                 """,
                 (project_id, project_name, index, now),
             )
@@ -280,11 +335,11 @@ def init_event_database() -> None:
             cursor.execute(
                 """
                 INSERT INTO event_type_dict (event_type_code, event_type_name, sort_order, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(event_type_code) DO UPDATE SET
-                    event_type_name = excluded.event_type_name,
-                    sort_order = excluded.sort_order,
-                    updated_at = excluded.updated_at
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    event_type_name = VALUES(event_type_name),
+                    sort_order = VALUES(sort_order),
+                    updated_at = VALUES(updated_at)
                 """,
                 (event_type_code, event_type_name, index, now),
             )
@@ -379,8 +434,7 @@ def _build_default_questions_answers(
         unique_template = ["临时填充问题1?", "临时填充问题2?"]
 
     result: List[List[Dict[str, str]]] = []
-    for idx in range(max(segment_count, 0)):
-        # 默认初始化：每个分段随机抽取两个不重复问题
+    for _idx in range(max(segment_count, 0)):
         picked = random.sample(unique_template, 2)
         result.append([
             {"question": picked[0], "answer": ""},
@@ -600,7 +654,6 @@ def search_events(
     page_size: int = 20,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """查询事件记录并返回分页结果。"""
-    # questions_list 会在运营时直接改库，检索前刷新缓存避免下拉问题列表过期
     refresh_event_dict_cache()
 
     project_ids = [item.strip() for item in (project_ids or []) if item and item.strip()]
@@ -612,17 +665,15 @@ def search_events(
     params: List[Any] = []
 
     if project_ids:
-        placeholders = ",".join("?" for _ in project_ids)
-        where_conditions.append(f"project_id IN ({placeholders})")
+        where_conditions.append(f"project_id IN ({_in_clause(len(project_ids))})")
         params.extend(project_ids)
 
     if event_type_codes:
-        placeholders = ",".join("?" for _ in event_type_codes)
-        where_conditions.append(f"event_type_corrected IN ({placeholders})")
+        where_conditions.append(f"event_type_corrected IN ({_in_clause(len(event_type_codes))})")
         params.extend(event_type_codes)
 
     if source_name and source_name.strip():
-        where_conditions.append("source_name LIKE ?")
+        where_conditions.append("source_name LIKE %s")
         params.append(f"%{source_name.strip()}%")
 
     if processing_status == "processed":
@@ -631,8 +682,8 @@ def search_events(
             IFNULL(segment_count, 0) > 0
             AND TRIM(IFNULL(segment_statuses_json, '')) <> ''
             AND segment_statuses_json <> '[]'
-            AND segment_statuses_json NOT LIKE '%待定%'
-            AND segment_statuses_json NOT LIKE '%待标注%'
+            AND segment_statuses_json NOT LIKE '%%待定%%'
+            AND segment_statuses_json NOT LIKE '%%待标注%%'
             """
         )
     elif processing_status == "unprocessed":
@@ -642,19 +693,19 @@ def search_events(
                 TRIM(IFNULL(segment_statuses_json, '')) <> ''
                 AND segment_statuses_json <> '[]'
                 AND (
-                    segment_statuses_json LIKE '%待定%'
-                    OR segment_statuses_json LIKE '%待标注%'
+                    segment_statuses_json LIKE '%%待定%%'
+                    OR segment_statuses_json LIKE '%%待标注%%'
                 )
             )
             """
         )
 
     if start_date:
-        where_conditions.append("start_time >= ?")
+        where_conditions.append("start_time >= %s")
         params.append(start_date)
 
     if end_date:
-        where_conditions.append("start_time <= ?")
+        where_conditions.append("start_time <= %s")
         params.append(end_date)
 
     where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
@@ -665,12 +716,12 @@ def search_events(
         needs_python_filter = question_answer_status != "all" or description_status != "all"
         if not needs_python_filter:
             count_sql = f"""
-                SELECT COUNT(*)
+                SELECT COUNT(*) AS cnt
                 FROM event_records
                 WHERE {where_clause}
             """
             cursor.execute(count_sql, params)
-            total_count = int(cursor.fetchone()[0] or 0)
+            total_count = int(cursor.fetchone()["cnt"] or 0)
             search_sql = f"""
                 SELECT
                     event_id,
@@ -692,7 +743,7 @@ def search_events(
                 FROM event_records
                 WHERE {where_clause}
                 ORDER BY start_time DESC, event_id DESC
-                LIMIT ? OFFSET ?
+                LIMIT %s OFFSET %s
             """
             cursor.execute(search_sql, [*params, page_size, offset])
             rows = cursor.fetchall()
@@ -808,8 +859,7 @@ def get_pending_event_videos_for_segmentation(
     """
     params: List[Any] = []
     if normalized_codes:
-        placeholders = ",".join("?" for _ in normalized_codes)
-        where_sql += f" AND event_type_corrected IN ({placeholders})"
+        where_sql += f" AND event_type_corrected IN ({_in_clause(len(normalized_codes))})"
         params.extend(normalized_codes)
     params.append(safe_limit)
     with get_event_db_connection() as conn:
@@ -826,7 +876,7 @@ def get_pending_event_videos_for_segmentation(
             FROM event_records
             WHERE {where_sql}
             ORDER BY start_time DESC, event_id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             params,
         )
@@ -845,7 +895,6 @@ def get_pending_event_videos_for_segmentation(
 
 
 def _is_valid_segment_video_path(raw_path: str) -> bool:
-    """segment_paths_json 中单条路径是否可作为分段视频（非空且为 .mp4）。"""
     normalized = _normalize_video_object_path(raw_path)
     if not normalized:
         return False
@@ -856,14 +905,6 @@ def get_pending_segments_for_ai_description(
     limit: int,
     event_type_codes: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    从 event_records 筛选待 AI 补齐的分段（每条 = 一个分段视频）：
-    - segment_paths_json：必须有有效 .mp4 路径
-    - image_paths：解析 overlay（image_overlay.jpg），可选
-    - segment_descriptions_json：该下标已有描述则跳过
-    - event_type_corrected：与「事件视频分块」相同 IN 过滤（空列表 = 全部）
-    - 按 start_time 倒序，最多 limit 条分段
-    """
     safe_limit = max(int(limit or 0), 1)
     normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
     where_sql = """
@@ -873,8 +914,7 @@ def get_pending_segments_for_ai_description(
     """
     params: List[Any] = []
     if normalized_codes:
-        placeholders = ",".join("?" for _ in normalized_codes)
-        where_sql += f" AND event_type_corrected IN ({placeholders})"
+        where_sql += f" AND event_type_corrected IN ({_in_clause(len(normalized_codes))})"
         params.extend(normalized_codes)
 
     with get_event_db_connection() as conn:
@@ -950,7 +990,6 @@ def get_event_segment_annotation_snapshot(
     project_id: str,
     event_type_corrected: str,
 ) -> Optional[Dict[str, Any]]:
-    """读取事件当前分段标注快照，供并发补齐时写库前刷新。"""
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -962,7 +1001,7 @@ def get_event_segment_annotation_snapshot(
                 questions_answers_list,
                 segment_count
             FROM event_records
-            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             """,
             (event_id, project_id, event_type_corrected),
         )
@@ -1006,7 +1045,6 @@ def update_event_segment_description_at_index(
     segment_index: int,
     description: str,
 ) -> None:
-    """写库前基于最新 DB 快照更新单个分段描述（调用方需在同事件锁内调用）。"""
     snapshot = get_event_segment_annotation_snapshot(event_id, project_id, event_type_corrected)
     if not snapshot:
         raise ValueError(f"事件记录不存在: event_id={event_id}")
@@ -1050,12 +1088,12 @@ def update_event_segmentation_result(
             """
             UPDATE event_records
             SET
-                segment_count = ?,
-                segment_paths_json = ?,
-                segment_descriptions_json = ?,
-                segment_statuses_json = ?,
-                questions_answers_list = ?
-            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+                segment_count = %s,
+                segment_paths_json = %s,
+                segment_descriptions_json = %s,
+                segment_statuses_json = %s,
+                questions_answers_list = %s
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             """,
             (
                 len(segment_paths),
@@ -1093,10 +1131,10 @@ def update_event_segment_annotations(
             """
             UPDATE event_records
             SET
-                segment_descriptions_json = ?,
-                segment_statuses_json = ?,
-                questions_answers_list = ?
-            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+                segment_descriptions_json = %s,
+                segment_statuses_json = %s,
+                questions_answers_list = %s
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             """,
             (
                 payload_descriptions,
@@ -1114,14 +1152,13 @@ def get_event_record_media_paths(
     project_id: str,
     event_type_corrected: str,
 ) -> Dict[str, str]:
-    """按主键获取事件记录关联媒体路径。"""
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             SELECT image_paths, video_path
             FROM event_records
-            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             LIMIT 1
             """,
             (event_id, project_id, event_type_corrected),
@@ -1144,13 +1181,12 @@ def delete_event_record(
     project_id: str,
     event_type_corrected: str,
 ) -> None:
-    """按主键删除事件记录。"""
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             DELETE FROM event_records
-            WHERE event_id = ? AND project_id = ? AND event_type_corrected = ?
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             """,
             (event_id, project_id, event_type_corrected),
         )

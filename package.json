@@ -8,7 +8,7 @@
     "genkit:dev": "genkit start -- tsx src/ai/dev.ts",
     "genkit:watch": "genkit start -- tsx --watch src/ai/dev.ts",
     "build": "NODE_ENV=production NEXT_TEST_WASM=1 next build",
-    "start": "next start",
+    "start": "next start -p 9002",
     "lint": "NEXT_TEST_WASM=1 next lint",
     "typecheck": "tsc --noEmit"
   },

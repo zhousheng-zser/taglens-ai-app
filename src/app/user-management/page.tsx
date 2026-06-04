@@ -306,7 +306,7 @@ function UserManagementContent() {
         <Card>
           <CardHeader>
             <CardTitle>用户列表</CardTitle>
-            <CardDescription>审核员的任务统计来自 `manage.db` 中的事件审核记录。</CardDescription>
+            <CardDescription>审核员的任务统计来自 MySQL `taglens_manage` 库中的事件审核记录。</CardDescription>
           </CardHeader>
           <CardContent>
             <Table>

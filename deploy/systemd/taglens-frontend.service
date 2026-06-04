@@ -1,5 +1,5 @@
 [Unit]
-Description=TagLens AI 前端 (start.sh)
+Description=TagLens AI 前端 (Next.js 生产模式, start.sh)
 Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
 After=network-online.target taglens-backend.service
 Wants=network-online.target
@@ -8,11 +8,14 @@ PartOf=taglens.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/Traffic-LLM/zser/taglens-ai-app
+Environment=NODE_ENV=production
+Environment=PORT=9002
 ExecStart=/bin/bash /opt/Traffic-LLM/zser/taglens-ai-app/start.sh
 
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=300
+# 首次 next build 可能较久
+TimeoutStartSec=900
 TimeoutStopSec=45
 
 StandardOutput=journal

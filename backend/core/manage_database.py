@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""管理数据库：用户、任务分配、审核记录与会话签名。"""
+"""管理数据库：用户、任务分配、审核记录与会话签名（MySQL taglens_manage）。"""
 import base64
 import hashlib
 import hmac
@@ -7,15 +7,18 @@ import json
 import os
 import secrets
 import calendar
-import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from typing import Any, Dict, List, Mapping, Optional
+
+import pymysql
+import pymysql.cursors
+from dotenv import load_dotenv
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-MANAGE_DB_PATH = Path(__file__).parent.parent.parent / "data" / "manage.db"
 PASSWORD_ITERATIONS = 200_000
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "3edcVFR$"
@@ -24,16 +27,24 @@ SESSION_MAX_AGE_SECONDS = int(os.getenv("MANAGE_SESSION_MAX_AGE", str(7 * 24 * 6
 SESSION_SECRET = os.getenv("MANAGE_SESSION_SECRET", "taglens-manage-default-secret-change-me")
 
 
-def get_manage_db_path() -> Path:
-    MANAGE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return MANAGE_DB_PATH
+def _mysql_connect_kwargs() -> Dict[str, Any]:
+    return {
+        "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+        "port": int(os.getenv("MYSQL_PORT", "3306")),
+        "user": os.getenv("MYSQL_USER", "root"),
+        "password": os.getenv("MYSQL_PASSWORD", ""),
+        "database": os.getenv("MYSQL_MANAGE_DATABASE", "taglens_manage"),
+        "charset": os.getenv("MYSQL_CHARSET", "utf8mb4"),
+    }
 
 
 @contextmanager
 def get_manage_db_connection():
-    conn = sqlite3.connect(str(get_manage_db_path()), timeout=60.0)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
+    conn = pymysql.connect(
+        **_mysql_connect_kwargs(),
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=False,
+    )
     try:
         yield conn
         conn.commit()
@@ -73,82 +84,80 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 def init_manage_database() -> None:
-    """创建 manage.db 表结构，并初始化默认管理员。"""
+    """创建 MySQL 表结构，并初始化默认管理员。"""
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(255) NOT NULL,
                 password_hash TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('admin', 'reviewer')),
-                display_name TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
+                role ENUM('admin', 'reviewer') NOT NULL,
+                display_name VARCHAR(255) NULL,
+                is_active TINYINT NOT NULL DEFAULT 1,
+                created_at VARCHAR(64) NOT NULL,
+                updated_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_users_username (username),
+                KEY idx_users_username (username)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS user_time_ranges (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                range_name TEXT NOT NULL,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                range_name VARCHAR(255) NOT NULL,
+                start_time VARCHAR(64) NOT NULL,
+                end_time VARCHAR(64) NOT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                KEY idx_user_time_ranges_user_id (user_id),
+                CONSTRAINT fk_user_time_ranges_user
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS event_review_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                event_type_code TEXT NOT NULL,
-                reviewer_id INTEGER NOT NULL,
-                reviewer_username TEXT NOT NULL,
-                reviewer_display_name TEXT,
-                review_time TEXT NOT NULL,
-                status_review_done INTEGER NOT NULL DEFAULT 0,
-                qa_review_done INTEGER NOT NULL DEFAULT 0,
-                description_review_done INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(event_id, project_id, event_type_code),
-                FOREIGN KEY(reviewer_id) REFERENCES users(id)
-            )
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                event_id VARCHAR(255) NOT NULL,
+                project_id VARCHAR(255) NOT NULL,
+                event_type_code VARCHAR(64) NOT NULL,
+                reviewer_id INT NOT NULL,
+                reviewer_username VARCHAR(255) NOT NULL,
+                reviewer_display_name VARCHAR(255) NULL,
+                review_time VARCHAR(64) NOT NULL,
+                status_review_done TINYINT NOT NULL DEFAULT 0,
+                qa_review_done TINYINT NOT NULL DEFAULT 0,
+                description_review_done TINYINT NOT NULL DEFAULT 0,
+                created_at VARCHAR(64) NOT NULL,
+                updated_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_event_review_key (event_id, project_id, event_type_code),
+                KEY idx_event_review_records_event_key (event_id, project_id, event_type_code),
+                KEY idx_event_review_records_reviewer (reviewer_id),
+                CONSTRAINT fk_event_review_reviewer
+                    FOREIGN KEY (reviewer_id) REFERENCES users(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_time_ranges_user_id ON user_time_ranges(user_id)")
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_event_review_records_event_key
-            ON event_review_records(event_id, project_id, event_type_code)
-            """
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_review_records_reviewer ON event_review_records(reviewer_id)")
 
-        cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
-        admin_count = int(cursor.fetchone()[0] or 0)
+        cursor.execute("SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin'")
+        admin_count = int(cursor.fetchone()["cnt"] or 0)
         if admin_count == 0:
             now = datetime.now().isoformat()
             cursor.execute(
                 """
                 INSERT INTO users (username, password_hash, role, display_name, is_active, created_at, updated_at)
-                VALUES (?, ?, 'admin', '系统管理员', 1, ?, ?)
+                VALUES (%s, %s, 'admin', '系统管理员', 1, %s, %s)
                 """,
                 (DEFAULT_ADMIN_USERNAME, hash_password(DEFAULT_ADMIN_PASSWORD), now, now),
             )
             print(f"已创建默认管理员账号: {DEFAULT_ADMIN_USERNAME}")
 
 
-def _row_to_user(row: sqlite3.Row) -> Dict[str, Any]:
+def _row_to_user(row: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "id": int(row["id"]),
         "username": row["username"],
@@ -167,7 +176,7 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
             """
             SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
             FROM users
-            WHERE username = ?
+            WHERE username = %s
             """,
             (username,),
         )
@@ -186,7 +195,7 @@ def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
             """
             SELECT id, username, role, display_name, is_active, created_at, updated_at
             FROM users
-            WHERE id = ?
+            WHERE id = %s
             """,
             (user_id,),
         )
@@ -216,7 +225,7 @@ def create_user(username: str, password: str, role: str, display_name: Optional[
         cursor.execute(
             """
             INSERT INTO users (username, password_hash, role, display_name, is_active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 1, ?, ?)
+            VALUES (%s, %s, %s, %s, 1, %s, %s)
             """,
             (username, hash_password(password), role, display_name or username, now, now),
         )
@@ -230,16 +239,15 @@ def create_user(username: str, password: str, role: str, display_name: Optional[
 def delete_user(user_id: int) -> bool:
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT username, role FROM users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT username, role FROM users WHERE id = %s", (user_id,))
         row = cursor.fetchone()
         if not row:
             return False
         if row["username"] == DEFAULT_ADMIN_USERNAME and row["role"] == "admin":
             raise ValueError("不能删除默认管理员")
-        # 先清理审核记录，避免 reviewer_id 外键约束导致删除用户失败。
-        cursor.execute("DELETE FROM event_review_records WHERE reviewer_id = ?", (user_id,))
-        cursor.execute("DELETE FROM user_time_ranges WHERE user_id = ?", (user_id,))
-        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        cursor.execute("DELETE FROM event_review_records WHERE reviewer_id = %s", (user_id,))
+        cursor.execute("DELETE FROM user_time_ranges WHERE user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
         return cursor.rowcount > 0
 
 
@@ -250,7 +258,7 @@ def list_user_time_ranges(user_id: int) -> List[Dict[str, Any]]:
             """
             SELECT id, user_id, range_name, start_time, end_time, created_at
             FROM user_time_ranges
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY start_time ASC, id ASC
             """,
             (user_id,),
@@ -272,13 +280,13 @@ def create_time_range(user_id: int, range_name: str, start_time: str, end_time: 
     now = datetime.now().isoformat()
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
         if not cursor.fetchone():
             raise ValueError("用户不存在")
         cursor.execute(
             """
             INSERT INTO user_time_ranges (user_id, range_name, start_time, end_time, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (user_id, range_name, start_time, end_time, now),
         )
@@ -289,7 +297,7 @@ def create_time_range(user_id: int, range_name: str, start_time: str, end_time: 
 def delete_time_range(range_id: int) -> bool:
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM user_time_ranges WHERE id = ?", (range_id,))
+        cursor.execute("DELETE FROM user_time_ranges WHERE id = %s", (range_id,))
         return cursor.rowcount > 0
 
 
@@ -342,16 +350,16 @@ def upsert_event_review_record(
                 status_review_done, qa_review_done, description_review_done,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(event_id, project_id, event_type_code) DO UPDATE SET
-                reviewer_id = excluded.reviewer_id,
-                reviewer_username = excluded.reviewer_username,
-                reviewer_display_name = excluded.reviewer_display_name,
-                review_time = excluded.review_time,
-                status_review_done = excluded.status_review_done,
-                qa_review_done = excluded.qa_review_done,
-                description_review_done = excluded.description_review_done,
-                updated_at = excluded.updated_at
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                reviewer_id = VALUES(reviewer_id),
+                reviewer_username = VALUES(reviewer_username),
+                reviewer_display_name = VALUES(reviewer_display_name),
+                review_time = VALUES(review_time),
+                status_review_done = VALUES(status_review_done),
+                qa_review_done = VALUES(qa_review_done),
+                description_review_done = VALUES(description_review_done),
+                updated_at = VALUES(updated_at)
             """,
             (
                 event_id,
@@ -378,7 +386,7 @@ def get_event_review_record(event_id: str, project_id: str, event_type_code: str
             """
             SELECT *
             FROM event_review_records
-            WHERE event_id = ? AND project_id = ? AND event_type_code = ?
+            WHERE event_id = %s AND project_id = %s AND event_type_code = %s
             """,
             (event_id, project_id, event_type_code),
         )
@@ -407,7 +415,7 @@ def get_event_review_records_for_keys(keys: List[tuple[str, str, str]]) -> Dict[
                 """
                 SELECT *
                 FROM event_review_records
-                WHERE event_id = ? AND project_id = ? AND event_type_code = ?
+                WHERE event_id = %s AND project_id = %s AND event_type_code = %s
                 """,
                 (event_id, project_id, event_type_code),
             )
@@ -459,6 +467,11 @@ def get_review_stats() -> List[Dict[str, Any]]:
         ]
 
 
+def _review_time_date_key_sql() -> str:
+    """ISO8601 review_time → YYYYMMDD，与 SQLite strftime('%Y%m%d', ...) 对齐。"""
+    return "REPLACE(SUBSTRING(r.review_time, 1, 10), '-', '')"
+
+
 def get_review_stats_timeseries(
     *,
     month: Optional[str] = None,
@@ -472,11 +485,13 @@ def get_review_stats_timeseries(
     - date_key: YYYYMMDD → X 轴为当天 24 小时
     - date_hour: YYYYMMDDHH → X 轴为该小时内 60 分钟
 
-    review_time 存 ISO8601 字符串，使用 SQLite strftime 分组。
+    review_time 存 ISO8601 字符串，按字符串截取分组（与原先 SQLite strftime 行为一致）。
     """
     modes = [month, date_key, date_hour]
     if sum(1 for m in modes if m) != 1:
         raise ValueError("必须且仅能指定 month、date、date_hour 之一")
+
+    date_key_sql = _review_time_date_key_sql()
 
     if month:
         if len(month) != 6 or not month.isdigit():
@@ -487,8 +502,8 @@ def get_review_stats_timeseries(
         _, dim = calendar.monthrange(year, mon)
         sorted_labels = [f"{month}{str(d).zfill(2)}" for d in range(1, dim + 1)]
         labels = [f"{d:02d}日" for d in range(1, dim + 1)]
-        group_sql = "strftime('%Y%m%d', r.review_time)"
-        filter_sql = "strftime('%Y%m', r.review_time) = ?"
+        group_sql = date_key_sql
+        filter_sql = f"SUBSTRING({date_key_sql}, 1, 6) = %s"
         filter_param = month
         granularity = "month"
         chart_title = "每日审核事件数统计（按月）"
@@ -497,8 +512,8 @@ def get_review_stats_timeseries(
             raise ValueError("date 须为 YYYYMMDD")
         sorted_labels = [f"{date_key}{str(h).zfill(2)}" for h in range(24)]
         labels = [f"{h:02d}时" for h in range(24)]
-        group_sql = "strftime('%Y%m%d%H', r.review_time)"
-        filter_sql = "strftime('%Y%m%d', r.review_time) = ?"
+        group_sql = f"CONCAT({date_key_sql}, SUBSTRING(r.review_time, 12, 2))"
+        filter_sql = f"{date_key_sql} = %s"
         filter_param = date_key
         granularity = "day"
         chart_title = "每小时审核事件数统计（按日）"
@@ -508,8 +523,10 @@ def get_review_stats_timeseries(
             raise ValueError("date_hour 须为 YYYYMMDDHH")
         sorted_labels = [f"{date_hour}{str(m).zfill(2)}" for m in range(60)]
         labels = [f"{m:02d}分" for m in range(60)]
-        group_sql = "strftime('%Y%m%d%H%M', r.review_time)"
-        filter_sql = "strftime('%Y%m%d%H', r.review_time) = ?"
+        group_sql = (
+            f"CONCAT({date_key_sql}, SUBSTRING(r.review_time, 12, 2), SUBSTRING(r.review_time, 15, 2))"
+        )
+        filter_sql = f"CONCAT({date_key_sql}, SUBSTRING(r.review_time, 12, 2)) = %s"
         filter_param = date_hour
         granularity = "hour"
         chart_title = "每分钟审核事件数统计（按小时）"
@@ -525,7 +542,7 @@ def get_review_stats_timeseries(
             if role_reviewer_only:
                 parts.append("u.role = 'reviewer'")
             if filter_user_id is not None:
-                parts.append("r.reviewer_id = ?")
+                parts.append("r.reviewer_id = %s")
                 params.append(filter_user_id)
             where = " AND ".join(parts)
             cursor.execute(
@@ -542,7 +559,7 @@ def get_review_stats_timeseries(
 
         if filter_user_id is not None:
             cursor.execute(
-                "SELECT id, username, display_name, role FROM users WHERE id = ?",
+                "SELECT id, username, display_name, role FROM users WHERE id = %s",
                 (filter_user_id,),
             )
             urow = cursor.fetchone()
@@ -550,7 +567,7 @@ def get_review_stats_timeseries(
                 raise ValueError("用户不存在")
             display = (urow["display_name"] or urow["username"] or "").strip() or str(filter_user_id)
 
-            parts = [filter_sql, "r.reviewer_id = ?"]
+            parts = [filter_sql, "r.reviewer_id = %s"]
             params: List[Any] = [filter_param, filter_user_id]
             where = " AND ".join(parts)
             cursor.execute(

@@ -323,10 +323,13 @@ if __name__ == "__main__":
             "download_path": None
         },
         {
-            "name": "taglens.db",
-            "type": "数据库文件",
-            "local_path": DATA_DIR / "taglens.db",
-            "object_name": "test/database/taglens.db",
+            "name": "taglens MySQL 备份",
+            "type": "数据库备份",
+            "local_path": next(
+                iter(sorted((DATA_DIR / "backup").glob("taglens.*.sql"), reverse=True)),
+                DATA_DIR / "backup" / "taglens.placeholder.sql",
+            ),
+            "object_name": "test/database/taglens.sql",
             "download_path": None
         },
         {

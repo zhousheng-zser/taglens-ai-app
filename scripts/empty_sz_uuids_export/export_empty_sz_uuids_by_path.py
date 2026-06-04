@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-从 taglens.db 的 images 表中导出 sz_name 为空的记录对应的「视频质量诊断事件 ID」，
+从 MySQL taglens_taglens.images 表中导出 sz_name 为空的记录对应的「视频质量诊断事件 ID」，
 按 file_path 是否包含关键字分别写入两个目录下的 txt（每行一个 ID）。
 
 文件名约定（与实际上传路径一致）：
@@ -21,8 +21,17 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT / "backend"))
+
+from dotenv import load_dotenv
+
+load_dotenv(PROJECT_ROOT / "backend" / ".env")
+
+from core.database import get_db_connection
 
 
 def _empty_sz_condition() -> str:
@@ -49,12 +58,6 @@ def main() -> None:
         description="导出 sz_name 为空的记录的 VQD 事件 ID（从 file_path 文件名解析），按路径关键字分目录"
     )
     parser.add_argument(
-        "--db",
-        type=Path,
-        default=root / "data" / "taglens.db",
-        help="SQLite 数据库路径",
-    )
-    parser.add_argument(
         "--out-dir",
         type=Path,
         default=root / "scripts" / "empty_sz_uuids_export",
@@ -77,30 +80,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    db_path: Path = args.db
-    if not db_path.is_file():
-        raise SystemExit(f"数据库不存在: {db_path}")
-
     sql = f"""
         SELECT file_path
         FROM images
         WHERE {_empty_sz_condition()}
     """
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        cur = conn.execute(sql)
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(sql)
         rows = cur.fetchall()
-    finally:
-        conn.close()
 
     video_ids: set[str] = set()
     pudong_ids: set[str] = set()
     neither = 0
     parse_fail = 0
 
-    for (file_path,) in rows:
-        fp = file_path or ""
+    for row in rows:
+        fp = row["file_path"] or ""
         eid = extract_vqd_event_id_from_file_path(fp)
         if eid is None:
             parse_fail += 1
@@ -128,7 +125,7 @@ def main() -> None:
     write_sorted(dir_video / args.filename, video_ids)
     write_sorted(dir_pudong / args.filename, pudong_ids)
 
-    print(f"数据库: {db_path}")
+    print("数据库: MySQL taglens_taglens")
     print(f"sz_name 为空的记录总数: {len(rows)}")
     print(f"无法从 file_path 解析事件 ID（无「_数字」后缀等）: {parse_fail} 条")
     print(f"「{args.name_video}」: {len(video_ids)} 条事件 ID -> {dir_video / args.filename}")

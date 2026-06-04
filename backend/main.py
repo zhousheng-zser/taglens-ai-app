@@ -24,6 +24,7 @@ import mimetypes
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / ".env")
 from openai import OpenAI
 import httpx
 import requests
@@ -84,8 +85,6 @@ from services.llm_prompts import PROMPT_PART_1, PROMPT_PART_2_TEMPLATE, PROMPT_P
 from services.text_embedding_service import encode_text_to_vector, get_bge_model
 from services.business_structure_manager import get_business_manager_for_project
 
-# 加载环境变量
-load_dotenv()
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 import numpy as np

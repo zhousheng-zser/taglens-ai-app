@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 根据同目录下的 uuid_vei_ubi_short_id.txt（事件 ID + MySQL 相机短编号），
-结合项目根 data/business_structure_map.json，回填 SQLite images 表：
+结合项目根 data/business_structure_map.json，回填 MySQL taglens_taglens.images 表：
 
   camera_id, sz_name, sz_tag_ref_json
 
@@ -17,14 +17,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _setup_db():
+    root = project_root()
+    sys.path.insert(0, str(root / "backend"))
+    from dotenv import load_dotenv
+
+    load_dotenv(root / "backend" / ".env")
+    from core.database import get_db_connection
+
+    return get_db_connection
 
 
 def extract_vqd_event_id_from_file_path(file_path: str) -> Optional[str]:
@@ -75,7 +86,7 @@ def load_business_map(path: Path) -> Dict[str, dict]:
 
 
 def update_image_row(
-    cur: sqlite3.Cursor,
+    cur: Any,
     image_id: int,
     camera_id: str,
     sz_name: str,
@@ -85,8 +96,8 @@ def update_image_row(
     cur.execute(
         """
         UPDATE images
-        SET camera_id = ?, sz_name = ?, sz_tag_ref_json = ?, updated_at = ?
-        WHERE id = ?
+        SET camera_id = %s, sz_name = %s, sz_tag_ref_json = %s, updated_at = %s
+        WHERE id = %s
         """,
         (
             camera_id,
@@ -107,12 +118,6 @@ def main() -> None:
         type=Path,
         default=here / "uuid_vei_ubi_short_id.txt",
         help="事件ID与相机短编号 TSV（默认同脚本目录）",
-    )
-    parser.add_argument(
-        "--db",
-        type=Path,
-        default=root / "data" / "taglens.db",
-        help="SQLite 数据库",
     )
     parser.add_argument(
         "--map",
@@ -139,21 +144,19 @@ def main() -> None:
 
     if not args.tsv.is_file():
         raise SystemExit(f"找不到 TSV: {args.tsv}")
-    if not args.db.is_file():
-        raise SystemExit(f"找不到数据库: {args.db}")
     if not args.map.is_file():
         raise SystemExit(f"找不到映射文件: {args.map}")
 
+    get_db_connection = _setup_db()
     event_to_short = load_tsv_event_to_short(args.tsv)
     biz = load_business_map(args.map)
 
-    conn = sqlite3.connect(str(args.db))
-    try:
+    with get_db_connection() as conn:
         cur = conn.cursor()
         sub = (args.path_substring or "").strip()
         if sub:
             cur.execute(
-                "SELECT id, file_path, sz_name FROM images WHERE file_path LIKE ?",
+                "SELECT id, file_path, sz_name FROM images WHERE file_path LIKE %s",
                 (f"%{sub}%",),
             )
         else:
@@ -161,7 +164,10 @@ def main() -> None:
 
         # 事件 ID -> 待处理的图片行（不过滤 sz_name，避免 TSV 有事件但误判为「库中无图」）
         event_to_rows: Dict[str, List[Tuple[int, Optional[str]]]] = {}
-        for image_id, fp, sz_name in cur.fetchall():
+        for row in cur.fetchall():
+            image_id = row["id"]
+            fp = row["file_path"]
+            sz_name = row["sz_name"]
             eid = extract_vqd_event_id_from_file_path(fp or "")
             if not eid:
                 continue
@@ -210,11 +216,9 @@ def main() -> None:
 
         if not args.dry_run:
             conn.commit()
-    finally:
-        conn.close()
 
     print(f"TSV: {args.tsv}（事件条数 {len(event_to_short)}）")
-    print(f"数据库: {args.db}")
+    print("数据库: MySQL taglens_taglens")
     print(f"映射: {args.map}")
     print(f"path 过滤: {sub or '(无)'}；overwrite={args.overwrite}；dry_run={args.dry_run}")
     if args.dry_run:

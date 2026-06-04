@@ -3,7 +3,6 @@ import sys
 import time
 import json
 import base64
-import sqlite3
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +22,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 backend_dir = PROJECT_ROOT / "backend"
 sys.path.insert(0, str(backend_dir))
 
+from core.database import get_images_missing_keywords, update_image_analysis_with_embeddings
 from core.minio_storage_client import MinIOStorageClient
 
 # 加载环境变量（backend/.env 优先）
@@ -375,8 +375,7 @@ def analyze_image(image_data_uri: str) -> dict:
 def update_database_with_analysis(
     image_id: int, analysis_result: dict, minio_client: MinIOStorageClient | None = None
 ) -> None:
-    """将分析结果更新到数据库（只更新 analysis_results 和 tags，不更新向量），并上传 JSON 到 MinIO"""
-
+    """将分析结果更新到 MySQL，并上传 JSON 到 MinIO。"""
     semantic = analysis_result.get("semantic_search", {})
     training = analysis_result.get("training_data", {})
 
@@ -388,213 +387,50 @@ def update_database_with_analysis(
     if not isinstance(keywords, list) or len(keywords) == 0:
         raise ValueError("AI 分析结果 keywords 为空，跳过写入")
     keywords = [str(k).strip() for k in keywords if str(k).strip()]
-    if len(keywords) == 0:
+    if not keywords:
         raise ValueError("AI 分析结果 keywords 清洗后为空，跳过写入")
 
-    now = datetime.now().isoformat()
+    keyword_embeddings: list[tuple[str, bytes]] = []
+    for k in keywords:
+        try:
+            keyword_embeddings.append((k, encode_text_to_vector(k)))
+        except Exception as e:
+            print(f"  -> 警告: keyword 向量化失败 keyword='{k}' err={e}")
 
-    # 相对路径: 项目根目录 / data / taglens.db
-    db_path = PROJECT_ROOT / "data" / "taglens.db"
+    if not keyword_embeddings:
+        raise ValueError("所有 keyword 向量化都失败，跳过写入")
 
-    relative_path = None
-    image_uuid = None
-    file_name = None
+    meta = update_image_analysis_with_embeddings(
+        image_id,
+        description or "",
+        keywords,
+        qwen_captions,
+        yolo_objects,
+        keyword_embeddings,
+    )
+    print(
+        f"  -> 成功: 已提交到数据库 keywords={len(keywords)} embeddings={len(keyword_embeddings)}"
+    )
 
-    conn = sqlite3.connect(str(db_path), timeout=60.0)
-    conn.row_factory = sqlite3.Row
-
-    try:
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "SELECT relative_path, uuid, file_name FROM images WHERE id = ?",
-            (image_id,),
-        )
-        img_row = cursor.fetchone()
-        if img_row:
-            relative_path = img_row["relative_path"]
-            image_uuid = img_row["uuid"]
-            file_name = img_row["file_name"]
-        else:
-            raise ValueError(f"图片 ID {image_id} 不存在于数据库中")
-
-        cursor.execute(
-            "SELECT id FROM analysis_results WHERE image_id = ?", (image_id,)
-        )
-        existing = cursor.fetchone()
-
-        keywords_json_str = json.dumps(keywords, ensure_ascii=False)
-        qwen_captions_json_str = json.dumps(qwen_captions, ensure_ascii=False)
-        yolo_objects_json_str = json.dumps(yolo_objects, ensure_ascii=False)
-
-        if existing:
-            cursor.execute(
-                """
-                UPDATE analysis_results
-                SET description = ?, keywords_json = ?, qwen_captions_json = ?, yolo_objects_json = ?, created_at = ?
-                WHERE image_id = ?
-            """,
-                (
-                    description or "",
-                    keywords_json_str,
-                    qwen_captions_json_str,
-                    yolo_objects_json_str,
-                    now,
-                    image_id,
-                ),
-            )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO analysis_results (image_id, description, keywords_json, qwen_captions_json, yolo_objects_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    image_id,
-                    description or "",
-                    keywords_json_str,
-                    qwen_captions_json_str,
-                    yolo_objects_json_str,
-                    now,
-                ),
-            )
-
-        # 重建关键词向量：删除旧的再插入新的
-        cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = ?", (image_id,))
-        embedding_inserted = 0
-        for k in keywords:
-            try:
-                embedding_bytes = encode_text_to_vector(k)
-                cursor.execute(
-                    """
-                    INSERT INTO keyword_embeddings (image_id, keyword, embedding, created_at)
-                    VALUES (?, ?, ?, ?)
-                """,
-                    (image_id, k, embedding_bytes, now),
-                )
-                embedding_inserted += 1
-            except Exception as e:
-                print(f"  -> 警告: keyword 向量化失败 keyword='{k}' err={e}")
-
-        if embedding_inserted == 0:
-            raise ValueError("所有 keyword 向量化都失败，跳过写入")
-
-        cursor.execute("DELETE FROM tags WHERE image_id = ?", (image_id,))
-        tags_inserted = 0
-        for k in keywords:
-            try:
-                cursor.execute(
-                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (?, ?, ?)",
-                    (image_id, k, "keyword"),
-                )
-                tags_inserted += 1
-            except sqlite3.IntegrityError:
-                pass
-        for o in yolo_objects:
-            try:
-                cursor.execute(
-                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (?, ?, ?)",
-                    (image_id, o, "yolo_object"),
-                )
-                tags_inserted += 1
-            except sqlite3.IntegrityError:
-                pass
-
-        conn.commit()
-        print(
-            f"  -> 成功: 已提交到数据库 keywords={len(keywords)} embeddings={embedding_inserted} tags={tags_inserted}"
-        )
-
-        verify_cursor = conn.cursor()
-        verify_cursor.execute(
-            """
-            SELECT image_id, keywords_json
-            FROM analysis_results
-            WHERE image_id = ?
-        """,
-            (image_id,),
-        )
-        verify_row = verify_cursor.fetchone()
-        if verify_row:
-            verify_keywords = json.loads(verify_row["keywords_json"] or "[]")
-            print(
-                f"  -> [验证] 查询成功: image_id={verify_row['image_id']}, keywords数量={len(verify_keywords)}"
-            )
-        else:
-            print(
-                f"  -> [错误] 验证失败: 查询不到 image_id={image_id} 的记录"
-            )
-
-    except Exception as e:
-        conn.rollback()
-        print(f"  -> [错误] 数据库操作失败: {e}")
-        import traceback
-
-        traceback.print_exc()
-        raise
-    finally:
-        conn.close()
-
+    relative_path = meta.get("relative_path")
     if minio_client and relative_path:
         try:
             json_path = relative_path + ".json"
-
             ai_analysis_json = {
-                "semantic_search": {
-                    "description": description,
-                    "keywords": keywords,
-                },
-                "training_data": {
-                    "qwen_captions": qwen_captions,
-                    "yolo_objects": yolo_objects,
-                },
+                "semantic_search": {"description": description, "keywords": keywords},
+                "training_data": {"qwen_captions": qwen_captions, "yolo_objects": yolo_objects},
                 "metadata": {
-                    "uuid": image_uuid or "",
-                    "file_name": file_name,
-                    "created_at": now,
+                    "uuid": meta.get("uuid") or "",
+                    "file_name": meta.get("file_name"),
+                    "created_at": meta.get("created_at") or datetime.now().isoformat(),
                     "image_path": relative_path,
                 },
             }
-
-            json_bytes = json.dumps(
-                ai_analysis_json, ensure_ascii=False, indent=2
-            ).encode("utf-8")
-
+            json_bytes = json.dumps(ai_analysis_json, ensure_ascii=False, indent=2).encode("utf-8")
             minio_client.upload_file_data(json_bytes, json_path, "application/json")
             print(f"  -> 成功: JSON 文件已上传到 MinIO: {json_path}")
         except Exception as e:
             print(f"  -> 警告: JSON 文件上传到 MinIO 失败: {e}")
-
-
-def get_images_missing_keywords(limit: int = 2000) -> list[dict]:
-    """查询 keywords_json 为空的最新图片列表（直接连接数据库，避免触发 MinIO 同步）"""
-
-    db_path = PROJECT_ROOT / "data" / "taglens.db"
-    conn = sqlite3.connect(str(db_path), timeout=60.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT
-                i.id,
-                i.uuid,
-                i.relative_path,
-                i.file_name,
-                i.created_at,
-                ar.keywords_json
-            FROM images i
-            LEFT JOIN analysis_results ar ON i.id = ar.image_id
-            WHERE ar.keywords_json IS NULL OR TRIM(ar.keywords_json) = '[]'
-            ORDER BY i.created_at DESC
-            LIMIT ?
-        """,
-            (limit,),
-        )
-        results = [dict(row) for row in cursor.fetchall()]
-        return results
-    finally:
-        conn.close()
 
 
 def batch_reextract_missing_tags() -> None:
