@@ -13,7 +13,7 @@ import os
 import sys
 import shutil
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, time as dt_time
 from scp import SCPClient
 from io import StringIO
 import sys
@@ -784,24 +784,54 @@ def download_latest_ready_batch_and_process():
 
 
 # ==================== 调度配置 ====================
-PACK_SCHEDULE_RANDOM_WINDOW_HOURS = 24
+PACK_SCHEDULE_START_HOUR = 6
+PACK_SCHEDULE_END_HOUR = 18
 PACK_TO_DOWNLOAD_DELAY_HOURS = 2.5
 POST_DOWNLOAD_COOLDOWN_HOURS = 2
 
 
-def schedule_next_remote_time(from_time=None):
-    """在 from_time 起未来 24 小时内随机选定远端打包执行时间"""
+def _day_pack_window(day: date) -> tuple[datetime, datetime]:
+    day_start = datetime.combine(day, dt_time(PACK_SCHEDULE_START_HOUR, 0, 0))
+    day_end = datetime.combine(day, dt_time(PACK_SCHEDULE_END_HOUR, 0, 0))
+    return day_start, day_end
+
+
+def _random_time_between(start: datetime, end: datetime) -> datetime:
+    """在 [start, end) 内随机取一个时刻"""
+    seconds = (end - start).total_seconds()
+    if seconds <= 0:
+        return start
+    return start + timedelta(seconds=random.uniform(0, seconds))
+
+
+def schedule_next_remote_time(from_time=None, last_pack_date: date | None = None):
+    """
+    在 6:00–18:00 内随机选定远端打包时间，每天最多一次。
+    last_pack_date 有值时，下一包安排在 last_pack_date 的次日。
+    """
     base = from_time or datetime.now()
-    delay_seconds = random.uniform(0, PACK_SCHEDULE_RANDOM_WINDOW_HOURS * 3600)
-    return base + timedelta(seconds=delay_seconds)
+
+    if last_pack_date is not None:
+        target_day = last_pack_date + timedelta(days=1)
+        day_start, day_end = _day_pack_window(target_day)
+        return _random_time_between(day_start, day_end)
+
+    day_start, day_end = _day_pack_window(base.date())
+    if base >= day_end:
+        next_day = base.date() + timedelta(days=1)
+        day_start, day_end = _day_pack_window(next_day)
+        return _random_time_between(day_start, day_end)
+
+    earliest = max(base, day_start)
+    return _random_time_between(earliest, day_end)
 
 
-def reset_cycle_state():
+def reset_cycle_state(last_pack_date: date | None = None):
     """返回新一轮调度初始状态"""
-    remote_at = schedule_next_remote_time()
+    remote_at = schedule_next_remote_time(last_pack_date=last_pack_date)
     print(
         f"📅 已计划下一轮远端打包: {remote_at.strftime('%Y-%m-%d %H:%M:%S')} "
-        f"(未来 {PACK_SCHEDULE_RANDOM_WINDOW_HOURS}h 内随机)"
+        f"(每日 {PACK_SCHEDULE_START_HOUR}:00–{PACK_SCHEDULE_END_HOUR}:00 随机，一天一次)"
     )
     return {
         "remote_at": remote_at,
@@ -826,13 +856,14 @@ def main():
         try:
             now = datetime.now()
 
-            # 下载完成后的冷却期结束 → 重新随机下一轮执行时间
+            # 下载完成后的冷却期结束 → 安排下一日 6–18 点随机打包
             if cycle["download_done"] and cycle["cooldown_until"] and now >= cycle["cooldown_until"]:
                 print(
                     f"⏰ 冷却期结束 ({cycle['cooldown_until'].strftime('%Y-%m-%d %H:%M:%S')})，"
-                    f"重新随机下一轮打包时间..."
+                    f"安排下一日打包时间..."
                 )
-                cycle = reset_cycle_state()
+                last_pack_date = cycle["remote_at"].date() if cycle.get("remote_at") else None
+                cycle = reset_cycle_state(last_pack_date=last_pack_date)
 
             in_cooldown = (
                 cycle["download_done"]

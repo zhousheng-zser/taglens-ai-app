@@ -66,7 +66,7 @@ function shiftCalendarDay(ymd: string, delta: number): string {
   return `${base.getFullYear()}-${pad2(base.getMonth() + 1)}-${pad2(base.getDate())}`;
 }
 
-const TS_COLORS = ['#667eea', '#764ba2', '#ff6384', '#4bc0c0', '#ffce56', '#9966ff', '#ff9f40', '#36a2eb'];
+const TS_COLORS = ['#667eea', '#764ba2', '#36a2eb', '#10b981', '#9966ff', '#ff6384', '#4bc0c0', '#ffce56', '#ff9f40'];
 const DATE_ICON_CLASS =
   "[&::-webkit-calendar-picker-indicator]:cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-100 dark:[&::-webkit-calendar-picker-indicator]:invert dark:[&::-webkit-calendar-picker-indicator]:brightness-200";
 
@@ -315,7 +315,7 @@ function UserManagementContent() {
                   <TableHead>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>任务段</TableHead>
-                  <TableHead>三类完成数</TableHead>
+                  <TableHead>五类完成数</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -336,7 +336,7 @@ function UserManagementContent() {
                       <TableCell>{rangesByUser[user.id]?.length || 0}</TableCell>
                       <TableCell>
                         {user.role === 'reviewer'
-                          ? `样本 ${userStats?.statusDone || 0} / 问答 ${userStats?.qaDone || 0} / 描述 ${userStats?.descriptionDone || 0}`
+                          ? `样本 ${userStats?.statusDone || 0} / 问答 ${userStats?.qaDone || 0} / AI描述 ${userStats?.aiDescriptionDone || 0} / 审核描述 ${userStats?.reviewDescriptionDone || 0} / 英文描述 ${userStats?.englishDescriptionDone || 0}`
                           : '-'}
                       </TableCell>
                       <TableCell className="text-right">
@@ -437,7 +437,7 @@ function UserManagementContent() {
         <CardHeader>
           <CardTitle>审核统计图表</CardTitle>
           <CardDescription>
-            支持按月 / 按日 / 按小时维度查看审核记录分布；筛选单个审核员时展示样本 / 问答 / 描述三条曲线。
+            支持按月 / 按日 / 按小时维度查看审核记录分布；筛选单个审核员时展示样本 / 问答 / AI描述 / 审核描述 / 英文描述 五条曲线。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

@@ -156,6 +156,9 @@ class ExportImagesRequest(BaseModel):
     cameraName: Optional[str] = None
     bizCategory: Optional[str] = None
 
+class KeywordCacheLoadRequest(BaseModel):
+    reload: bool = False
+
 class ImageSearchResult(BaseModel):
     id: int
     uuid: str
@@ -1171,6 +1174,10 @@ def _search_images_sync(
         print(f"搜索图片时发生HTTP异常: {e}")
         raise e
     except Exception as e:
+        from services.keyword_search_cache import KeywordCacheNotLoadedError
+
+        if isinstance(e, KeywordCacheNotLoadedError):
+            raise HTTPException(status_code=400, detail=str(e))
         print(f"搜索图片时发生错误: {e}")
         import traceback
         traceback.print_exc()
@@ -1210,6 +1217,108 @@ async def search_images_stream_api(request: SearchRequest, http_request: Request
         except HTTPException as exc:
             if not cancellation.is_cancelled():
                 await queue.put({"type": "error", "message": exc.detail, "status": exc.status_code})
+        except Exception as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 500})
+        finally:
+            await queue.put(None)
+
+    worker_task = asyncio.create_task(worker())
+
+    async def generate():
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    cancellation.cancel()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        finally:
+            cancellation.cancel()
+            if not worker_task.done():
+                worker_task.cancel()
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+def _load_keyword_cache_sync(
+    reload: bool,
+    progress_callback: Optional[SearchProgressCallback] = None,
+    cancellation: Optional[SearchCancellation] = None,
+) -> Dict[str, Any]:
+    from services.keyword_search_cache import (
+        KeywordCacheAlreadyLoadedError,
+        KeywordCacheLoadingError,
+        get_keyword_cache_status,
+        load_keyword_vectors,
+    )
+
+    progress = SearchProgress(progress_callback, cancellation)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        count = load_keyword_vectors(cursor, force_reload=reload, progress=progress)
+    status = get_keyword_cache_status()
+    return {"success": True, "keywordCount": count, **status}
+
+
+@app.get("/keyword-cache/status")
+async def keyword_cache_status_api():
+    from services.keyword_search_cache import get_keyword_cache_status
+
+    return get_keyword_cache_status()
+
+
+@app.post("/keyword-cache/release")
+async def keyword_cache_release_api():
+    from services.keyword_search_cache import KeywordCacheLoadingError, get_keyword_cache_status, release_keyword_cache
+
+    try:
+        return release_keyword_cache()
+    except KeywordCacheLoadingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/keyword-cache/load/stream")
+async def keyword_cache_load_stream_api(request: KeywordCacheLoadRequest, http_request: Request):
+    """流式加载/重载标签向量库。"""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    cancellation = SearchCancellation()
+
+    def progress_callback(event: dict) -> None:
+        if cancellation.is_cancelled():
+            return
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def worker() -> None:
+        from services.keyword_search_cache import (
+            KeywordCacheAlreadyLoadedError,
+            KeywordCacheLoadingError,
+        )
+
+        try:
+            result = await run_blocking(
+                _load_keyword_cache_sync,
+                request.reload,
+                progress_callback,
+                cancellation,
+            )
+            if cancellation.is_cancelled():
+                return
+            await queue.put({"type": "result", **result})
+        except SearchCancelledError:
+            print("[keyword-cache/load/stream] 客户端中断加载")
+        except KeywordCacheAlreadyLoadedError as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 409})
+        except KeywordCacheLoadingError as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 409})
         except Exception as exc:
             if not cancellation.is_cancelled():
                 await queue.put({"type": "error", "message": str(exc), "status": 500})

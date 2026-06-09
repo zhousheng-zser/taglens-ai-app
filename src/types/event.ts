@@ -26,6 +26,8 @@ export interface EventSearchResult {
   segmentPaths?: string[];
   segmentUrls?: string[];
   segmentDescriptions?: string[];
+  segmentReviewDescriptions?: string[];
+  segmentDescriptionsEn?: string[];
   segmentStatuses?: string[];
   questionsAnswersList?: Array<Array<{ question: string; answer: string }>>;
   eventTypeQuestions?: string[];
@@ -40,6 +42,9 @@ export interface EventSearchResult {
   statusReviewDone?: boolean;
   qaReviewDone?: boolean;
   descriptionReviewDone?: boolean;
+  aiDescriptionDone?: boolean;
+  reviewDescriptionDone?: boolean;
+  englishDescriptionDone?: boolean;
 }
 
 export interface EventSearchResponse {

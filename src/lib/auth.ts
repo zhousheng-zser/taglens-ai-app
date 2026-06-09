@@ -25,7 +25,9 @@ export interface ReviewStatsItem {
   reviewedEvents: number;
   statusDone: number;
   qaDone: number;
-  descriptionDone: number;
+  aiDescriptionDone: number;
+  reviewDescriptionDone: number;
+  englishDescriptionDone: number;
 }
 
 export interface ReviewStatsTimeseriesDataset {

@@ -83,6 +83,21 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
+def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND COLUMN_NAME = %s
+        """,
+        (table, column),
+    )
+    if int(cursor.fetchone()["cnt"] or 0) == 0:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_manage_database() -> None:
     """创建 MySQL 表结构，并初始化默认管理员。"""
     with get_manage_db_connection() as conn:
@@ -132,6 +147,9 @@ def init_manage_database() -> None:
                 status_review_done TINYINT NOT NULL DEFAULT 0,
                 qa_review_done TINYINT NOT NULL DEFAULT 0,
                 description_review_done TINYINT NOT NULL DEFAULT 0,
+                ai_description_done TINYINT NOT NULL DEFAULT 0,
+                review_description_done TINYINT NOT NULL DEFAULT 0,
+                english_description_done TINYINT NOT NULL DEFAULT 0,
                 created_at VARCHAR(64) NOT NULL,
                 updated_at VARCHAR(64) NOT NULL,
                 UNIQUE KEY uk_event_review_key (event_id, project_id, event_type_code),
@@ -140,6 +158,17 @@ def init_manage_database() -> None:
                 CONSTRAINT fk_event_review_reviewer
                     FOREIGN KEY (reviewer_id) REFERENCES users(id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+
+        _ensure_column(cursor, "event_review_records", "ai_description_done", "TINYINT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "event_review_records", "review_description_done", "TINYINT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "event_review_records", "english_description_done", "TINYINT NOT NULL DEFAULT 0")
+        cursor.execute(
+            """
+            UPDATE event_review_records
+            SET ai_description_done = 1
+            WHERE description_review_done = 1 AND ai_description_done = 0
             """
         )
 
@@ -337,7 +366,9 @@ def upsert_event_review_record(
     reviewer: Dict[str, Any],
     status_review_done: bool,
     qa_review_done: bool,
-    description_review_done: bool,
+    ai_description_done: bool,
+    review_description_done: bool,
+    english_description_done: bool,
 ) -> Dict[str, Any]:
     now = datetime.now().isoformat()
     with get_manage_db_connection() as conn:
@@ -348,9 +379,10 @@ def upsert_event_review_record(
                 event_id, project_id, event_type_code,
                 reviewer_id, reviewer_username, reviewer_display_name, review_time,
                 status_review_done, qa_review_done, description_review_done,
+                ai_description_done, review_description_done, english_description_done,
                 created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 reviewer_id = VALUES(reviewer_id),
                 reviewer_username = VALUES(reviewer_username),
@@ -358,7 +390,9 @@ def upsert_event_review_record(
                 review_time = VALUES(review_time),
                 status_review_done = VALUES(status_review_done),
                 qa_review_done = VALUES(qa_review_done),
-                description_review_done = VALUES(description_review_done),
+                ai_description_done = VALUES(ai_description_done),
+                review_description_done = VALUES(review_description_done),
+                english_description_done = VALUES(english_description_done),
                 updated_at = VALUES(updated_at)
             """,
             (
@@ -371,7 +405,10 @@ def upsert_event_review_record(
                 now,
                 1 if status_review_done else 0,
                 1 if qa_review_done else 0,
-                1 if description_review_done else 0,
+                1 if ai_description_done else 0,
+                1 if ai_description_done else 0,
+                1 if review_description_done else 0,
+                1 if english_description_done else 0,
                 now,
                 now,
             ),
@@ -400,7 +437,10 @@ def get_event_review_record(event_id: str, project_id: str, event_type_code: str
             "reviewTime": row["review_time"],
             "statusReviewDone": bool(row["status_review_done"]),
             "qaReviewDone": bool(row["qa_review_done"]),
-            "descriptionReviewDone": bool(row["description_review_done"]),
+            "descriptionReviewDone": bool(row.get("description_review_done")),
+            "aiDescriptionDone": bool(row.get("ai_description_done")),
+            "reviewDescriptionDone": bool(row.get("review_description_done")),
+            "englishDescriptionDone": bool(row.get("english_description_done")),
         }
 
 
@@ -428,7 +468,10 @@ def get_event_review_records_for_keys(keys: List[tuple[str, str, str]]) -> Dict[
                     "reviewTime": row["review_time"],
                     "statusReviewDone": bool(row["status_review_done"]),
                     "qaReviewDone": bool(row["qa_review_done"]),
-                    "descriptionReviewDone": bool(row["description_review_done"]),
+                    "descriptionReviewDone": bool(row.get("description_review_done")),
+                    "aiDescriptionDone": bool(row.get("ai_description_done")),
+                    "reviewDescriptionDone": bool(row.get("review_description_done")),
+                    "englishDescriptionDone": bool(row.get("english_description_done")),
                 }
     return result
 
@@ -445,7 +488,9 @@ def get_review_stats() -> List[Dict[str, Any]]:
                 COUNT(r.id) AS reviewed_events,
                 SUM(CASE WHEN r.status_review_done = 1 THEN 1 ELSE 0 END) AS status_done,
                 SUM(CASE WHEN r.qa_review_done = 1 THEN 1 ELSE 0 END) AS qa_done,
-                SUM(CASE WHEN r.description_review_done = 1 THEN 1 ELSE 0 END) AS description_done
+                SUM(CASE WHEN r.ai_description_done = 1 THEN 1 ELSE 0 END) AS ai_description_done,
+                SUM(CASE WHEN r.review_description_done = 1 THEN 1 ELSE 0 END) AS review_description_done,
+                SUM(CASE WHEN r.english_description_done = 1 THEN 1 ELSE 0 END) AS english_description_done
             FROM users u
             LEFT JOIN event_review_records r ON r.reviewer_id = u.id
             WHERE u.role = 'reviewer'
@@ -461,7 +506,9 @@ def get_review_stats() -> List[Dict[str, Any]]:
                 "reviewedEvents": int(row["reviewed_events"] or 0),
                 "statusDone": int(row["status_done"] or 0),
                 "qaDone": int(row["qa_done"] or 0),
-                "descriptionDone": int(row["description_done"] or 0),
+                "aiDescriptionDone": int(row["ai_description_done"] or 0),
+                "reviewDescriptionDone": int(row["review_description_done"] or 0),
+                "englishDescriptionDone": int(row["english_description_done"] or 0),
             }
             for row in cursor.fetchall()
         ]
@@ -575,7 +622,9 @@ def get_review_stats_timeseries(
                 SELECT {group_sql} AS time_label,
                        SUM(CASE WHEN r.status_review_done = 1 THEN 1 ELSE 0 END) AS st,
                        SUM(CASE WHEN r.qa_review_done = 1 THEN 1 ELSE 0 END) AS qa,
-                       SUM(CASE WHEN r.description_review_done = 1 THEN 1 ELSE 0 END) AS dsc
+                       SUM(CASE WHEN r.ai_description_done = 1 THEN 1 ELSE 0 END) AS ai_dsc,
+                       SUM(CASE WHEN r.review_description_done = 1 THEN 1 ELSE 0 END) AS rev_dsc,
+                       SUM(CASE WHEN r.english_description_done = 1 THEN 1 ELSE 0 END) AS en_dsc
                 FROM event_review_records r
                 WHERE {where}
                 GROUP BY time_label
@@ -602,8 +651,16 @@ def get_review_stats_timeseries(
                     "data": [metric_at(tl, "qa") for tl in sorted_labels],
                 },
                 {
-                    "label": f"{display} (描述)",
-                    "data": [metric_at(tl, "dsc") for tl in sorted_labels],
+                    "label": f"{display} (AI描述)",
+                    "data": [metric_at(tl, "ai_dsc") for tl in sorted_labels],
+                },
+                {
+                    "label": f"{display} (审核描述)",
+                    "data": [metric_at(tl, "rev_dsc") for tl in sorted_labels],
+                },
+                {
+                    "label": f"{display} (英文描述)",
+                    "data": [metric_at(tl, "en_dsc") for tl in sorted_labels],
                 },
             ]
             total_review_events = total_events_where(role_reviewer_only=False)

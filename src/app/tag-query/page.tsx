@@ -1,13 +1,14 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { ParticleBackground } from '@/components/ParticleBackground';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { Search, RotateCcw, ImageIcon, ChevronDown, ChevronLeft, ChevronRight, X, LayoutList, LayoutGrid, Calendar, Trash2 } from 'lucide-react';
+import { Search, RotateCcw, ImageIcon, ChevronDown, X, LayoutList, LayoutGrid, Calendar, Trash2 } from 'lucide-react';
 import { QueryPaginationBar } from '@/components/QueryPaginationBar';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths, endOfDay, startOfDay } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -15,6 +16,8 @@ import { useToast } from '@/hooks/use-toast';
 import { handleSearch } from '@/app/actions';
 import type { ImageSearchResult } from '@/types/analysis';
 import { getCurrentUser, type CurrentUser } from '@/lib/auth';
+import { getImageUrl } from '@/lib/imageStorage';
+import { consumeTagQueryRestore, loadTagQuerySession, saveTagQuerySession } from '@/lib/tagQueryNav';
 import {
     Select,
     SelectContent,
@@ -41,6 +44,7 @@ const QUICK_TIME_RANGES = [
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500];
 
 export default function TagQueryPage() {
+    const router = useRouter();
     // 状态定义
     const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
     const [startDate, setStartDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
@@ -59,7 +63,6 @@ export default function TagQueryPage() {
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
     const [isLoading, setIsLoading] = useState(false);
-    const [selectedImage, setSelectedImage] = useState<ImageSearchResult | null>(null);
     const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
     const [jumpPageInput, setJumpPageInput] = useState<string>('1');
     const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -199,18 +202,35 @@ export default function TagQueryPage() {
         }
     };
 
-    // 初始加载：今天
+    const applySessionState = (saved: NonNullable<ReturnType<typeof loadTagQuerySession>>) => {
+        setStartDate(saved.startDate);
+        setEndDate(saved.endDate);
+        setStartTime(saved.startTime);
+        setEndTime(saved.endTime);
+        setCameraNameFilter(saved.cameraNameFilter);
+        setBizCategoryFilter(saved.bizCategoryFilter);
+        setFilePathFilter(saved.filePathFilter);
+        setDescriptionKeywords(saved.descriptionKeywords);
+        setSelectedRange(saved.selectedRange);
+        setPage(saved.page);
+        setPageSize(saved.pageSize);
+        setTotal(saved.total);
+        setResults(saved.results);
+        setViewMode(saved.viewMode);
+    };
+
+    // 初始加载：优先从详情页返回时恢复搜索状态
     useEffect(() => {
         getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null));
-        handleQuickRangeSelect('today');
-        // useEffect 依赖项处理，这里手动调用一次
-        const start = startOfDay(new Date());
-        const end = endOfDay(new Date());
-        const startStr = format(start, 'yyyy-MM-dd');
-        const endStr = format(end, 'yyyy-MM-dd');
-        const startT = format(start, 'HH:mm:ss');
-        const endT = format(end, 'HH:mm:ss');
 
+        const shouldRestore = consumeTagQueryRestore();
+        const saved = loadTagQuerySession();
+        if (shouldRestore && saved) {
+            applySessionState(saved);
+            return;
+        }
+
+        handleQuickRangeSelect('today');
         const initSearch = async () => {
             setIsLoading(true);
             try {
@@ -288,9 +308,28 @@ export default function TagQueryPage() {
         fetchResults(target);
     };
 
-    // 行点击处理 - 打开预览模态框
     const handleRowClick = (item: ImageSearchResult) => {
-        setSelectedImage(item);
+        const index = results.findIndex((row) => row.uuid === item.uuid);
+        saveTagQuerySession({
+            startDate,
+            endDate,
+            startTime,
+            endTime,
+            cameraNameFilter,
+            bizCategoryFilter,
+            filePathFilter,
+            descriptionKeywords,
+            selectedRange,
+            page,
+            pageSize,
+            total,
+            results,
+            viewMode,
+            currentIndex: index >= 0 ? index : 0,
+        });
+        router.push(
+            `/tag-query/detail/${encodeURIComponent(item.uuid)}?idx=${index >= 0 ? index : 0}`,
+        );
     };
 
     const handleDeleteImage = async (item: ImageSearchResult) => {
@@ -309,9 +348,6 @@ export default function TagQueryPage() {
                 const text = await response.text();
                 throw new Error(text || '删除失败');
             }
-            if (selectedImage?.uuid === item.uuid) {
-                setSelectedImage(null);
-            }
             setResults((prev) => prev.filter((row) => row.uuid !== item.uuid));
             setTotal((prev) => Math.max(0, prev - 1));
             toast({
@@ -327,52 +363,6 @@ export default function TagQueryPage() {
         } finally {
             setDeletingUuid('');
         }
-    };
-
-    // 关闭预览模态框
-    const handleClosePreview = () => {
-        setSelectedImage(null);
-    };
-
-    const selectedImageIndex = selectedImage
-        ? results.findIndex((item) => item.uuid === selectedImage.uuid)
-        : -1;
-
-    const navigatePreview = (delta: number) => {
-        if (!selectedImage || results.length === 0) return;
-        const idx = results.findIndex((item) => item.uuid === selectedImage.uuid);
-        if (idx < 0) return;
-        const next = idx + delta;
-        if (next >= 0 && next < results.length) {
-            setSelectedImage(results[next]);
-        }
-    };
-
-    useEffect(() => {
-        if (!selectedImage) return;
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
-                handleClosePreview();
-            } else if (event.key === 'ArrowLeft') {
-                event.preventDefault();
-                navigatePreview(-1);
-            } else if (event.key === 'ArrowRight') {
-                event.preventDefault();
-                navigatePreview(1);
-            }
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, [selectedImage, results]);
-
-    // 获取图片URL - 直接使用 MinIO HTTP 访问
-    const getImageUrl = (filePath: string) => {
-        const normalized = (filePath || '').replace(/^\/+/, '');
-        const encodedPath = normalized
-            .split('/')
-            .map((seg) => encodeURIComponent(seg))
-            .join('/');
-        return `/bucket-taglens/${encodedPath}`;
     };
 
     return (
@@ -878,190 +868,6 @@ export default function TagQueryPage() {
                         placement="bottom"
                     />
                 </Card>
-
-                {/* 图片预览模态框 */}
-                {selectedImage && (
-                    <div
-                        className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-3 md:p-6"
-                        onClick={handleClosePreview}
-                    >
-                        <div
-                            className="bg-background rounded-lg w-full max-w-7xl h-[92vh] flex flex-col overflow-hidden shadow-2xl"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <div className="shrink-0 border-b bg-muted/40 px-4 py-2.5">
-                                <div className="flex items-center gap-3">
-                                    <h2 className="text-base font-bold shrink-0">图片预览</h2>
-                                    <div className="flex-1 flex items-center justify-center gap-2 min-w-0">
-                                        <Button
-                                            variant="secondary"
-                                            size="sm"
-                                            className="h-8 px-3 bg-background shadow-sm border border-border/60"
-                                            disabled={selectedImageIndex <= 0}
-                                            onClick={() => navigatePreview(-1)}
-                                        >
-                                            <ChevronLeft className="h-4 w-4 mr-1" />
-                                            上一张
-                                        </Button>
-                                        {selectedImageIndex >= 0 && (
-                                            <span className="text-sm text-foreground font-medium tabular-nums px-2">
-                                                {selectedImageIndex + 1} / {results.length}
-                                            </span>
-                                        )}
-                                        <Button
-                                            variant="secondary"
-                                            size="sm"
-                                            className="h-8 px-3 bg-background shadow-sm border border-border/60"
-                                            disabled={selectedImageIndex < 0 || selectedImageIndex >= results.length - 1}
-                                            onClick={() => navigatePreview(1)}
-                                        >
-                                            下一张
-                                            <ChevronRight className="h-4 w-4 ml-1" />
-                                        </Button>
-                                    </div>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-8 w-8 p-0 shrink-0"
-                                        onClick={handleClosePreview}
-                                        aria-label="关闭预览"
-                                    >
-                                        <X className="h-5 w-5" />
-                                    </Button>
-                                </div>
-                            </div>
-
-                            <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1.15fr_0.85fr]">
-                                <div className="relative min-h-[240px] lg:min-h-0 bg-black/90 flex items-center justify-center p-3">
-                                    <Button
-                                        variant="secondary"
-                                        size="icon"
-                                        className="absolute left-3 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full opacity-80 hover:opacity-100 z-10"
-                                        disabled={selectedImageIndex <= 0}
-                                        onClick={() => navigatePreview(-1)}
-                                        aria-label="上一张"
-                                    >
-                                        <ChevronLeft className="h-5 w-5" />
-                                    </Button>
-                                    <img
-                                        src={getImageUrl(selectedImage.filePath)}
-                                        alt={selectedImage.fileName || '预览图片'}
-                                        className="max-h-full max-w-full object-contain rounded-sm"
-                                        onError={(e) => {
-                                            const img = e.target as HTMLImageElement;
-                                            img.style.display = 'none';
-                                            toast({
-                                                variant: 'destructive',
-                                                title: '图片加载失败',
-                                                description: `无法加载图片: ${selectedImage.fileName || selectedImage.filePath}`,
-                                            });
-                                        }}
-                                    />
-                                    <Button
-                                        variant="secondary"
-                                        size="icon"
-                                        className="absolute right-3 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full opacity-80 hover:opacity-100 z-10"
-                                        disabled={selectedImageIndex < 0 || selectedImageIndex >= results.length - 1}
-                                        onClick={() => navigatePreview(1)}
-                                        aria-label="下一张"
-                                    >
-                                        <ChevronRight className="h-5 w-5" />
-                                    </Button>
-                                </div>
-
-                                <div className="min-h-0 flex flex-col border-t lg:border-t-0 lg:border-l border-border/40">
-                                    <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
-                                        {selectedImage.description && (
-                                            <div className="rounded-lg border border-cyan-200/60 dark:border-cyan-900/40 bg-cyan-50/30 dark:bg-cyan-900/10 p-3">
-                                                <h3 className="text-xs font-semibold mb-2 text-cyan-700 dark:text-cyan-400 uppercase tracking-wider">
-                                                    综合描述
-                                                </h3>
-                                                <p className="text-sm leading-6 text-foreground/90 whitespace-pre-wrap break-words">
-                                                    {selectedImage.description}
-                                                </p>
-                                            </div>
-                                        )}
-
-                                        {selectedImage.keywords && selectedImage.keywords.length > 0 && (
-                                            <div>
-                                                <h3 className="text-xs font-semibold mb-2 text-muted-foreground uppercase tracking-wider">
-                                                    关键词
-                                                </h3>
-                                                <div className="flex flex-wrap gap-1.5">
-                                                    {selectedImage.keywords.map((keyword, idx) => (
-                                                        <Badge
-                                                            key={idx}
-                                                            variant="secondary"
-                                                            className="text-[11px] font-normal px-2 py-0.5"
-                                                        >
-                                                            {keyword}
-                                                        </Badge>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {selectedImage.tags && selectedImage.tags.length > 0 && (
-                                            <div>
-                                                <h3 className="text-xs font-semibold mb-2 text-muted-foreground uppercase tracking-wider">
-                                                    标签列表
-                                                </h3>
-                                                <div className="flex flex-wrap gap-1.5">
-                                                    {selectedImage.tags.map((tag, idx) => (
-                                                        <Badge
-                                                            key={idx}
-                                                            variant="outline"
-                                                            className="text-[11px] px-2 py-0.5 border-primary/20 text-primary/90"
-                                                        >
-                                                            {tag}
-                                                        </Badge>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="shrink-0 border-t border-border/30 p-3 bg-muted/20">
-                                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-                                            <div className="min-w-0">
-                                                <span className="text-muted-foreground">文件名</span>
-                                                <p className="font-medium mt-0.5 break-all">{selectedImage.fileName || 'N/A'}</p>
-                                            </div>
-                                            <div>
-                                                <span className="text-muted-foreground">保存时间</span>
-                                                <p className="font-medium mt-0.5">
-                                                    {selectedImage.createdAt
-                                                        ? format(new Date(selectedImage.createdAt), 'yyyy-MM-dd HH:mm:ss')
-                                                        : '-'}
-                                                </p>
-                                            </div>
-                                            <div className="min-w-0">
-                                                <span className="text-muted-foreground">相机名</span>
-                                                <p className="font-medium mt-0.5 break-all">{selectedImage.szName || 'N/A'}</p>
-                                            </div>
-                                            <div className="min-w-0">
-                                                <span className="text-muted-foreground">业态目录</span>
-                                                <p className="font-medium mt-0.5 break-all">
-                                                    {selectedImage.szTagRefs && selectedImage.szTagRefs.length > 0
-                                                        ? selectedImage.szTagRefs.join(' / ')
-                                                        : 'N/A'}
-                                                </p>
-                                            </div>
-                                            <div className="min-w-0 col-span-2">
-                                                <span className="text-muted-foreground">UUID</span>
-                                                <p className="font-mono mt-0.5 break-all">{selectedImage.uuid}</p>
-                                            </div>
-                                            <div className="min-w-0 col-span-2">
-                                                <span className="text-muted-foreground">文件路径</span>
-                                                <p className="font-mono mt-0.5 break-all text-[11px]">{selectedImage.filePath}</p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
             </div>
         </div>
     );

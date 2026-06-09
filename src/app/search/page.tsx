@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, X, Image as ImageIcon, ChevronLeft, ChevronRight, Download, ChevronDown, Square } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Search, X, Image as ImageIcon, ChevronLeft, ChevronRight, Download, ChevronDown, Square, Database, SlidersHorizontal } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -14,6 +15,21 @@ import { ParticleBackground } from '@/components/ParticleBackground';
 import { getImageUrl } from '@/lib/imageStorage';
 import { fetchSearchWithProgress } from '@/lib/searchStream';
 import {
+  cacheTagSearchSnapshot,
+  consumeTagSearchRestore,
+  loadTagSearchSession,
+  matchTagSearchMemorySnapshot,
+  saveTagSearchSession,
+  slimTagSearchResults,
+  type TagWithWeight,
+} from '@/lib/tagSearchNav';
+import {
+  fetchKeywordCacheStatus,
+  loadKeywordCacheWithProgress,
+  releaseKeywordCache,
+  type KeywordCacheStatus,
+} from '@/lib/keywordCache';
+import {
   fetchExportImagesWithProgress,
   triggerExportZipDownload,
 } from '@/lib/exportImagesStream';
@@ -24,6 +40,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Switch } from '@/components/ui/switch';
 
 interface ImageSearchResult {
   id: number;
@@ -37,132 +62,20 @@ interface ImageSearchResult {
 
   qwenCaptions: any;  // 可以是字符串数组或嵌套对象
   yoloObjects: string[];
-  similarity?: number;  // 相似度分数（0-1之间）
+  similarity?: number;
 }
-
-interface TagWithWeight {
-  tag: string;
-  weight: number;
-}
-
-// 递归渲染组件，用于展示嵌套的 JSON 数据
-// 递归渲染组件，用于展示嵌套的 JSON 数据
-// 高级配色方案配置
-// 定义一组高级的语义颜色方案 (Color Palette)
-const ColorPalette = [
-  // 蓝色系 ()
-  { bg: 'bg-blue-50/50 dark:bg-blue-900/10', border: 'border-blue-200 dark:border-blue-800/30', title: 'text-blue-700 dark:text-blue-400', indicator: 'bg-blue-500' },
-  // 绿色系 ()
-  { bg: 'bg-emerald-50/50 dark:bg-emerald-900/10', border: 'border-emerald-200 dark:border-emerald-800/30', title: 'text-emerald-700 dark:text-emerald-400', indicator: 'bg-emerald-500' },
-  // 紫色系 ()
-  { bg: 'bg-violet-50/50 dark:bg-violet-900/10', border: 'border-violet-200 dark:border-violet-800/30', title: 'text-violet-700 dark:text-violet-400', indicator: 'bg-violet-500' },
-  // 橙色系 ()
-  { bg: 'bg-orange-50/50 dark:bg-orange-900/10', border: 'border-orange-200 dark:border-orange-800/30', title: 'text-orange-700 dark:text-orange-400', indicator: 'bg-orange-500' },
-  // 玫瑰红系 ()
-  { bg: 'bg-rose-50/50 dark:bg-rose-900/10', border: 'border-rose-200 dark:border-rose-800/30', title: 'text-rose-700 dark:text-rose-400', indicator: 'bg-rose-500' },
-  // 青色系 ()
-  { bg: 'bg-cyan-50/50 dark:bg-cyan-900/10', border: 'border-cyan-200 dark:border-cyan-800/30', title: 'text-cyan-700 dark:text-cyan-400', indicator: 'bg-cyan-500' },
-  // 琥珀色系 ()
-  { bg: 'bg-amber-50/50 dark:bg-amber-900/10', border: 'border-amber-200 dark:border-amber-800/30', title: 'text-amber-700 dark:text-amber-400', indicator: 'bg-amber-500' },
-];
-
-// 根据字符串生成固定的索引
-const getColorStyle = (key: string) => {
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = key.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const index = Math.abs(hash) % ColorPalette.length;
-  return ColorPalette[index];
-};
-
-const RecursiveRenderer: React.FC<{ data: any; depth?: number }> = ({ data, depth = 0 }) => {
-  if (data === null || data === undefined) return null;
-
-  // Handle arrays
-  if (Array.isArray(data)) {
-    if (data.length === 0) return <span className="text-muted-foreground italic text-xs">无内容</span>;
-    return (
-      <ul className={`space-y-1.5 ${depth > 0 ? 'ml-1' : ''}`}>
-        {data.map((item, index) => (
-          <li key={index} className="flex items-start text-sm group">
-            <span className="text-muted-foreground/60 mr-2 mt-1.5 h-1.5 w-1.5 rounded-full bg-current shrink-0 group-hover:text-primary transition-colors" />
-            <div className="text-foreground/90 leading-relaxed">
-              {typeof item === 'object' ? (
-                <RecursiveRenderer data={item} depth={depth + 1} />
-              ) : (
-                String(item)
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
-    );
-  }
-
-  // Handle objects
-  if (typeof data === 'object') {
-    const entries = Object.entries(data);
-    if (entries.length === 0) return null;
-
-    // Top-level rendering as cards (Category View)
-    if (depth === 0) {
-      return (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {entries.map(([key, value]) => {
-            // 使用动态颜色分配
-            const style = getColorStyle(key);
-            return (
-              <div
-                key={key}
-                className={`rounded-lg border ${style.border} ${style.bg} p-3.5 transition-all hover:shadow-sm`}
-              >
-                <h4 className={`mb-3 text-sm font-semibold flex items-center gap-2 ${style.title}`}>
-                  <span className={`h-3 w-1.5 rounded-full ${style.indicator}`} />
-                  {key}
-                </h4>
-                <div className="pl-1">
-                  <RecursiveRenderer data={value} depth={depth + 1} />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      );
-    }
-
-    // Nested level rendering as compact list
-    return (
-      <div className="space-y-2">
-        {entries.map(([key, value]) => (
-          <div key={key} className="flex flex-col sm:flex-row sm:gap-2 text-sm border-l-2 border-border/30 pl-2.5 ml-0.5">
-            <span className="text-muted-foreground font-medium shrink-0 min-w-[70px] text-xs uppercase tracking-wider mt-0.5">
-              {key}
-            </span>
-            <div className="flex-1">
-              {typeof value === 'object' ? (
-                <RecursiveRenderer data={value} depth={depth + 1} />
-              ) : (
-                <span className="text-foreground/90">{String(value)}</span>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  return <span className="text-sm text-foreground/90">{String(data)}</span>;
-};
 
 export default function SearchPage() {
-  const [tagInput, setTagInput] = useState('');  // 当前输入的标签
-  const [selectedTags, setSelectedTags] = useState<TagWithWeight[]>([]);  // 已选择的标签列表（带权重）
+  const router = useRouter();
+  const [tagInput, setTagInput] = useState('');
+  const [selectedTags, setSelectedTags] = useState<TagWithWeight[]>([]);
+  const [activeSearchTags, setActiveSearchTags] = useState<TagWithWeight[]>([]);
+  const [isComboMode, setIsComboMode] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [searchResults, setSearchResults] = useState<ImageSearchResult[]>([]);
   const [allSearchResults, setAllSearchResults] = useState<ImageSearchResult[]>([]);  // 存储所有搜索结果（用于导出）
   const [totalCount, setTotalCount] = useState(0);  // 数据库中总图片数
   const [searchTotalCount, setSearchTotalCount] = useState(0);  // 搜索结果总数
-  const [selectedImage, setSelectedImage] = useState<ImageSearchResult | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isPageLoading, setIsPageLoading] = useState(false);
   const [searchProgress, setSearchProgress] = useState(0);
@@ -170,6 +83,8 @@ export default function SearchPage() {
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportProgressMessage, setExportProgressMessage] = useState('');
+  const [exportImagesDialogOpen, setExportImagesDialogOpen] = useState(false);
+  const [exportImageLimitInput, setExportImageLimitInput] = useState('');
   const [similarityThreshold, setSimilarityThreshold] = useState([0.6]);  // 默认阈值0.6
   const [currentPage, setCurrentPage] = useState(1);  // 当前页码
   const [pageSize, setPageSize] = useState(20);  // 每页数量
@@ -182,7 +97,127 @@ export default function SearchPage() {
   const pageSizeRef = useRef(20);
   const loadAllPromiseRef = useRef<Promise<void> | null>(null);
   const loadAllGenerationRef = useRef(0);
+  const activeSearchTagsRef = useRef<TagWithWeight[]>([]);
+  const cacheLoadAbortRef = useRef<AbortController | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<KeywordCacheStatus>({
+    loaded: false,
+    loading: false,
+    keywordCount: 0,
+    queryPairCount: 0,
+    mappingRowCount: 0,
+    mappingImageCount: 0,
+    loadedAt: null,
+    lastLoadSeconds: null,
+    dbDistinctCount: null,
+  });
+  const [isCacheOperating, setIsCacheOperating] = useState(false);
+  const [cacheLoadProgress, setCacheLoadProgress] = useState(0);
+  const [cacheLoadMessage, setCacheLoadMessage] = useState('');
   const { toast } = useToast();
+
+  const refreshCacheStatus = async () => {
+    try {
+      const status = await fetchKeywordCacheStatus();
+      setCacheStatus(status);
+    } catch {
+      // 后端不可用时保持当前状态
+    }
+  };
+
+  useEffect(() => {
+    void refreshCacheStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!cacheStatus.loading && !isCacheOperating) return;
+    const timer = window.setInterval(() => {
+      void refreshCacheStatus();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [cacheStatus.loading, isCacheOperating]);
+
+  const formatCacheStatusText = () => {
+    if (cacheStatus.loading || isCacheOperating) {
+      return '加载中…';
+    }
+    if (cacheStatus.loaded) {
+      const kw = cacheStatus.keywordCount.toLocaleString();
+      const map = cacheStatus.mappingRowCount.toLocaleString();
+      return `已加载 ${kw} 标签 / ${map} 映射`;
+    }
+    return '未加载';
+  };
+
+  const handleLoadKeywordCache = async (reload: boolean) => {
+    cacheLoadAbortRef.current?.abort();
+    const abortController = new AbortController();
+    cacheLoadAbortRef.current = abortController;
+    setIsCacheOperating(true);
+    setCacheLoadProgress(0);
+    setCacheLoadMessage(reload ? '正在重载标签向量库…' : '正在加载标签向量库…');
+    setCacheStatus((prev) => ({ ...prev, loading: true }));
+
+    try {
+      const result = await loadKeywordCacheWithProgress(
+        reload,
+        (event) => {
+          setCacheLoadProgress(event.percent);
+          setCacheLoadMessage(event.message);
+        },
+        abortController.signal,
+      );
+      setCacheStatus({
+        loaded: result.loaded,
+        loading: false,
+        keywordCount: result.keywordCount,
+        queryPairCount: result.queryPairCount,
+        mappingRowCount: result.mappingRowCount,
+        mappingImageCount: result.mappingImageCount,
+        loadedAt: result.loadedAt,
+        lastLoadSeconds: result.lastLoadSeconds,
+        dbDistinctCount: result.dbDistinctCount,
+      });
+      toast({
+        title: reload ? '重载完成' : '加载完成',
+        description: `已载入 ${result.keywordCount.toLocaleString()} 个唯一标签、${result.mappingRowCount.toLocaleString()} 条图片标签映射（全部用户共用）`,
+      });
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      const message = error instanceof Error ? error.message : '未知错误';
+      if (!reload && message.includes('已加载')) {
+        toast({ title: '提示', description: message });
+      } else {
+        toast({ variant: 'destructive', title: reload ? '重载失败' : '加载失败', description: message });
+      }
+      await refreshCacheStatus();
+    } finally {
+      setIsCacheOperating(false);
+      setCacheLoadProgress(0);
+      setCacheLoadMessage('');
+    }
+  };
+
+  const handleReleaseKeywordCache = async () => {
+    if (!cacheStatus.loaded) {
+      toast({ title: '提示', description: '当前标签向量库未加载' });
+      return;
+    }
+    try {
+      const status = await releaseKeywordCache();
+      setCacheStatus(status);
+      toast({ title: '已释放', description: '标签向量库已从内存中释放' });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast({ variant: 'destructive', title: '释放失败', description: message });
+    }
+  };
+
+  const handleCancelCacheLoad = () => {
+    cacheLoadAbortRef.current?.abort();
+    setCacheLoadMessage('正在停止加载…');
+  };
 
   useEffect(() => {
     allSearchResultsRef.current = allSearchResults;
@@ -199,6 +234,10 @@ export default function SearchPage() {
   useEffect(() => {
     pageSizeRef.current = pageSize;
   }, [pageSize]);
+
+  useEffect(() => {
+    activeSearchTagsRef.current = activeSearchTags;
+  }, [activeSearchTags]);
 
   const applyPageFromCache = (page: number, size: number): boolean => {
     const cached = allSearchResultsRef.current;
@@ -225,7 +264,7 @@ export default function SearchPage() {
       try {
         const total = searchTotalCountRef.current;
         const requestBody = {
-          tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),
+          tags: activeSearchTagsRef.current.map(item => ({ tag: item.tag, weight: item.weight })),
           page: 1,
           pageSize: Math.max(total, 10000),
           similarityThreshold: similarityThreshold[0],
@@ -269,7 +308,7 @@ export default function SearchPage() {
   const loadPage = async (page: number, size: number) => {
     if (applyPageFromCache(page, size)) return;
 
-    if (selectedTags.length === 0) return;
+    if (activeSearchTagsRef.current.length === 0) return;
 
     setIsPageLoading(true);
     try {
@@ -287,7 +326,7 @@ export default function SearchPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tags: selectedTags.map((item) => ({ tag: item.tag, weight: item.weight })),
+          tags: activeSearchTagsRef.current.map((item) => ({ tag: item.tag, weight: item.weight })),
           page,
           pageSize: size,
           similarityThreshold: similarityThreshold[0],
@@ -350,6 +389,23 @@ export default function SearchPage() {
     if (tags.length === 0) return tags;
     const weightPerTag = 1.0 / tags.length;
     return tags.map(item => ({ ...item, weight: weightPerTag }));
+  };
+
+  const resolveSearchTags = (): TagWithWeight[] | null => {
+    if (isComboMode) {
+      if (selectedTags.length === 0) return null;
+      const totalWeight = calculateTotalWeight(selectedTags);
+      if (Math.abs(totalWeight - 1.0) > 0.001) return null;
+      return selectedTags;
+    }
+    const tag = tagInput.trim();
+    if (!tag) return null;
+    return [{ tag, weight: 1 }];
+  };
+
+  const canSubmitSearch = () => {
+    if (!cacheStatus.loaded || cacheStatus.loading || isCacheOperating || isSearching) return false;
+    return resolveSearchTags() !== null;
   };
 
   // 添加标签
@@ -444,26 +500,43 @@ export default function SearchPage() {
 
   // 执行搜索
   const handleSearch = async () => {
-    if (selectedTags.length === 0) {
-      setSearchResults([]);
+    if (!cacheStatus.loaded) {
       toast({
-        variant: 'default',
-        title: '请添加标签',
-        description: '请至少添加一个标签后再搜索',
+        variant: 'destructive',
+        title: '请先加载标签',
+        description: '搜索前需先加载标签库到内存（全部用户共用）',
       });
       return;
     }
 
-    // 验证权重之和是否为1
-    const totalWeight = calculateTotalWeight(selectedTags);
-    if (Math.abs(totalWeight - 1.0) > 0.001) {  // 允许0.001的误差
-      toast({
-        variant: 'destructive',
-        title: '权重错误',
-        description: `所有标签的权重之和必须等于1，当前为 ${totalWeight.toFixed(3)}。请调整权重后重试。`,
-      });
+    const tags = resolveSearchTags();
+    if (!tags) {
+      if (isComboMode) {
+        if (selectedTags.length === 0) {
+          toast({
+            variant: 'default',
+            title: '请添加标签',
+            description: '组合搜索请至少添加一个标签',
+          });
+        } else {
+          toast({
+            variant: 'destructive',
+            title: '权重错误',
+            description: `所有标签权重之和必须等于 1，当前为 ${calculateTotalWeight(selectedTags).toFixed(3)}`,
+          });
+        }
+      } else {
+        toast({
+          variant: 'default',
+          title: '请输入标签',
+          description: '输入标签后按回车或点击搜索',
+        });
+      }
       return;
     }
+
+    setActiveSearchTags(tags);
+    activeSearchTagsRef.current = tags;
 
     setIsSearching(true);
     setSearchProgress(0);
@@ -478,17 +551,15 @@ export default function SearchPage() {
     setCurrentPage(1);
 
     console.log('开始搜索，参数:', {
-      tags: selectedTags,
-      totalWeight: totalWeight,
+      tags,
       threshold: similarityThreshold[0],
       page: pageToUse,
       pageSize: pageSize
     });
 
     try {
-      // 使用 Next.js API 路由代理后端请求
       const requestBody = {
-        tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),  // 发送标签和权重
+        tags: tags.map(item => ({ tag: item.tag, weight: item.weight })),
         page: pageToUse,
         pageSize: pageSize,
         similarityThreshold: similarityThreshold[0],
@@ -562,11 +633,27 @@ export default function SearchPage() {
     }
   };
 
-  // 回车添加标签
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (isComboMode) {
       handleAddTag();
+      return;
+    }
+    void handleSearch();
+  };
+
+  const handleComboModeChange = (enabled: boolean) => {
+    setIsComboMode(enabled);
+    if (!enabled) {
+      setSelectedTags([]);
+      setShowAdvanced(false);
+      return;
+    }
+    const tag = tagInput.trim();
+    if (tag && !selectedTags.some((item) => item.tag === tag)) {
+      setSelectedTags([{ tag, weight: 1 }]);
+      setTagInput('');
     }
   };
 
@@ -575,6 +662,8 @@ export default function SearchPage() {
     loadAllGenerationRef.current += 1;
     loadAllPromiseRef.current = null;
     setSelectedTags([]);
+    setActiveSearchTags([]);
+    activeSearchTagsRef.current = [];
     setTagInput('');
     setSearchResults([]);
     setAllSearchResults([]);
@@ -645,7 +734,7 @@ export default function SearchPage() {
       setIsPageLoading(true);
       try {
         const requestBody = {
-          tags: selectedTags.map(item => ({ tag: item.tag, weight: item.weight })),
+          tags: activeSearchTagsRef.current.map(item => ({ tag: item.tag, weight: item.weight })),
           page: 1,
           pageSize: 10000,
           similarityThreshold: similarityThreshold[0],
@@ -746,23 +835,44 @@ export default function SearchPage() {
     setExportProgressMessage('正在停止导出…');
   };
 
-  // 导出全部图片（经 bucket-taglens HTTP 下载并打包 zip）
-  const exportAllImages = async () => {
-    if (selectedTags.length === 0) {
+  const fetchSearchItemsForExport = async (limit: number): Promise<ImageSearchResult[]> => {
+    const total = searchTotalCountRef.current;
+    const cappedLimit = Math.min(Math.max(1, Math.floor(limit)), total);
+    const cached = allSearchResultsRef.current;
+
+    if (cached.length >= cappedLimit) {
+      return cached.slice(0, cappedLimit);
+    }
+
+    const response = await fetch('/api/backend/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tags: activeSearchTagsRef.current.map((item) => ({ tag: item.tag, weight: item.weight })),
+        page: 1,
+        pageSize: cappedLimit,
+        similarityThreshold: similarityThreshold[0],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('获取搜索结果失败');
+    }
+
+    const data = await response.json();
+    if (!data.success || !Array.isArray(data.results)) {
+      throw new Error('获取搜索结果失败');
+    }
+
+    return data.results.slice(0, cappedLimit);
+  };
+
+  const openExportImagesDialog = () => {
+    if (activeSearchTags.length === 0) {
       toast({
         variant: 'default',
         title: '请先搜索',
-        description: '请添加标签并搜索后再导出图片',
-      });
-      return;
-    }
-
-    const totalWeight = calculateTotalWeight(selectedTags);
-    if (Math.abs(totalWeight - 1.0) > 0.001) {
-      toast({
-        variant: 'destructive',
-        title: '权重错误',
-        description: `所有标签的权重之和必须等于1，当前为 ${totalWeight.toFixed(3)}`,
+        description: '请先完成一次搜索后再导出图片',
       });
       return;
     }
@@ -776,6 +886,36 @@ export default function SearchPage() {
       return;
     }
 
+    setExportImageLimitInput(String(searchTotalCount));
+    setExportImagesDialogOpen(true);
+  };
+
+  const handleConfirmExportImages = () => {
+    const raw = exportImageLimitInput.trim();
+    const limit = parseInt(raw, 10);
+    if (!Number.isFinite(limit) || limit < 1) {
+      toast({
+        variant: 'destructive',
+        title: '数量无效',
+        description: '请输入大于 0 的整数',
+      });
+      return;
+    }
+    if (limit > searchTotalCount) {
+      toast({
+        variant: 'destructive',
+        title: '数量超出范围',
+        description: `下载数量不能超过搜索结果总数 ${searchTotalCount}`,
+      });
+      return;
+    }
+
+    setExportImagesDialogOpen(false);
+    void exportAllImages(limit);
+  };
+
+  // 导出图片（经 bucket-taglens HTTP 下载并打包 zip）
+  const exportAllImages = async (limit: number) => {
     exportAbortRef.current?.abort();
     const abortController = new AbortController();
     exportAbortRef.current = abortController;
@@ -785,7 +925,7 @@ export default function SearchPage() {
     setExportProgressMessage('正在准备图片列表…');
 
     try {
-      const results = await fetchAllSearchItems();
+      const results = await fetchSearchItemsForExport(limit);
       if (results.length === 0) {
         toast({
           variant: 'default',
@@ -844,180 +984,195 @@ export default function SearchPage() {
     }
   };
 
-  // 打开图片预览
-  const handleImageClick = (image: ImageSearchResult) => {
-    setSelectedImage(image);
+  // 打开图片详情页
+  const openTagSearchDetail = (image: ImageSearchResult) => {
+    if (activeSearchTags.length === 0) return;
+    const index = searchResults.findIndex((row) => row.uuid === image.uuid);
+    cacheTagSearchSnapshot({
+      activeSearchTags,
+      isComboMode,
+      similarityThreshold: similarityThreshold[0],
+      page: currentPage,
+      pageSize,
+      total: searchTotalCount,
+      searchResults,
+      allSearchResults,
+    });
+    saveTagSearchSession({
+      activeSearchTags,
+      isComboMode,
+      similarityThreshold: similarityThreshold[0],
+      page: currentPage,
+      pageSize,
+      total: searchTotalCount,
+      results: slimTagSearchResults(searchResults),
+      currentIndex: index >= 0 ? index : 0,
+    });
+    router.push(`/search/detail/${encodeURIComponent(image.uuid)}?idx=${index >= 0 ? index : 0}`);
   };
 
-  // 关闭预览
-  const handleClosePreview = () => {
-    setSelectedImage(null);
-  };
+  useEffect(() => {
+    const shouldRestore = consumeTagSearchRestore();
+    const saved = loadTagSearchSession();
+    if (!shouldRestore || !saved) return;
+
+    setActiveSearchTags(saved.activeSearchTags);
+    activeSearchTagsRef.current = saved.activeSearchTags;
+    if (saved.isComboMode) {
+      setSelectedTags(saved.activeSearchTags);
+    }
+    setIsComboMode(saved.isComboMode);
+    setSimilarityThreshold([saved.similarityThreshold]);
+    setCurrentPage(saved.page);
+    currentPageRef.current = saved.page;
+    setPageSize(saved.pageSize);
+    pageSizeRef.current = saved.pageSize;
+    setSearchTotalCount(saved.total);
+    searchTotalCountRef.current = saved.total;
+
+    const snapshot = matchTagSearchMemorySnapshot(saved);
+    if (snapshot) {
+      setSearchResults(snapshot.searchResults);
+      setAllSearchResults(snapshot.allSearchResults);
+      allSearchResultsRef.current = snapshot.allSearchResults;
+      return;
+    }
+
+    void loadPage(saved.page, saved.pageSize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时恢复
+  }, []);
 
   return (
     <div className="min-h-screen relative">
       <ParticleBackground />
-      <div className="container mx-auto px-4 py-8 relative z-10">
-        <div className="max-w-6xl mx-auto">
-          {/* 标题 */}
-          <div className="text-center mb-8">
-            <h1 className="text-4xl font-extrabold tracking-tight text-foreground font-headline mb-4">
-              图片标签搜索
-            </h1>
-            <p className="text-lg text-muted-foreground">
-              通过标签、关键词或描述搜索已分析的图片
-            </p>
-          </div>
-
-          {/* 搜索框 */}
-          <Card className="mb-8 shadow-lg">
-            <CardContent className="p-6 space-y-4">
-              {/* 标签输入区域 */}
-              <div className="flex gap-4">
-                <div className="flex-1 relative">
-                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5" />
-                  <Input
-                    type="text"
-                    placeholder="输入标签后按回车或点击确定添加..."
-                    value={tagInput}
-                    onChange={(e) => setTagInput(e.target.value)}
-                    onKeyPress={handleKeyPress}
-                    className="pl-10 pr-24 h-12 text-lg"
-                  />
-                  {tagInput && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setTagInput('')}
-                      className="absolute right-16 top-1/2 transform -translate-y-1/2 h-8 w-8 p-0"
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  )}
-                  <Button
-                    onClick={handleAddTag}
-                    size="sm"
-                    disabled={!tagInput.trim()}
-                    className="absolute right-2 top-1/2 transform -translate-y-1/2 h-8"
+      <div className="relative z-10 py-3 w-full min-w-0">
+          {/* 标签库 + 搜索（紧凑） */}
+          <Card className="mb-4 shadow-lg border-border/40">
+            <CardContent className="p-3 space-y-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Database className="h-4 w-4 text-primary shrink-0" />
+                  <span className="font-medium text-sm">标签库</span>
+                  <Badge
+                    variant={cacheStatus.loaded ? 'default' : cacheStatus.loading || isCacheOperating ? 'secondary' : 'outline'}
+                    className="text-[10px] max-w-[280px] truncate"
                   >
-                    确定
+                    {formatCacheStatusText()}
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-1.5 ml-auto">
+                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={cacheStatus.loaded || cacheStatus.loading || isCacheOperating} onClick={() => void handleLoadKeywordCache(false)}>
+                    加载
+                  </Button>
+                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={cacheStatus.loading || isCacheOperating} onClick={() => void handleLoadKeywordCache(true)}>
+                    重载
+                  </Button>
+                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={!cacheStatus.loaded || cacheStatus.loading || isCacheOperating} onClick={() => void handleReleaseKeywordCache()}>
+                    释放
                   </Button>
                 </div>
-                <Button
-                  onClick={handleSearch}
-                  size="lg"
-                  className="px-8"
-                  disabled={isSearching || selectedTags.length === 0 || Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001}
-                >
-                  <Search className="mr-2 h-5 w-5" />
+              </div>
+
+              {isCacheOperating && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span>加载中 {cacheLoadProgress.toFixed(0)}%</span>
+                    <Button variant="ghost" size="sm" className="h-6 text-xs text-destructive" onClick={handleCancelCacheLoad}>停止</Button>
+                  </div>
+                  <Progress value={cacheLoadProgress} className="h-1.5" />
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-border/30">
+                <div className="flex-1 min-w-[200px] relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
+                  <Input
+                    type="text"
+                    placeholder={isComboMode ? '输入标签后回车添加…' : '输入标签后回车搜索…'}
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    className="pl-9 pr-8 h-9"
+                  />
+                  {tagInput ? (
+                    <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setTagInput('')}>
+                      <X className="h-4 w-4" />
+                    </button>
+                  ) : null}
+                </div>
+                <Button onClick={() => void handleSearch()} size="sm" className="h-9 px-4" disabled={!canSubmitSearch()}>
+                  <Search className="h-4 w-4 mr-1.5" />
                   搜索
+                </Button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Switch id="combo-mode" checked={isComboMode} onCheckedChange={handleComboModeChange} />
+                  <Label htmlFor="combo-mode" className="text-xs cursor-pointer whitespace-nowrap">组合搜索</Label>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-9 text-xs gap-1"
+                  onClick={() => setShowAdvanced((v) => !v)}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                  高级
+                  <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                 </Button>
               </div>
 
-              {/* 已选择标签列表（带权重） */}
-              {selectedTags.length > 0 && (
-                <div className="space-y-3 pt-2 border-t">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-sm font-medium">已选择标签 ({selectedTags.length}):</Label>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">
-                        权重总和: {calculateTotalWeight(selectedTags).toFixed(3)}
-                      </span>
-                      {Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001 && (
-                        <span className="text-xs text-destructive">
-                          (必须等于1.000)
-                        </span>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          const redistributed = autoDistributeWeights(selectedTags);
-                          setSelectedTags(redistributed);
-                        }}
-                        className="text-xs"
-                      >
-                        平均分配
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleClear}
-                        className="text-xs text-muted-foreground hover:text-destructive"
-                      >
-                        清除所有
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-                    {selectedTags.map((item, index) => (
-                      <div
-                        key={index}
-                        className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg border"
-                      >
-                        <Badge
-                          variant="secondary"
-                          className="text-sm py-1.5 px-3 flex-shrink-0"
-                        >
-                          {item.tag}
-                        </Badge>
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                          <Label htmlFor={`weight-${index}`} className="text-xs text-muted-foreground whitespace-nowrap">
-                            权重:
-                          </Label>
-                          <Input
-                            id={`weight-${index}`}
-                            type="number"
-                            min="0"
-                            max="1"
-                            step="0.01"
-                            value={item.weight.toFixed(2)}
-                            onChange={(e) => {
-                              const newWeight = parseFloat(e.target.value) || 0;
-                              handleWeightChange(item.tag, newWeight, index);
-                            }}
-                            className="w-20 h-8 text-sm"
-                          />
-                          <span className="text-xs text-muted-foreground whitespace-nowrap flex-shrink-0">
-                            ({(item.weight * 100).toFixed(1)}%)
-                          </span>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleRemoveTag(item.tag)}
-                          className="h-8 w-8 p-0 text-destructive hover:text-destructive flex-shrink-0"
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
+              {isComboMode && (
+                <div className="space-y-2 pt-1 border-t border-border/30">
+                  {selectedTags.length > 0 ? (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {selectedTags.map((item, index) => (
+                          <div key={item.tag} className="flex items-center gap-1.5 rounded-md border border-border/40 bg-muted/40 px-2 py-1">
+                            <Badge variant="secondary" className="text-xs">{item.tag}</Badge>
+                            <Input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                              value={item.weight.toFixed(2)}
+                              onChange={(e) => handleWeightChange(item.tag, parseFloat(e.target.value) || 0, index)}
+                              className="w-16 h-7 text-xs"
+                            />
+                            <button type="button" className="text-muted-foreground hover:text-destructive" onClick={() => handleRemoveTag(item.tag)}>
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                        <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelectedTags(autoDistributeWeights(selectedTags))}>平均分配</Button>
+                        <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground hover:text-destructive" onClick={handleClear}>清空</Button>
                       </div>
-                    ))}
-                  </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        权重总和 {calculateTotalWeight(selectedTags).toFixed(3)}
+                        {Math.abs(calculateTotalWeight(selectedTags) - 1.0) > 0.001 ? '（需等于 1.000）' : ''}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">组合模式：输入标签后回车添加，可设置多个标签及权重</p>
+                  )}
                 </div>
               )}
-              {/* 相似度阈值滑块 */}
-              <div className="space-y-2 pt-2 border-t">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="similarity-threshold" className="text-sm font-medium">
-                    相似度阈值: {similarityThreshold[0].toFixed(2)}
-                  </Label>
-                  <span className="text-xs text-muted-foreground">
-                    范围: 0.00 - 1.00
-                  </span>
+
+              {showAdvanced && (
+                <div className="space-y-2 pt-1 border-t border-border/30">
+                  <div className="flex items-center justify-between text-xs">
+                    <Label htmlFor="similarity-threshold">相似度阈值 {similarityThreshold[0].toFixed(2)}</Label>
+                    <span className="text-muted-foreground">0.00 – 1.00</span>
+                  </div>
+                  <Slider
+                    id="similarity-threshold"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={similarityThreshold}
+                    onValueChange={setSimilarityThreshold}
+                    className="w-full"
+                  />
                 </div>
-                <Slider
-                  id="similarity-threshold"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={similarityThreshold}
-                  onValueChange={setSimilarityThreshold}
-                  className="w-full"
-                />
-                <p className="text-xs text-muted-foreground">
-                  调整阈值以控制搜索结果的相关性。阈值越高，结果越精确但数量可能越少。
-                </p>
-              </div>
+              )}
             </CardContent>
           </Card>
 
@@ -1054,7 +1209,7 @@ export default function SearchPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={exportAllImages}
+                  onClick={openExportImagesDialog}
                   disabled={searchTotalCount === 0 || isSearching || isExportingImages}
                 >
                   <Download className="h-4 w-4 mr-2" />
@@ -1063,6 +1218,45 @@ export default function SearchPage() {
               </div>
             </div>
           )}
+
+          <Dialog open={exportImagesDialogOpen} onOpenChange={setExportImagesDialogOpen}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>导出图片数量</DialogTitle>
+                <DialogDescription>
+                  当前搜索共 {searchTotalCount.toLocaleString()} 张匹配图片。请设置要下载的数量（按搜索结果顺序，从第 1 张开始）。
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2 py-2">
+                <Label htmlFor="export-image-limit">下载数量</Label>
+                <Input
+                  id="export-image-limit"
+                  type="number"
+                  min={1}
+                  max={searchTotalCount}
+                  value={exportImageLimitInput}
+                  onChange={(event) => setExportImageLimitInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      handleConfirmExportImages();
+                    }
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  最多可下载 {searchTotalCount.toLocaleString()} 张
+                </p>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setExportImagesDialogOpen(false)}>
+                  取消
+                </Button>
+                <Button onClick={handleConfirmExportImages}>
+                  开始导出
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           {isExportingImages && (
             <Card className="p-8 mb-6">
@@ -1091,7 +1285,7 @@ export default function SearchPage() {
           )}
 
           {/* 搜索结果 */}
-          {selectedTags.length > 0 && searchResults.length === 0 && !isSearching && !isPageLoading && searchTotalCount === 0 && (
+          {activeSearchTags.length > 0 && searchResults.length === 0 && !isSearching && !isPageLoading && searchTotalCount === 0 && (
             <Card className="p-12 text-center">
               <ImageIcon className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg text-muted-foreground">
@@ -1103,7 +1297,7 @@ export default function SearchPage() {
             </Card>
           )}
 
-          {selectedTags.length === 0 && totalCount === 0 && !isSearching && (
+          {activeSearchTags.length === 0 && totalCount === 0 && !isSearching && (
             <Card className="p-12 text-center">
               <ImageIcon className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
               <p className="text-lg text-muted-foreground">
@@ -1147,12 +1341,12 @@ export default function SearchPage() {
           {/* 图片网格 */}
           {searchResults.length > 0 && (
             <>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 mb-6">
                 {searchResults.map((image) => (
                   <Card
                     key={image.id}
                     className="cursor-pointer hover:shadow-lg transition-all duration-300 hover:scale-105"
-                    onClick={() => handleImageClick(image)}
+                    onClick={() => openTagSearchDetail(image)}
                   >
                     <CardContent className="p-0">
                       <div className="relative aspect-video bg-muted rounded-t-lg overflow-hidden">
@@ -1339,151 +1533,7 @@ export default function SearchPage() {
               )}
             </>
           )}
-
-          {/* 图片预览模态框 */}
-          {selectedImage && (
-            <div
-              className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
-              onClick={handleClosePreview}
-            >
-              <div
-                className="bg-background rounded-lg max-w-4xl w-full max-h-[90vh] overflow-auto"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="sticky top-0 bg-background border-b p-4 flex justify-between items-center">
-                  <h2 className="text-xl font-bold">图片预览</h2>
-                  <Button variant="ghost" size="sm" onClick={handleClosePreview}>
-                    <X className="h-5 w-5" />
-                  </Button>
-                </div>
-                <div className="p-6">
-                  {/* Image Preview */}
-                  <div className="mb-6 relative group">
-                    <div className="absolute inset-0 bg-gradient-to-t from-background/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none rounded-lg" />
-                    <img
-                      src={getImageUrl(selectedImage.filePath)}
-                      alt={selectedImage.fileName || '预览图片'}
-                      className="w-full rounded-lg shadow-2xl border border-border/50"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = '/placeholder-image.png';
-                      }}
-                    />
-                  </div>
-
-                  <div className="space-y-6">
-                    {/* 关键词 - 更加精致的标签 */}
-                    <div>
-                      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-primary/80 uppercase tracking-wider">
-                        <span className="w-1 h-4 bg-primary rounded-full"></span>
-                        关键词
-                      </h3>
-                      <div className="flex flex-wrap gap-2">
-                        {selectedImage.keywords.map((keyword, idx) => (
-                          <Badge
-                            key={idx}
-                            variant="secondary"
-                            className="bg-secondary/40 hover:bg-primary/10 hover:text-primary transition-colors border border-border/50 px-3 py-1 shadow-sm font-normal text-foreground/80"
-                          >
-                            {keyword}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* 综合描述 - 升级为 Hero 风格卡片 */}
-                    <div className="rounded-lg border border-cyan-200 dark:border-cyan-900/30 bg-cyan-50/40 dark:bg-cyan-900/10 p-4 relative overflow-hidden group transition-all hover:shadow-sm">
-                      <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-cyan-100/50 to-transparent dark:from-cyan-900/20 rounded-bl-full pointer-events-none"></div>
-                      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-cyan-700 dark:text-cyan-400 uppercase tracking-wider relative z-10">
-                        <span className="w-1 h-4 bg-cyan-500 rounded-full shadow-[0_0_8px_rgba(6,182,212,0.6)]"></span>
-                        综合描述
-                      </h3>
-                      <p className="text-foreground/90 leading-7 text-[15px] font-medium tracking-tight text-justify relative z-10">
-                        {selectedImage.description || <span className="italic opacity-50 text-muted-foreground">暂无描述</span>}
-                      </p>
-                    </div>
-
-                    {/* Qwen Description - 保持原样 (已是高级设计) */}
-                    {selectedImage.qwenCaptions && (
-                      <div>
-                        {/* 标题样式微调以保持一致性 */}
-                        <div className="mb-2">
-                          <h3 className="text-sm font-semibold flex items-center gap-2 text-indigo-500/90 uppercase tracking-wider">
-                            <span className="w-1 h-4 bg-indigo-500 rounded-full"></span>
-                            Qwen Description
-                          </h3>
-                        </div>
-                        <div className="text-muted-foreground">
-                          <RecursiveRenderer data={selectedImage.qwenCaptions} />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* YOLO 对象 - 使用与 Qwen 类似的卡片风格，但有独特色彩 */}
-                    {selectedImage.yoloObjects.length > 0 && (
-                      <div className="rounded-lg border border-orange-200 dark:border-orange-900/30 bg-orange-50/30 dark:bg-orange-900/5 p-4 transition-all hover:shadow-sm">
-                        <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-orange-700 dark:text-orange-400 uppercase tracking-wider">
-                          <span className="w-1 h-4 bg-orange-500 rounded-full"></span>
-                          YOLO 检测对象
-                        </h3>
-                        <div className="flex flex-wrap gap-2">
-                          {selectedImage.yoloObjects.map((obj, idx) => (
-                            <Badge
-                              key={idx}
-                              className="bg-background/80 dark:bg-black/20 border border-orange-200 dark:border-orange-800/30 text-foreground/80 hover:bg-orange-100 dark:hover:bg-orange-900/30 transition-colors shadow-sm font-normal px-2.5 py-1"
-                            >
-                              <div className="w-1.5 h-1.5 rounded-full bg-orange-400 mr-2 opacity-80"></div>
-                              {obj}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* 元数据 - 网格布局 */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                      {/* 相似度 */}
-                      {selectedImage.similarity !== undefined && (
-                        <div className="rounded-lg border border-border/60 bg-card/40 p-3">
-                          <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-2">语义相似度</h3>
-                          <div className="flex items-center gap-3">
-                            <div className="flex-1 bg-secondary rounded-full h-1.5 overflow-hidden">
-                              <div
-                                className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full rounded-full shadow-lg transition-all duration-1000"
-                                style={{ width: `${selectedImage.similarity * 100}%` }}
-                              />
-                            </div>
-                            <span className="text-lg font-bold text-foreground tabular-nums tracking-tight">
-                              {(selectedImage.similarity * 100).toFixed(1)}<span className="text-xs font-normal text-muted-foreground ml-0.5">%</span>
-                            </span>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* 文件信息 */}
-                      <div className="rounded-lg border border-border/60 bg-card/40 p-3 md:col-span-2">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div>
-                            <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-1">文件名</h3>
-                            <p className="text-xs font-mono text-foreground/80 break-all select-all hover:text-primary transition-colors cursor-text">
-                              {selectedImage.fileName || <span className="italic">未命名</span>}
-                            </p>
-                          </div>
-                          <div>
-                            <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-1">保存时间</h3>
-                            <p className="text-xs font-mono text-foreground/80">
-                              {selectedImage.createdAt ? new Date(selectedImage.createdAt).toLocaleString('zh-CN', { hour12: false }) : '-'}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
-      </div>
     </div>
   );
 }

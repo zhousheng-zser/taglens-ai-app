@@ -63,6 +63,8 @@ class EventSearchResult(BaseModel):
     segmentPaths: List[str] = []
     segmentUrls: List[str] = []
     segmentDescriptions: List[str] = []
+    segmentReviewDescriptions: List[str] = []
+    segmentDescriptionsEn: List[str] = []
     segmentStatuses: List[str] = []
     questionsAnswersList: List[List[Dict[str, str]]] = []
     eventTypeQuestions: List[str] = []
@@ -77,6 +79,9 @@ class EventSearchResult(BaseModel):
     statusReviewDone: bool = False
     qaReviewDone: bool = False
     descriptionReviewDone: bool = False
+    aiDescriptionDone: bool = False
+    reviewDescriptionDone: bool = False
+    englishDescriptionDone: bool = False
 
 
 class EventSearchResponse(BaseModel):
@@ -101,6 +106,8 @@ class EventSegmentAnnotationUpdateRequest(BaseModel):
     projectId: str
     eventTypeCode: str
     segmentDescriptions: List[str]
+    segmentReviewDescriptions: List[str]
+    segmentDescriptionsEn: List[str]
     segmentStatuses: List[str]
     questionsAnswersList: List[List[Dict[str, str]]] = []
 
@@ -226,10 +233,26 @@ def _is_status_review_done(segment_statuses: List[str], segment_count: int) -> b
     return all(status in {"正样本", "负样本"} for status in segment_statuses[:segment_count])
 
 
-def _is_description_review_done(segment_descriptions: List[str], segment_count: int) -> bool:
-    if segment_count <= 0 or len(segment_descriptions) < segment_count:
+def _is_segment_text_list_done(items: List[str], segment_count: int) -> bool:
+    if segment_count <= 0 or len(items) < segment_count:
         return False
-    return all(bool((item or "").strip()) for item in segment_descriptions[:segment_count])
+    return all(bool((item or "").strip()) for item in items[:segment_count])
+
+
+def _is_ai_description_done(segment_descriptions: List[str], segment_count: int) -> bool:
+    return _is_segment_text_list_done(segment_descriptions, segment_count)
+
+
+def _is_review_description_done(segment_review_descriptions: List[str], segment_count: int) -> bool:
+    return _is_segment_text_list_done(segment_review_descriptions, segment_count)
+
+
+def _is_english_description_done(segment_descriptions_en: List[str], segment_count: int) -> bool:
+    return _is_segment_text_list_done(segment_descriptions_en, segment_count)
+
+
+def _is_description_review_done(segment_descriptions: List[str], segment_count: int) -> bool:
+    return _is_ai_description_done(segment_descriptions, segment_count)
 
 
 def _is_qa_review_done(questions_answers_list: List[List[Dict[str, str]]], segment_count: int) -> bool:
@@ -342,6 +365,10 @@ async def update_event_segment_annotations_api(
 ) -> Dict[str, Any]:
     if len(request.segmentDescriptions) != len(request.segmentStatuses):
         raise HTTPException(status_code=400, detail="segmentDescriptions 与 segmentStatuses 长度不一致")
+    if len(request.segmentReviewDescriptions) != len(request.segmentDescriptions):
+        raise HTTPException(status_code=400, detail="segmentReviewDescriptions 与 segmentDescriptions 长度不一致")
+    if len(request.segmentDescriptionsEn) != len(request.segmentDescriptions):
+        raise HTTPException(status_code=400, detail="segmentDescriptionsEn 与 segmentDescriptions 长度不一致")
     if len(request.questionsAnswersList) != len(request.segmentDescriptions):
         raise HTTPException(status_code=400, detail="questionsAnswersList 与 segmentDescriptions 长度不一致")
     valid_status = {"正样本", "负样本", "待定"}
@@ -353,6 +380,8 @@ async def update_event_segment_annotations_api(
             project_id=request.projectId,
             event_type_corrected=request.eventTypeCode,
             segment_descriptions=request.segmentDescriptions,
+            segment_review_descriptions=request.segmentReviewDescriptions,
+            segment_descriptions_en=request.segmentDescriptionsEn,
             segment_statuses=request.segmentStatuses,
             questions_answers_list=request.questionsAnswersList,
         )
@@ -364,7 +393,13 @@ async def update_event_segment_annotations_api(
             reviewer=current_user,
             status_review_done=_is_status_review_done(request.segmentStatuses, segment_count),
             qa_review_done=_is_qa_review_done(request.questionsAnswersList, segment_count),
-            description_review_done=_is_description_review_done(request.segmentDescriptions, segment_count),
+            ai_description_done=_is_ai_description_done(request.segmentDescriptions, segment_count),
+            review_description_done=_is_review_description_done(
+                request.segmentReviewDescriptions, segment_count
+            ),
+            english_description_done=_is_english_description_done(
+                request.segmentDescriptionsEn, segment_count
+            ),
         )
         return {"success": True, "review": review}
     except HTTPException:

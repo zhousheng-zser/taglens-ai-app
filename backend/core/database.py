@@ -24,15 +24,6 @@ BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
 _backup_checked = False
 
 
-def _invalidate_keyword_search_cache() -> None:
-    try:
-        from services.keyword_search_cache import invalidate_keyword_search_cache
-
-        invalidate_keyword_search_cache()
-    except Exception:
-        pass
-
-
 def _mysql_connect_kwargs() -> Dict[str, Any]:
     return {
         "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
@@ -322,7 +313,6 @@ def save_image_to_db(
                         SET embedding = %s, created_at = %s
                         WHERE image_id = %s AND keyword = %s
                     """, (embedding_bytes, now, image_id, keyword))
-            _invalidate_keyword_search_cache()
 
         return image_id
 
@@ -510,9 +500,10 @@ def search_images(
         # 使用向量搜索，计算相似度并过滤
         if query_embeddings_list:
             from services.keyword_search_cache import (
-                ensure_keyword_vectors_loaded,
                 get_cache_stats,
                 get_query_keyword_similarity,
+                require_keyword_vectors_loaded,
+                scan_image_keyword_similarities,
                 warm_query_keyword_similarities,
             )
             from services.search_progress import SearchProgress
@@ -532,68 +523,75 @@ def search_images(
             ]
             print(f"多标签搜索: 共 {num_queries} 个查询标签，权重: {weights_list}")
 
-            # 阶段1a：加载唯一 keyword 向量（进程内记忆化，每个 keyword 只存一份）
-            ensure_keyword_vectors_loaded(cursor, progress)
+            # 阶段1a：使用已手动加载的 keyword 向量（进程内记忆化，每个 keyword 只存一份）
+            require_keyword_vectors_loaded(progress)
             # 阶段1b：预热 (query_tag, keyword) 相似度；重复搜索同一标签时直接命中缓存
             warm_query_keyword_similarities(tag_labels, query_vecs, progress)
 
-            # 阶段1c：仅拉 image_id + keyword 文本，不再重复传输 embedding BLOB
-            mapping_count_sql = f"""
-                SELECT COUNT(*) AS cnt
-                FROM keyword_embeddings ke
-                INNER JOIN images i ON i.id = ke.image_id
-                WHERE {where_clause}
-            """
-            cursor.execute(mapping_count_sql, params)
-            mapping_total = max(1, int(cursor.fetchone()["cnt"]))
-            progress.report("scan", 56, f"正在扫描图片标签映射（共 {mapping_total} 条）…")
+            use_memory_mapping = where_clause == "1=1"
+            if use_memory_mapping:
+                (
+                    image_query_max,
+                    rows_with_keywords_set,
+                    embed_row_count,
+                    cache_hits,
+                    cache_miss,
+                ) = scan_image_keyword_similarities(tag_labels, num_queries, progress)
+            else:
+                mapping_count_sql = f"""
+                    SELECT COUNT(*) AS cnt
+                    FROM keyword_embeddings ke
+                    INNER JOIN images i ON i.id = ke.image_id
+                    WHERE {where_clause}
+                """
+                cursor.execute(mapping_count_sql, params)
+                mapping_total = max(1, int(cursor.fetchone()["cnt"]))
+                progress.report("scan", 56, f"正在扫描图片标签映射（共 {mapping_total} 条）…")
 
-            mapping_sql = f"""
-                SELECT ke.image_id, ke.keyword
-                FROM keyword_embeddings ke
-                INNER JOIN images i ON i.id = ke.image_id
-                WHERE {where_clause}
-            """
-            cursor.execute(mapping_sql, params)
+                mapping_sql = f"""
+                    SELECT ke.image_id, ke.keyword
+                    FROM keyword_embeddings ke
+                    INNER JOIN images i ON i.id = ke.image_id
+                    WHERE {where_clause}
+                """
+                cursor.execute(mapping_sql, params)
 
-            image_query_max: Dict[int, List[float]] = defaultdict(
-                lambda: [-1.0] * num_queries
-            )
-            rows_with_keywords_set: set[int] = set()
-            embed_row_count = 0
-            cache_hits = 0
-            cache_miss = 0
-            chunk_size = 100_000
+                image_query_max = defaultdict(lambda: [-1.0] * num_queries)
+                rows_with_keywords_set: set[int] = set()
+                embed_row_count = 0
+                cache_hits = 0
+                cache_miss = 0
+                chunk_size = 100_000
 
-            while True:
-                batch = cursor.fetchmany(chunk_size)
-                if not batch:
-                    break
-                progress.check_cancelled()
-                embed_row_count += len(batch)
+                while True:
+                    batch = cursor.fetchmany(chunk_size)
+                    if not batch:
+                        break
+                    progress.check_cancelled()
+                    embed_row_count += len(batch)
 
-                for row in batch:
-                    image_id = int(row["image_id"])
-                    keyword = row["keyword"]
-                    rows_with_keywords_set.add(image_id)
+                    for row in batch:
+                        image_id = int(row["image_id"])
+                        keyword = row["keyword"]
+                        rows_with_keywords_set.add(image_id)
 
-                    for q_idx, query_tag in enumerate(tag_labels):
-                        sim = get_query_keyword_similarity(query_tag, keyword)
-                        if sim is None:
-                            cache_miss += 1
-                            continue
-                        cache_hits += 1
-                        prev = image_query_max[image_id][q_idx]
-                        if sim > prev:
-                            image_query_max[image_id][q_idx] = sim
+                        for q_idx, query_tag in enumerate(tag_labels):
+                            sim = get_query_keyword_similarity(query_tag, keyword)
+                            if sim is None:
+                                cache_miss += 1
+                                continue
+                            cache_hits += 1
+                            prev = image_query_max[image_id][q_idx]
+                            if sim > prev:
+                                image_query_max[image_id][q_idx] = sim
 
-                if embed_row_count % chunk_size == 0 or len(batch) < chunk_size:
-                    pct = 56 + min(34, (embed_row_count / mapping_total) * 34)
-                    progress.report(
-                        "scan",
-                        pct,
-                        f"正在匹配图片标签（{embed_row_count}/{mapping_total}）…",
-                    )
+                    if embed_row_count % chunk_size == 0 or len(batch) < chunk_size:
+                        pct = 56 + min(34, (embed_row_count / mapping_total) * 34)
+                        progress.report(
+                            "scan",
+                            pct,
+                            f"正在匹配图片标签（{embed_row_count}/{mapping_total}）…",
+                        )
 
             cache_stats = get_cache_stats()
             print(
@@ -1038,8 +1036,6 @@ def update_image_analysis_with_embeddings(
             except pymysql.err.IntegrityError:
                 pass
 
-        _invalidate_keyword_search_cache()
-
         return {
             "relative_path": img_row["relative_path"],
             "uuid": img_row["uuid"],
@@ -1149,7 +1145,6 @@ def delete_image_by_uuid(image_uuid: str) -> bool:
         t2 = time.time()
         cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = %s", (image_id,))
         print(f"[delete_image_by_uuid] delete keyword_embeddings affected={cursor.rowcount} cost={time.time()-t2:.3f}s")
-        _invalidate_keyword_search_cache()
 
         t3 = time.time()
         cursor.execute("DELETE FROM analysis_results WHERE image_id = %s", (image_id,))

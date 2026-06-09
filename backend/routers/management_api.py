@@ -9,7 +9,6 @@ import asyncio
 import json
 import time
 import requests
-import queue
 import threading
 from datetime import datetime
 
@@ -50,11 +49,11 @@ logger = logging.getLogger(__name__)
 # 缺失标签补齐任务的全局状态与日志文件
 REEXTRACT_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "reextract_missing_tags_gemini.log"
 CURRENT_REEXTRACT_TASK: Dict[str, Any] = {
-    "running": False,     # 当前是否有脚本进程在运行（由 /status 实时计算）
+    "running": False,
     "model": None,
     "limit": None,
     "started_at": None,
-    "pid": None,          # 子进程 PID，用于在 /status 中判断是否仍在运行
+    "cancel_event": None,
 }
 
 SEGMENT_DESC_FILL_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "segment_desc_fill.log"
@@ -86,6 +85,18 @@ def _append_segment_desc_fill_log_line(line: str) -> None:
     SEGMENT_DESC_FILL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with SEGMENT_DESC_FILL_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(line)
+
+
+def _append_reextract_log_line(line: str) -> None:
+    REEXTRACT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with REEXTRACT_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+
+
+async def _log_reextract(message: str, log_type: str = "info") -> None:
+    line = format_log(message, log_type)
+    await run_blocking(_append_reextract_log_line, line)
 
 
 async def _log_segment_desc_fill(message: str, log_type: str = "info") -> None:
@@ -924,20 +935,50 @@ async def event_segment_desc_fill_log_stream(from_start: bool = True):
     )
 
 
+async def _run_reextract_tags_job(
+    limit: int,
+    model: str,
+    cancel_event: threading.Event,
+) -> None:
+    """后台批量补齐缺失标签（日志写入文件，与 HTTP 连接解耦）。"""
+
+    def log_cb(message: str, log_type: str = "info") -> None:
+        _append_reextract_log_line(format_log(message, log_type))
+
+    await run_blocking(
+        run_reextract_batch,
+        limit,
+        model,
+        log_cb,
+        cancel_event,
+    )
+
+
 async def reextract_tags_generator(limit: int, model: str):
-    """通过统一 LLM 网关批量补齐缺失标签。"""
+    """启动缺失标签补齐：后台 asyncio 任务 + 日志文件 tail（与事件视频分块相同模式）。"""
     global CURRENT_REEXTRACT_TASK
 
     if CURRENT_REEXTRACT_TASK.get("running"):
-        yield format_log("已有缺失标签补齐任务正在运行，禁止重复启动。", "warning")
-        yield format_log("任务结束", "done")
-        return
+        async def reject_stream():
+            yield format_log("已有缺失标签补齐任务正在运行，禁止重复启动。", "warning")
+            yield format_log("任务结束", "done")
+
+        return StreamingResponse(reject_stream(), media_type="application/x-ndjson")
 
     model_normalized = (model or "").strip().lower()
     if model_normalized not in ("qwen", "gemini", "codex", "mimo"):
-        yield format_log(f"不支持的模型: {model}", "error")
-        yield format_log("任务结束", "done")
-        return
+        async def reject_stream():
+            yield format_log(f"不支持的模型: {model}", "error")
+            yield format_log("任务结束", "done")
+
+        return StreamingResponse(reject_stream(), media_type="application/x-ndjson")
+
+    try:
+        REEXTRACT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REEXTRACT_LOG_PATH.open("w", encoding="utf-8") as f:
+            f.write("")
+    except Exception as exc:
+        logger.warning(f"初始化缺失标签补齐日志文件失败: {exc}")
 
     cancel_event = threading.Event()
     CURRENT_REEXTRACT_TASK = {
@@ -945,116 +986,42 @@ async def reextract_tags_generator(limit: int, model: str):
         "model": model_normalized,
         "limit": limit,
         "started_at": datetime.utcnow().isoformat() + "Z",
-        "pid": None,
-        "thread": None,
         "cancel_event": cancel_event,
     }
-    try:
-        REEXTRACT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with REEXTRACT_LOG_PATH.open("w", encoding="utf-8") as f:
-            f.write("")
-    except Exception as e:
-        logger.warning(f"初始化缺失标签补齐日志文件失败: {e}")
 
-    log_queue: queue.Queue = queue.Queue()
-    done_event = threading.Event()
-
-    def log_cb(message: str, log_type: str = "info") -> None:
-        log_queue.put(format_log(message, log_type))
-
-    def worker() -> None:
+    async def _job_wrapper() -> None:
         try:
-            run_reextract_batch(
-                limit,
-                model_normalized,
-                log=log_cb,
-                stop_event=cancel_event,
-            )
+            await _run_reextract_tags_job(limit, model_normalized, cancel_event=cancel_event)
         except Exception as exc:
-            log_cb(f"任务异常: {exc}", "error")
-            log_cb("任务结束", "done")
+            await _log_reextract(f"任务异常: {exc}", "error")
+            await _log_reextract("任务结束", "done")
         finally:
-            log_queue.put(None)
-            done_event.set()
             CURRENT_REEXTRACT_TASK["running"] = False
-            # 释放取消事件引用，避免后续误用
             try:
-                CURRENT_REEXTRACT_TASK["cancel_event"].clear()
+                ev = CURRENT_REEXTRACT_TASK.get("cancel_event")
+                if isinstance(ev, threading.Event):
+                    ev.clear()
             except Exception:
                 pass
 
-    thread = threading.Thread(target=worker, name="reextract-tags", daemon=True)
-    thread.start()
-    CURRENT_REEXTRACT_TASK["thread"] = thread
+    asyncio.create_task(_job_wrapper())
 
-    while True:
-        item = None
-        while True:
-            try:
-                item = log_queue.get_nowait()
-                break
-            except queue.Empty:
-                break
-        if item is None:
-            if done_event.is_set():
-                while True:
-                    try:
-                        tail = log_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    if tail is None:
-                        continue
-                    yield tail
-                break
-            await asyncio.sleep(0.2)
-            continue
-        if item is None:
-            break
-        yield item
-        try:
-            def _append_log(ln: str = item) -> None:
-                with REEXTRACT_LOG_PATH.open("a", encoding="utf-8") as f:
-                    f.write(ln)
-
-            await run_blocking(_append_log)
-        except Exception:
-            pass
-        await asyncio.sleep(0.01)
-
-    thread.join(timeout=5)
+    return StreamingResponse(
+        _reextract_log_follow_generator(from_start=True),
+        media_type="application/x-ndjson",
+    )
 
 
 @router.post("/reextract-tags")
 async def reextract_tags_endpoint(req: ReextractTagsRequest):
-    """调用 reextract_missing_tags_gemini.py 脚本进行缺失标签补齐"""
-    return StreamingResponse(
-        reextract_tags_generator(req.limit, req.model),
-        media_type="application/x-ndjson"
-    )
+    """批量补齐缺失标签（统一 LLM 网关）。"""
+    return await reextract_tags_generator(req.limit, req.model)
 
 
 @router.get("/reextract-tags/status")
 async def reextract_tags_status():
     """查询缺失标签补齐任务当前状态"""
     data = CURRENT_REEXTRACT_TASK.copy()
-
-    thread = data.get("thread")
-    still_running = bool(thread and isinstance(thread, threading.Thread) and thread.is_alive())
-    data["running"] = still_running
-
-    if not still_running:
-        CURRENT_REEXTRACT_TASK.update({
-            "running": False,
-            "model": None,
-            "limit": None,
-            "started_at": None,
-            "pid": None,
-            "thread": None,
-            "cancel_event": None,
-        })
-
-    # 避免返回 threading 对象导致序列化失败
-    data.pop("thread", None)
     data.pop("cancel_event", None)
     return data
 
@@ -1071,19 +1038,11 @@ async def reextract_tags_stop():
 
 
 def _reextract_task_is_running() -> bool:
-    """与 /status 一致：以工作线程是否存活为准。"""
-    thread = CURRENT_REEXTRACT_TASK.get("thread")
-    if thread and isinstance(thread, threading.Thread) and thread.is_alive():
-        return True
     return bool(CURRENT_REEXTRACT_TASK.get("running"))
 
 
 async def _reextract_log_follow_generator(from_start: bool = False):
-    """
-    跟踪缺失标签补齐日志文件。
-    - 首次 POST 任务：由 reextract_tags_generator 直接推送队列日志；
-    - 重连 GET log-stream：默认 from_start=True，先回放已有日志再 tail 新行。
-    """
+    """跟踪缺失标签补齐日志文件（启动任务时从头读；重连时从尾部读）。"""
     if not REEXTRACT_LOG_PATH.exists():
         yield format_log("当前暂无缺失标签补齐任务日志。", "info")
         yield format_log("日志流结束", "done")

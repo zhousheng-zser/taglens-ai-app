@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { AuthGate } from '@/components/AuthGate';
 import { ParticleBackground } from '@/components/ParticleBackground';
 import { Card, CardContent } from '@/components/ui/card';
@@ -8,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Search, RotateCcw, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2, Sparkles } from 'lucide-react';
+import { Search, RotateCcw, X, LayoutList, LayoutGrid, ChevronDown, Calendar, PlayCircle, Trash2 } from 'lucide-react';
 import { QueryPaginationBar } from '@/components/QueryPaginationBar';
 import { useToast } from '@/hooks/use-toast';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths } from 'date-fns';
@@ -16,6 +17,15 @@ import { zhCN } from 'date-fns/locale';
 import { getEventMeta, searchEvents } from '@/app/actions';
 import type { EventOptionItem, EventSearchResult } from '@/types/event';
 import type { CurrentUser } from '@/lib/auth';
+import {
+  cacheEventQueryPageResults,
+  consumeEventQueryRestore,
+  getEventDescriptionPreview,
+  loadEventQuerySession,
+  saveEventQuerySession,
+  slimEventSearchResults,
+  type EventQuerySessionState,
+} from '@/lib/eventQueryNav';
 import {
   Select,
   SelectContent,
@@ -65,655 +75,9 @@ const DESCRIPTION_STATUS_OPTIONS = [
   { value: 'partially_edited', label: '部分已编辑' },
 ] as const;
 
-function resolveMediaUrlForApi(url: string): string {
-  const value = (url || '').trim();
-  if (!value) return '';
-  if (value.startsWith('http://') || value.startsWith('https://')) return value;
-  if (typeof window !== 'undefined') {
-    return new URL(value, window.location.origin).href;
-  }
-  return value;
-}
-
-type EventStreamPlayerProps = {
-  record: EventSearchResult;
-  onDirtyChange: (dirty: boolean) => void;
-  onSaved: (payload: {
-    eventId: string;
-    projectId: string;
-    eventTypeCode: string;
-    segmentDescriptions: string[];
-    segmentStatuses: string[];
-    questionsAnswersList: Array<Array<{ question: string; answer: string }>>;
-  }) => void;
-};
-
-const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirtyChange, onSaved }: EventStreamPlayerProps) {
-  const { toast } = useToast();
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [activeStreamIndex, setActiveStreamIndex] = useState<number>(-1);
-  const [activeStreamUrl, setActiveStreamUrl] = useState<string>('');
-  const [activeStreamPath, setActiveStreamPath] = useState<string>('');
-  const [activeMediaKind, setActiveMediaKind] = useState<'video' | 'image'>('video');
-  const [activeImageType, setActiveImageType] = useState<'big' | 'composite' | 'overlay' | null>(null);
-  const [draftDescriptions, setDraftDescriptions] = useState<string[]>([]);
-  const [draftStatuses, setDraftStatuses] = useState<string[]>([]);
-  const [draftQuestionsAnswers, setDraftQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
-  const [initialDescriptions, setInitialDescriptions] = useState<string[]>([]);
-  const [initialStatuses, setInitialStatuses] = useState<string[]>([]);
-  const [initialQuestionsAnswers, setInitialQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isAiGenerating, setIsAiGenerating] = useState(false);
-  const [quickMarkStatus, setQuickMarkStatus] = useState<'待定' | '正样本' | '负样本' | null>(null);
-  const [quickMarkSelections, setQuickMarkSelections] = useState<number[]>([]);
-
-  const getActiveSegmentDescription = (streamIndex: number) => {
-    const descriptions = draftDescriptions || [];
-    if (streamIndex < 0) return '-';
-    const value = descriptions[streamIndex] || '';
-    return value.trim() || '-';
-  };
-  const activeEditableSegmentIndex = activeStreamIndex >= 0 ? activeStreamIndex : null;
-
-  const segmentLineCount = Math.max(
-    record.segmentCount || 0,
-    (record.segmentPaths || []).length,
-    (record.segmentUrls || []).length,
-    (record.segmentDescriptions || []).length,
-    (record.segmentStatuses || []).length,
-  );
-
-  const normalizeQuestionsAnswers = (
-    value: Array<Array<{ question: string; answer: string }>> | undefined,
-    count: number,
-  ): Array<Array<{ question: string; answer: string }>> => {
-    const rawPool = (record.eventTypeQuestions || []).map((q) => (q || '').trim()).filter(Boolean);
-    const dedupPool = Array.from(new Set(rawPool));
-    const fallbackQuestions = dedupPool.length >= 2
-      ? dedupPool.slice(0, 2)
-      : ['临时填充问题1?', '临时填充问题2?'];
-
-    const result: Array<Array<{ question: string; answer: string }>> = [];
-    for (let i = 0; i < count; i += 1) {
-      const current = Array.isArray(value?.[i]) ? value?.[i] : [];
-      const cleaned = current
-        .map((item) => ({
-          question: String(item?.question || '').trim(),
-          answer: String(item?.answer || '').trim(),
-        }))
-        .filter((item) => item.question)
-        .slice(0, 2);
-      while (cleaned.length < 2) {
-        cleaned.push({
-          question: fallbackQuestions[cleaned.length] || `临时填充问题${cleaned.length + 1}?`,
-          answer: '',
-        });
-      }
-      result.push(cleaned);
-    }
-    return result;
-  };
-
-  useEffect(() => {
-    setActiveStreamIndex(-1);
-    setActiveStreamUrl(record.videoUrl || '');
-    setActiveStreamPath(record.videoPath || '-');
-    setActiveMediaKind('video');
-    setActiveImageType(null);
-    const nextDescriptions = Array.from({ length: segmentLineCount }, (_, idx) => (record.segmentDescriptions || [])[idx] || '');
-    const nextStatuses = Array.from({ length: segmentLineCount }, (_, idx) => {
-      const v = (record.segmentStatuses || [])[idx];
-      return v === '正样本' || v === '负样本' || v === '待定' ? v : '待定';
-    });
-    setDraftDescriptions(nextDescriptions);
-    setDraftStatuses(nextStatuses);
-    const nextQuestionsAnswers = normalizeQuestionsAnswers(record.questionsAnswersList, segmentLineCount);
-    setDraftQuestionsAnswers(nextQuestionsAnswers);
-    setInitialDescriptions(nextDescriptions);
-    setInitialStatuses(nextStatuses);
-    setInitialQuestionsAnswers(nextQuestionsAnswers);
-    setQuickMarkSelections([]);
-    setQuickMarkStatus(null);
-    onDirtyChange(false);
-  }, [record.uuid, record.videoUrl, record.videoPath]);
-
-  const isDirty = useMemo(
-    () => JSON.stringify(draftDescriptions) !== JSON.stringify(initialDescriptions)
-      || JSON.stringify(draftStatuses) !== JSON.stringify(initialStatuses)
-      || JSON.stringify(draftQuestionsAnswers) !== JSON.stringify(initialQuestionsAnswers),
-    [draftDescriptions, draftStatuses, draftQuestionsAnswers, initialDescriptions, initialStatuses, initialQuestionsAnswers],
-  );
-
-  useEffect(() => {
-    onDirtyChange(isDirty);
-  }, [isDirty, onDirtyChange]);
-
-  const switchStream = (targetIndex: number) => {
-    setActiveMediaKind('video');
-    setActiveImageType(null);
-    if (targetIndex < 0) {
-      setActiveStreamIndex(-1);
-      setActiveStreamUrl(record.videoUrl || '');
-      setActiveStreamPath(record.videoPath || '-');
-      return;
-    }
-    const url = (record.segmentUrls || [])[targetIndex] || '';
-    const path = (record.segmentPaths || [])[targetIndex] || '-';
-    setActiveStreamIndex(targetIndex);
-    setActiveStreamUrl(url);
-    setActiveStreamPath(path);
-  };
-
-  const switchImage = (imageType: 'big' | 'composite' | 'overlay') => {
-    const imageUrl = imageType === 'big'
-      ? (record.imageBigUrl || '')
-      : imageType === 'composite'
-        ? (record.imageCompositeUrl || '')
-        : (record.imageOverlayUrl || '');
-    if (!imageUrl) return;
-    setActiveMediaKind('image');
-    setActiveImageType(imageType);
-    setActiveStreamUrl(imageUrl);
-    setActiveStreamPath(imageUrl);
-  };
-
-  const applyQuickMarkToSegment = (segmentIndex: number) => {
-    if (segmentIndex < 0 || quickMarkStatus === null) return;
-    setQuickMarkSelections((prev) => {
-      if (prev.includes(segmentIndex)) {
-        return prev.filter((item) => item !== segmentIndex);
-      }
-      return [...prev, segmentIndex];
-    });
-  };
-
-  const selectAllSegmentsForQuickMark = () => {
-    if (quickMarkStatus === null || segmentLineCount <= 0) return;
-    setQuickMarkSelections(Array.from({ length: segmentLineCount }, (_, idx) => idx));
-  };
-
-  const saveSegmentAnnotations = async (
-    descriptions: string[],
-    statuses: string[],
-    questionsAnswersList: Array<Array<{ question: string; answer: string }>>,
-  ) => {
-    const endpoint = '/api/backend/events/segment-annotations';
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        eventId: record.eventId,
-        projectId: record.projectId,
-        eventTypeCode: record.eventTypeCode,
-        segmentDescriptions: descriptions,
-        segmentStatuses: statuses,
-        questionsAnswersList,
-      }),
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || '保存失败');
-    }
-    setInitialDescriptions(descriptions);
-    setInitialStatuses(statuses);
-    setInitialQuestionsAnswers(questionsAnswersList);
-    onDirtyChange(false);
-    onSaved({
-      eventId: record.eventId,
-      projectId: record.projectId,
-      eventTypeCode: record.eventTypeCode,
-      segmentDescriptions: descriptions,
-      segmentStatuses: statuses,
-      questionsAnswersList,
-    });
-  };
-
-  const applyQuickMarkBatch = async () => {
-    if (isSaving || quickMarkStatus === null || quickMarkSelections.length === 0) return;
-    const next = [...draftStatuses];
-    quickMarkSelections.forEach((idx) => {
-      if (idx >= 0 && idx < next.length) {
-        next[idx] = quickMarkStatus;
-      }
-    });
-    setIsSaving(true);
-    try {
-      setDraftStatuses(next);
-      await saveSegmentAnnotations(draftDescriptions, next, draftQuestionsAnswers);
-      setQuickMarkSelections([]);
-      setQuickMarkStatus(null);
-    } catch (error: any) {
-      window.alert(`快速标注保存失败: ${error?.message || '未知错误'}`);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleSegmentButtonClick = (segmentIndex: number) => {
-    if (quickMarkStatus !== null) {
-      // 快速标注开启时，仅更新状态，不切换播放视频
-      applyQuickMarkToSegment(segmentIndex);
-      return;
-    }
-    switchStream(segmentIndex);
-  };
-
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el || !activeStreamUrl || activeMediaKind !== 'video') return;
-    const playPromise = el.play();
-    if (playPromise && typeof playPromise.catch === 'function') {
-      playPromise.catch(() => {
-        // 浏览器可能因策略阻止自动播放，静默忽略
-      });
-    }
-  }, [activeStreamUrl, activeMediaKind]);
-
-  const handleSaveAll = async () => {
-    if (isSaving) return;
-    setIsSaving(true);
-    try {
-      await saveSegmentAnnotations(draftDescriptions, draftStatuses, draftQuestionsAnswers);
-    } catch (error: any) {
-      window.alert(`保存失败: ${error?.message || '未知错误'}`);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleAiSmartDescription = async () => {
-    if (activeEditableSegmentIndex === null || isAiGenerating) return;
-    const idx = activeEditableSegmentIndex;
-    const segmentVideoUrl = resolveMediaUrlForApi((record.segmentUrls || [])[idx] || '');
-    if (!segmentVideoUrl) {
-      toast({ title: '无法生成', description: '当前分段没有可访问的视频地址', variant: 'destructive' });
-      return;
-    }
-    const overlayRaw = (record.imageOverlayUrl || '').trim();
-    const overlayImageUrl = overlayRaw ? resolveMediaUrlForApi(overlayRaw) : undefined;
-
-    setIsAiGenerating(true);
-    try {
-      const response = await fetch('/api/backend/events/segment-ai-description', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          segmentVideoUrl,
-          overlayImageUrl: overlayImageUrl || undefined,
-          segmentIndex: idx,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const detail = typeof payload?.detail === 'string'
-          ? payload.detail
-          : (payload?.detail?.msg || payload?.error || 'AI 描述生成失败');
-        throw new Error(detail);
-      }
-      const description = String(payload?.description || '').trim();
-      if (!description) {
-        throw new Error('AI 未返回描述内容');
-      }
-
-      const raw = draftDescriptions[idx] || '';
-      const trimmed = raw.trim();
-      const next = [...draftDescriptions];
-      if (!trimmed) {
-        next[idx] = description;
-        setDraftDescriptions(next);
-        return;
-      }
-      const separator = raw.endsWith('\n') ? '' : '\n';
-      next[idx] = `${raw}${separator}${description}`;
-      setDraftDescriptions(next);
-      toast({
-        title: '已追加 AI 描述',
-        description: `已将内容追加到分段 ${idx.toString().padStart(3, '0')} 描述末尾，请确认后保存。`,
-      });
-    } catch (error: any) {
-      toast({
-        title: 'AI 描述生成失败',
-        description: error?.message || '未知错误',
-        variant: 'destructive',
-      });
-    } finally {
-      setIsAiGenerating(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start">
-        <div className="space-y-3">
-          <div className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video min-h-[320px]">
-            {activeStreamUrl ? (
-              activeMediaKind === 'video' ? (
-                <video
-                  ref={videoRef}
-                  src={activeStreamUrl}
-                  controls
-                  autoPlay
-                  playsInline
-                  className="absolute inset-0 h-full w-full object-contain bg-black"
-                  preload="metadata"
-                />
-              ) : (
-                <img
-                  src={activeStreamUrl}
-                  alt="事件图片预览"
-                  className="absolute inset-0 h-full w-full object-contain bg-black"
-                />
-              )
-            ) : (
-              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                当前事件暂无可播放视频
-              </div>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => switchStream(-1)}
-              className={
-                activeMediaKind === 'video' && activeStreamIndex === -1
-                  ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
-                  : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
-              }
-            >
-              主视频
-            </Button>
-            {record.imageBigUrl ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => switchImage('big')}
-                className={
-                  activeMediaKind === 'image' && activeImageType === 'big'
-                    ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
-                    : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
-                }
-              >
-                big
-              </Button>
-            ) : null}
-            {record.imageCompositeUrl ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => switchImage('composite')}
-                className={
-                  activeMediaKind === 'image' && activeImageType === 'composite'
-                    ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
-                    : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
-                }
-              >
-                composite
-              </Button>
-            ) : null}
-            {record.imageOverlayUrl ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => switchImage('overlay')}
-                className={
-                  activeMediaKind === 'image' && activeImageType === 'overlay'
-                    ? 'h-8 px-3 text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-400'
-                    : 'h-8 px-3 text-xs bg-blue-900/40 hover:bg-blue-800/60 text-blue-100 border border-blue-600/60'
-                }
-              >
-                overlay
-              </Button>
-            ) : null}
-            {(record.segmentUrls || []).map((_, idx) => (
-              <Button
-                key={`${record.uuid}-segment-${idx}`}
-                type="button"
-                size="sm"
-                onClick={() => handleSegmentButtonClick(idx)}
-                className={
-                  activeStreamIndex === idx
-                    ? 'relative h-8 px-3 text-xs bg-yellow-500 hover:bg-yellow-400 text-black border border-yellow-300'
-                    : `relative h-8 px-3 text-xs border ${
-                      (draftStatuses[idx] || '待定') === '正样本'
-                        ? 'bg-emerald-900/30 hover:bg-emerald-800/45 text-emerald-100 border-emerald-600/60'
-                        : (draftStatuses[idx] || '待定') === '负样本'
-                          ? 'bg-rose-900/30 hover:bg-rose-800/45 text-rose-100 border-rose-600/60'
-                          : 'bg-yellow-900/30 hover:bg-yellow-800/50 text-yellow-100 border-yellow-600/60'
-                    }`
-                }
-              >
-                {quickMarkStatus !== null ? (
-                  <span
-                    className={`absolute -right-1 -top-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border text-[9px] ${
-                      quickMarkSelections.includes(idx)
-                        ? 'border-emerald-400 bg-emerald-500 text-white'
-                        : 'border-zinc-400/80 bg-transparent text-transparent'
-                    }`}
-                  >
-                    ✓
-                  </span>
-                ) : null}
-                {idx.toString().padStart(3, '0')}
-              </Button>
-            ))}
-          </div>
-        </div>
-        <div className="rounded-lg border border-border/40 bg-background/30 p-3 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-muted-foreground">分段描述编辑</span>
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleSaveAll}
-              disabled={isSaving || !isDirty || activeEditableSegmentIndex === null}
-              className="h-7 px-3 text-xs"
-            >
-              {isSaving ? '保存中...' : '全部保存'}
-            </Button>
-          </div>
-          <div className="flex items-center justify-between gap-2 min-h-7">
-            <span className="text-xs text-muted-foreground shrink-0">
-              {activeEditableSegmentIndex === null
-                ? '请选择 000/001... 分段后编辑描述'
-                : `当前分段：${activeEditableSegmentIndex.toString().padStart(3, '0')}`}
-            </span>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => void handleAiSmartDescription()}
-              disabled={activeEditableSegmentIndex === null || isSaving || isAiGenerating}
-              className="h-7 shrink-0 px-2.5 text-xs font-medium text-white border-0 shadow-md bg-gradient-to-r from-violet-500 via-fuchsia-500 to-amber-400 hover:from-violet-400 hover:via-fuchsia-400 hover:to-amber-300 disabled:opacity-50 disabled:from-zinc-600 disabled:via-zinc-600 disabled:to-zinc-600"
-            >
-              <Sparkles className="h-3.5 w-3.5 mr-1" />
-              {isAiGenerating ? '生成中…' : 'AI智能描述'}
-            </Button>
-          </div>
-          <textarea
-            value={activeEditableSegmentIndex === null ? '' : (draftDescriptions[activeEditableSegmentIndex] || '')}
-            onChange={(e) => {
-              if (activeEditableSegmentIndex === null) return;
-              const next = [...draftDescriptions];
-              next[activeEditableSegmentIndex] = e.target.value;
-              setDraftDescriptions(next);
-            }}
-            placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : '请输入当前分段描述'}
-            disabled={activeEditableSegmentIndex === null}
-            className="w-full min-h-[64px] rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-y disabled:opacity-60"
-          />
-          <div className="pt-2 border-t border-border/20 space-y-2">
-            {activeEditableSegmentIndex === null ? (
-              <div className="text-xs text-muted-foreground">请选择一个分段后编辑回答</div>
-            ) : (
-              (draftQuestionsAnswers[activeEditableSegmentIndex] || []).map((qa, qaIdx) => (
-                <div key={`qa-${activeEditableSegmentIndex}-${qaIdx}`} className="space-y-1 rounded-md border border-border/30 p-2 bg-background/20">
-                  {(() => {
-                    const optionPool = [
-                      ...(record.eventTypeQuestions || []),
-                      qa.question,
-                    ].map((item) => (item || '').trim()).filter(Boolean);
-                    const options = Array.from(new Set(optionPool));
-                    return (
-                      <>
-                        <div className="rounded-md border border-border/40 bg-background/30 px-2 py-1.5 text-xs leading-5 break-words whitespace-normal">
-                          {qa.question || '未选择问题'}
-                        </div>
-                        <Select
-                          value={qa.question}
-                          onValueChange={(value) => {
-                            if (activeEditableSegmentIndex === null) return;
-                            const currentSegment = draftQuestionsAnswers[activeEditableSegmentIndex] || [];
-                            const otherQuestion = currentSegment[qaIdx === 0 ? 1 : 0]?.question || '';
-                            if (otherQuestion && otherQuestion === value) {
-                              window.alert('同一分段的两个问题不能相同，请选择其他问题。');
-                              return;
-                            }
-                            const next = draftQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
-                            if (!next[activeEditableSegmentIndex]) return;
-                            next[activeEditableSegmentIndex][qaIdx] = {
-                              ...next[activeEditableSegmentIndex][qaIdx],
-                              question: value,
-                            };
-                            setDraftQuestionsAnswers(next);
-                          }}
-                        >
-                          <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
-                            <span className="text-xs text-muted-foreground">选择问题</span>
-                          </SelectTrigger>
-                          <SelectContent>
-                            {options.map((question) => (
-                              <SelectItem
-                                key={`${record.uuid}-qa-${qaIdx}-${question}`}
-                                value={question}
-                                className="whitespace-normal break-words leading-5 py-2"
-                              >
-                                {question}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </>
-                    );
-                  })()}
-                  <textarea
-                    value={qa.answer}
-                    onChange={(e) => {
-                      if (activeEditableSegmentIndex === null) return;
-                      const next = draftQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
-                      if (!next[activeEditableSegmentIndex]) return;
-                      next[activeEditableSegmentIndex][qaIdx] = {
-                        ...next[activeEditableSegmentIndex][qaIdx],
-                        answer: e.target.value,
-                      };
-                      setDraftQuestionsAnswers(next);
-                    }}
-                    className="w-full min-h-[64px] rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-y"
-                    placeholder="请输入回答"
-                  />
-                </div>
-              ))
-            )}
-            <div className="text-xs text-muted-foreground pt-1">
-              当前状态：{activeEditableSegmentIndex === null ? '-' : (draftStatuses[activeEditableSegmentIndex] || '待定')}
-            </div>
-          </div>
-          <div className="pt-1">
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-              {(['待定', '正样本', '负样本'] as const).map((status) => (
-                <Button
-                  key={`quick-mark-${status}`}
-                  type="button"
-                  size="sm"
-                  onClick={() => setQuickMarkStatus(status)}
-                  className={
-                    quickMarkStatus === status
-                      ? `h-8 px-3 text-xs border ${
-                        status === '正样本'
-                          ? 'bg-emerald-600/90 hover:bg-emerald-500 text-white border-emerald-400'
-                          : status === '负样本'
-                            ? 'bg-rose-600/90 hover:bg-rose-500 text-white border-rose-400'
-                            : 'bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400'
-                      }`
-                      : `h-8 px-3 text-xs border ${
-                        status === '正样本'
-                          ? 'bg-emerald-900/20 hover:bg-emerald-800/35 text-emerald-200 border-emerald-700/60'
-                          : status === '负样本'
-                            ? 'bg-rose-900/20 hover:bg-rose-800/35 text-rose-200 border-rose-700/60'
-                            : 'bg-amber-900/20 hover:bg-amber-800/35 text-amber-200 border-amber-700/60'
-                      }`
-                  }
-                >
-                  {status}
-                </Button>
-              ))}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                onClick={selectAllSegmentsForQuickMark}
-                disabled={isSaving || quickMarkStatus === null || segmentLineCount <= 0}
-                className="h-8 px-3 text-xs border border-sky-500/60 bg-sky-600/85 hover:bg-sky-500 text-white disabled:opacity-50"
-              >
-                全选
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={applyQuickMarkBatch}
-                disabled={isSaving || quickMarkStatus === null || quickMarkSelections.length === 0}
-                className="h-8 px-3 text-xs border border-blue-500/60 bg-blue-600/90 hover:bg-blue-500 text-white disabled:opacity-50"
-              >
-                {isSaving ? '保存中...' : '保存'}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => {
-                  setQuickMarkSelections([]);
-                  setQuickMarkStatus(null);
-                }}
-                disabled={isSaving || quickMarkStatus === null}
-                className="h-8 px-3 text-xs border border-border/50 bg-background/40 hover:bg-background/60 text-foreground disabled:opacity-50"
-              >
-                取消
-              </Button>
-              </div>
-            </div>
-          </div>
-          <div className="text-xs text-muted-foreground">
-            快速标注：{quickMarkStatus ? `状态=${quickMarkStatus}，已选${quickMarkSelections.length}个` : '请选择一个目标状态'}
-          </div>
-          <div className="pt-2 border-t border-border/20">
-            <span className="text-xs text-muted-foreground">事件类型</span>
-            <p className="text-sm font-medium mt-1 break-all">{record.eventTypeName}</p>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-2 text-sm">
-        {Array.from({ length: segmentLineCount }).map((_, idx) => (
-          <div key={`${record.uuid}-edit-row-${idx}`} className="grid grid-cols-[110px_70px_1fr] items-center gap-2">
-            <div className="h-8 rounded-md border border-border/40 bg-background/30 px-2 text-xs font-mono text-foreground/95 flex items-center">
-              {draftStatuses[idx] || '待定'}
-            </div>
-            <div className="text-xs font-mono text-foreground/95 text-center">{idx.toString().padStart(3, '0')}</div>
-            <div className="h-8 rounded-md border border-border/40 bg-background/30 px-3 text-xs font-mono flex items-center text-foreground/95 truncate">
-              {draftDescriptions[idx] || `分段 ${idx.toString().padStart(3, '0')} 描述`}
-            </div>
-          </div>
-        ))}
-        <div>
-          <span className="text-xs text-muted-foreground">文件路径</span>
-          <p className="mt-1 font-mono break-all">{activeStreamPath}</p>
-        </div>
-      </div>
-    </div>
-  );
-});
 
 function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
+  const router = useRouter();
   const [selectedProjectCategories, setSelectedProjectCategories] = useState<string[]>([]);
   const [selectedEventTypes, setSelectedEventTypes] = useState<string[]>([]);
   const [videoSourceFilter, setVideoSourceFilter] = useState('');
@@ -734,8 +98,6 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const [isMetaLoading, setIsMetaLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
   const [jumpPageInput, setJumpPageInput] = useState('1');
-  const [selectedRecord, setSelectedRecord] = useState<EventSearchResult | null>(null);
-  const [hasUnsavedSegmentEdits, setHasUnsavedSegmentEdits] = useState(false);
   const [deletingEventKey, setDeletingEventKey] = useState<string>('');
   const startDateInputRef = useRef<HTMLInputElement | null>(null);
   const endDateInputRef = useRef<HTMLInputElement | null>(null);
@@ -758,6 +120,50 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     const target = clampPage(parseInt(raw, 10));
     if (Number.isNaN(target)) return;
     fetchResults(target);
+  };
+
+  const applySessionState = (saved: EventQuerySessionState) => {
+    setSelectedProjectCategories(saved.selectedProjectCategories);
+    setSelectedEventTypes(saved.selectedEventTypes);
+    setVideoSourceFilter(saved.videoSourceFilter);
+    setProcessingStatus(saved.processingStatus);
+    setQuestionAnswerStatus(saved.questionAnswerStatus);
+    setDescriptionStatus(saved.descriptionStatus);
+    setSelectedRange(saved.selectedRange);
+    setSelectedAssignedRangeId(saved.selectedAssignedRangeId);
+    setStartDate(saved.startDate);
+    setEndDate(saved.endDate);
+    setPage(saved.page);
+    setPageSize(saved.pageSize);
+    setTotal(saved.total);
+    setViewMode(saved.viewMode);
+  };
+
+  const openEventDetail = (item: EventSearchResult) => {
+    const index = pageData.findIndex((row) => row.uuid === item.uuid);
+    const { queryStartDate, queryEndDate } = resolveQueryDates();
+    cacheEventQueryPageResults(page, pageSize, pageData);
+    saveEventQuerySession({
+      selectedProjectCategories,
+      selectedEventTypes,
+      videoSourceFilter,
+      processingStatus,
+      questionAnswerStatus,
+      descriptionStatus,
+      selectedRange,
+      selectedAssignedRangeId,
+      queryStartDate,
+      queryEndDate,
+      startDate,
+      endDate,
+      page,
+      pageSize,
+      total,
+      results: slimEventSearchResults(pageData),
+      viewMode,
+      currentIndex: index >= 0 ? index : 0,
+    });
+    router.push(`/event-query/detail/${encodeURIComponent(item.uuid)}?idx=${index >= 0 ? index : 0}`);
   };
 
   const handleQuickRangeSelect = (range: string) => {
@@ -827,7 +233,6 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     setSelectedAssignedRangeId('');
     setStartDate('');
     setEndDate('');
-    setSelectedRecord(null);
     setPage(1);
   };
 
@@ -841,37 +246,45 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     setPage(1);
   };
 
-  const fetchResults = async (targetPage: number = page) => {
+  const resolveQueryDates = (override?: Partial<EventQuerySessionState>) => {
+    const rangeId = override?.selectedAssignedRangeId ?? selectedAssignedRangeId;
+    const range = assignedRanges.find((item) => String(item.id) === rangeId);
+    const start = override?.startDate ?? startDate;
+    const end = override?.endDate ?? endDate;
+    if (isReviewer && range) {
+      return {
+        queryStartDate: range.startTime.replace('T', ' '),
+        queryEndDate: range.endTime.replace('T', ' '),
+      };
+    }
+    return {
+      queryStartDate: start ? `${start} 00:00:00.000000` : undefined,
+      queryEndDate: end ? `${end} 23:59:59.999999` : undefined,
+    };
+  };
+
+  const fetchResults = async (targetPage: number = page, sessionOverride?: EventQuerySessionState) => {
     setIsLoading(true);
     try {
-      const queryStartDate = isReviewer && selectedAssignedRange
-        ? selectedAssignedRange.startTime.replace('T', ' ')
-        : startDate ? `${startDate} 00:00:00.000000` : undefined;
-      const queryEndDate = isReviewer && selectedAssignedRange
-        ? selectedAssignedRange.endTime.replace('T', ' ')
-        : endDate ? `${endDate} 23:59:59.999999` : undefined;
+      const src = sessionOverride;
+      const { queryStartDate, queryEndDate } = resolveQueryDates(src);
       const response = await searchEvents({
-        projectIds: selectedProjectCategories,
-        eventTypeCodes: selectedEventTypes,
-        sourceName: videoSourceFilter.trim() || undefined,
-        processingStatus,
-        questionAnswerStatus,
-        descriptionStatus,
+        projectIds: src?.selectedProjectCategories ?? selectedProjectCategories,
+        eventTypeCodes: src?.selectedEventTypes ?? selectedEventTypes,
+        sourceName: (src?.videoSourceFilter ?? videoSourceFilter).trim() || undefined,
+        processingStatus: src?.processingStatus ?? processingStatus,
+        questionAnswerStatus: src?.questionAnswerStatus ?? questionAnswerStatus,
+        descriptionStatus: src?.descriptionStatus ?? descriptionStatus,
         startDate: queryStartDate,
         endDate: queryEndDate,
         page: targetPage,
-        pageSize,
+        pageSize: src?.pageSize ?? pageSize,
       });
 
       if (response.success) {
         setResults(response.results);
         setTotal(response.total);
         setPage(targetPage);
-        setSelectedRecord((prev) => {
-          if (!prev) return null;
-          const matched = response.results.find((item) => item.uuid === prev.uuid);
-          return matched ?? null;
-        });
       } else {
         setResults([]);
         setTotal(0);
@@ -887,6 +300,10 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
 
   useEffect(() => {
     if (!currentUser) return;
+
+    const shouldRestore = consumeEventQueryRestore();
+    const saved = loadEventQuerySession();
+
     const initPage = async () => {
       setIsMetaLoading(true);
       try {
@@ -898,16 +315,23 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
       } finally {
         setIsMetaLoading(false);
       }
+
+      if (shouldRestore && saved) {
+        applySessionState(saved);
+        await fetchResults(saved.page, saved);
+        return;
+      }
+
+      if (isReviewer && assignedRanges.length > 0 && !selectedAssignedRangeId) {
+        const firstRange = assignedRanges[0];
+        setSelectedAssignedRangeId(String(firstRange.id));
+        setSelectedRange('assigned');
+        setStartDate(firstRange.startTime.slice(0, 10));
+        setEndDate(firstRange.endTime.slice(0, 10));
+      }
+
       await fetchResults(1);
     };
-
-    if (isReviewer && assignedRanges.length > 0 && !selectedAssignedRangeId) {
-      const firstRange = assignedRanges[0];
-      setSelectedAssignedRangeId(String(firstRange.id));
-      setSelectedRange('assigned');
-      setStartDate(firstRange.startTime.slice(0, 10));
-      setEndDate(firstRange.endTime.slice(0, 10));
-    }
 
     initPage();
   }, [currentUser?.id]);
@@ -920,7 +344,9 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     <div className="flex flex-wrap gap-1">
       <Badge variant={item.statusReviewDone ? 'default' : 'secondary'} className="text-[10px]">样本</Badge>
       <Badge variant={item.qaReviewDone ? 'default' : 'secondary'} className="text-[10px]">问答</Badge>
-      <Badge variant={item.descriptionReviewDone ? 'default' : 'secondary'} className="text-[10px]">描述</Badge>
+      <Badge variant={item.aiDescriptionDone ?? item.descriptionReviewDone ? 'default' : 'secondary'} className="text-[10px]">AI</Badge>
+      <Badge variant={item.reviewDescriptionDone ? 'default' : 'secondary'} className="text-[10px]">审核</Badge>
+      <Badge variant={item.englishDescriptionDone ? 'default' : 'secondary'} className="text-[10px]">英文</Badge>
     </div>
   );
 
@@ -930,80 +356,8 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const projectCategoryLabel = selectedProjectCategories.length > 0
     ? projectOptions.filter((item) => selectedProjectCategories.includes(item.code)).map((item) => item.name).join(' / ')
     : '请选择项目分类（可多选）';
-  const getSegmentDescriptionText = (item: EventSearchResult) => {
-    const descriptions = item.segmentDescriptions || [];
-    const nonEmpty = descriptions.map((d) => (d || '').trim()).filter(Boolean);
-    return nonEmpty.join('\n');
-  };
+  const getSegmentDescriptionText = (item: EventSearchResult) => getEventDescriptionPreview(item);
   const getPreviewImageUrl = (item: EventSearchResult) => item.imageBigUrl || '';
-  const selectedRecordIndex = selectedRecord ? pageData.findIndex((item) => item.uuid === selectedRecord.uuid) : -1;
-  const hasPrevRecord = selectedRecordIndex > 0;
-  const hasNextRecord = selectedRecordIndex >= 0 && selectedRecordIndex < pageData.length - 1;
-
-  const handlePreviewPrev = () => {
-    if (!hasPrevRecord || selectedRecordIndex < 1) return;
-    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态/问答有未保存修改，确认切换到上一条吗？')) return;
-    setSelectedRecord(pageData[selectedRecordIndex - 1]);
-  };
-
-  const handlePreviewNext = () => {
-    if (!hasNextRecord || selectedRecordIndex < 0) return;
-    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态/问答有未保存修改，确认切换到下一条吗？')) return;
-    setSelectedRecord(pageData[selectedRecordIndex + 1]);
-  };
-
-  const handleClosePreview = () => {
-    if (hasUnsavedSegmentEdits && !window.confirm('当前分段描述/状态/问答有未保存修改，确认关闭预览吗？')) return;
-    setSelectedRecord(null);
-    setHasUnsavedSegmentEdits(false);
-  };
-
-  const handleSegmentAnnotationsSaved = (payload: {
-    eventId: string;
-    projectId: string;
-    eventTypeCode: string;
-    segmentDescriptions: string[];
-    segmentStatuses: string[];
-    questionsAnswersList: Array<Array<{ question: string; answer: string }>>;
-  }) => {
-    setResults((prev) => prev.map((item) => {
-      if (
-        item.eventId === payload.eventId
-        && item.projectId === payload.projectId
-        && item.eventTypeCode === payload.eventTypeCode
-      ) {
-        return {
-          ...item,
-          segmentDescriptions: payload.segmentDescriptions,
-          segmentStatuses: payload.segmentStatuses,
-          questionsAnswersList: payload.questionsAnswersList,
-          statusReviewDone: payload.segmentStatuses.every((status) => status === '正样本' || status === '负样本'),
-          qaReviewDone: payload.questionsAnswersList.every((items) => items.length > 0 && items.every((qa) => qa.question.trim() && qa.answer.trim())),
-          descriptionReviewDone: payload.segmentDescriptions.every((description) => description.trim()),
-        };
-      }
-      return item;
-    }));
-    setSelectedRecord((prev) => {
-      if (!prev) return prev;
-      if (
-        prev.eventId === payload.eventId
-        && prev.projectId === payload.projectId
-        && prev.eventTypeCode === payload.eventTypeCode
-      ) {
-        return {
-          ...prev,
-          segmentDescriptions: payload.segmentDescriptions,
-          segmentStatuses: payload.segmentStatuses,
-          questionsAnswersList: payload.questionsAnswersList,
-          statusReviewDone: payload.segmentStatuses.every((status) => status === '正样本' || status === '负样本'),
-          qaReviewDone: payload.questionsAnswersList.every((items) => items.length > 0 && items.every((qa) => qa.question.trim() && qa.answer.trim())),
-          descriptionReviewDone: payload.segmentDescriptions.every((description) => description.trim()),
-        };
-      }
-      return prev;
-    });
-  };
 
   const handleDeleteEvent = async (item: EventSearchResult) => {
     const eventKey = `${item.eventId}|${item.projectId}|${item.eventTypeCode}`;
@@ -1027,10 +381,6 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || '删除失败');
-      }
-      if (selectedRecord?.uuid === item.uuid) {
-        setSelectedRecord(null);
-        setHasUnsavedSegmentEdits(false);
       }
       await fetchResults(safePage);
     } catch (error: any) {
@@ -1349,7 +699,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
                       <TableRow
                         key={item.uuid}
                         className="hover:bg-primary/5 transition-colors border-b border-border/10 cursor-pointer group"
-                        onClick={() => setSelectedRecord(item)}
+                        onClick={() => openEventDetail(item)}
                       >
                         <TableCell className="pl-6">
                           <div className="relative h-12 w-20 rounded shadow-md overflow-hidden bg-black/40 flex items-center justify-center">
@@ -1419,7 +769,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
                       <div
                         key={item.uuid}
                         className="group relative cursor-pointer rounded-xl border border-border/40 bg-background/60 shadow-sm hover:shadow-lg hover:border-primary/40 transition-all overflow-hidden"
-                        onClick={() => setSelectedRecord(item)}
+                        onClick={() => openEventDetail(item)}
                       >
                         <div className="relative aspect-video w-full bg-black/50 flex items-center justify-center">
                           {getPreviewImageUrl(item) ? (
@@ -1498,68 +848,6 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
             placement="bottom"
           />
         </Card>
-
-        {selectedRecord && (
-          <div
-            className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
-            onClick={handleClosePreview}
-          >
-            <div
-              className="bg-background rounded-lg w-[94vw] max-w-[1500px] max-h-[90vh] overflow-auto"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="sticky top-0 bg-background border-b p-4 flex justify-between items-center">
-                <h2 className="text-xl font-bold">事件视频预览</h2>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handlePreviewPrev}
-                    disabled={!hasPrevRecord}
-                    className="h-8 text-xs border-border/40"
-                  >
-                    上一页
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handlePreviewNext}
-                    disabled={!hasNextRecord}
-                    className="h-8 text-xs border-border/40"
-                  >
-                    下一页
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={handleClosePreview}>
-                    <X className="h-5 w-5" />
-                  </Button>
-                </div>
-              </div>
-              <div className="p-6 space-y-6">
-                <EventStreamPlayer
-                  record={selectedRecord}
-                  onDirtyChange={setHasUnsavedSegmentEdits}
-                  onSaved={handleSegmentAnnotationsSaved}
-                />
-                <div className="grid grid-cols-2 gap-4 pt-2 border-t border-border/20">
-                  <div>
-                    <span className="text-xs text-muted-foreground">项目分类</span>
-                    <p className="text-sm font-medium mt-1 break-all">{selectedRecord.projectName}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs text-muted-foreground">视频源</span>
-                    <p className="text-sm font-medium mt-1 break-all">{selectedRecord.sourceName}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs text-muted-foreground">事件时间</span>
-                    <p className="text-sm font-medium mt-1 break-all">
-                      {format(new Date(selectedRecord.startTime), 'yyyy-MM-dd HH:mm:ss')}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

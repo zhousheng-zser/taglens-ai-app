@@ -255,6 +255,8 @@ def init_event_database() -> None:
                 segment_count INT NULL DEFAULT 0,
                 segment_paths_json LONGTEXT NULL,
                 segment_descriptions_json LONGTEXT NULL,
+                segment_review_descriptions_json LONGTEXT NULL,
+                segment_descriptions_en_json LONGTEXT NULL,
                 segment_statuses_json LONGTEXT NULL,
                 questions_answers_list LONGTEXT NULL,
                 PRIMARY KEY (event_id, project_id, event_type_corrected),
@@ -270,6 +272,8 @@ def init_event_database() -> None:
         _ensure_column(cursor, "event_records", "segment_count", "INT NULL DEFAULT 0")
         _ensure_column(cursor, "event_records", "segment_paths_json", "LONGTEXT NULL")
         _ensure_column(cursor, "event_records", "segment_descriptions_json", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_records", "segment_review_descriptions_json", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_records", "segment_descriptions_en_json", "LONGTEXT NULL")
         _ensure_column(cursor, "event_records", "segment_statuses_json", "LONGTEXT NULL")
         _ensure_column(cursor, "event_type_dict", "questions_list", "LONGTEXT NULL")
         _ensure_column(cursor, "event_records", "questions_answers_list", "LONGTEXT NULL")
@@ -293,6 +297,20 @@ def init_event_database() -> None:
             UPDATE event_records
             SET segment_descriptions_json = '[]'
             WHERE segment_descriptions_json IS NULL OR TRIM(segment_descriptions_json) = ''
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE event_records
+            SET segment_review_descriptions_json = '[]'
+            WHERE segment_review_descriptions_json IS NULL OR TRIM(segment_review_descriptions_json) = ''
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE event_records
+            SET segment_descriptions_en_json = '[]'
+            WHERE segment_descriptions_en_json IS NULL OR TRIM(segment_descriptions_en_json) = ''
             """
         )
         cursor.execute(
@@ -558,6 +576,26 @@ def _parse_json_string_list(raw_value: Optional[str]) -> List[str]:
         return []
 
 
+def _parse_segment_text_list(raw_value: Optional[str]) -> List[str]:
+    """解析分段文本数组，保留空字符串以维持与分段索引一一对应。"""
+    if not raw_value:
+        return []
+    try:
+        parsed = json.loads(raw_value)
+        if isinstance(parsed, list):
+            return [str(item) if item is not None else "" for item in parsed]
+        return []
+    except Exception:
+        return []
+
+
+def _pad_string_list(items: List[str], length: int, fill: str = "") -> List[str]:
+    result = list(items[:length])
+    while len(result) < length:
+        result.append(fill)
+    return result
+
+
 def _classify_question_answer_status(
     questions_answers_list: List[List[Dict[str, str]]],
     segment_count: int,
@@ -737,6 +775,8 @@ def search_events(
                     segment_count,
                     segment_paths_json,
                     segment_descriptions_json,
+                    segment_review_descriptions_json,
+                    segment_descriptions_en_json,
                     segment_statuses_json,
                     questions_answers_list,
                     created_at
@@ -763,6 +803,8 @@ def search_events(
                     segment_count,
                     segment_paths_json,
                     segment_descriptions_json,
+                    segment_review_descriptions_json,
+                    segment_descriptions_en_json,
                     segment_statuses_json,
                     questions_answers_list,
                     created_at
@@ -777,7 +819,9 @@ def search_events(
     for row in rows:
         normalized_video_path = _normalize_video_object_path(row["video_path"])
         segment_paths = _parse_json_string_list(row["segment_paths_json"])
-        segment_descriptions = _parse_json_string_list(row["segment_descriptions_json"])
+        segment_descriptions = _parse_segment_text_list(row["segment_descriptions_json"])
+        segment_review_descriptions = _parse_segment_text_list(row["segment_review_descriptions_json"])
+        segment_descriptions_en = _parse_segment_text_list(row["segment_descriptions_en_json"])
         segment_statuses = _parse_json_string_list(row["segment_statuses_json"])
         normalized_segment_paths = [
             _normalize_video_object_path(item) for item in segment_paths if _normalize_video_object_path(item)
@@ -785,6 +829,11 @@ def search_events(
         segment_urls = [_build_video_url(item) for item in normalized_segment_paths]
         image_variants = _build_image_variant_urls(row["image_paths"])
         segment_count = int(row["segment_count"] or 0)
+        align_len = max(segment_count, len(normalized_segment_paths), len(segment_paths))
+        segment_descriptions = _pad_string_list(segment_descriptions, align_len)
+        segment_review_descriptions = _pad_string_list(segment_review_descriptions, align_len)
+        segment_descriptions_en = _pad_string_list(segment_descriptions_en, align_len)
+        segment_statuses = _pad_string_list(segment_statuses, align_len, "待定")
         questions_answers_list = _parse_questions_answers_2d(
             row["questions_answers_list"],
             segment_count=segment_count,
@@ -827,6 +876,8 @@ def search_events(
                 "segmentPaths": normalized_segment_paths,
                 "segmentUrls": segment_urls,
                 "segmentDescriptions": segment_descriptions,
+                "segmentReviewDescriptions": segment_review_descriptions,
+                "segmentDescriptionsEn": segment_descriptions_en,
                 "segmentStatuses": segment_statuses,
                 "questionsAnswersList": questions_answers_list,
                 "eventTypeQuestions": get_event_type_questions_by_code(row["event_type_corrected"] or ""),
@@ -950,7 +1001,7 @@ def get_pending_segments_for_ai_description(
             continue
 
         segment_count = int(row["segment_count"] or 0) or len(segment_paths)
-        segment_descriptions = _parse_json_string_list(row["segment_descriptions_json"])
+        segment_descriptions = _parse_segment_text_list(row["segment_descriptions_json"])
         while len(segment_descriptions) < len(segment_paths):
             segment_descriptions.append("")
 
@@ -997,6 +1048,8 @@ def get_event_segment_annotation_snapshot(
             SELECT
                 segment_paths_json,
                 segment_descriptions_json,
+                segment_review_descriptions_json,
+                segment_descriptions_en_json,
                 segment_statuses_json,
                 questions_answers_list,
                 segment_count
@@ -1014,8 +1067,10 @@ def get_event_segment_annotation_snapshot(
         return None
 
     segment_count = int(row["segment_count"] or 0) or len(segment_paths)
-    segment_descriptions = _parse_json_string_list(row["segment_descriptions_json"])
-    segment_statuses = _parse_json_string_list(row["segment_statuses_json"])
+    segment_descriptions = _parse_segment_text_list(row["segment_descriptions_json"])
+    segment_review_descriptions = _parse_segment_text_list(row["segment_review_descriptions_json"])
+    segment_descriptions_en = _parse_segment_text_list(row["segment_descriptions_en_json"])
+    segment_statuses = _parse_segment_text_list(row["segment_statuses_json"])
     questions_answers_list = _parse_questions_answers_2d(
         row["questions_answers_list"],
         segment_count=segment_count,
@@ -1025,6 +1080,10 @@ def get_event_segment_annotation_snapshot(
 
     while len(segment_descriptions) < len(segment_paths):
         segment_descriptions.append("")
+    while len(segment_review_descriptions) < len(segment_paths):
+        segment_review_descriptions.append("")
+    while len(segment_descriptions_en) < len(segment_paths):
+        segment_descriptions_en.append("")
     while len(segment_statuses) < len(segment_paths):
         segment_statuses.append("待定")
     while len(questions_answers_list) < len(segment_paths):
@@ -1033,6 +1092,8 @@ def get_event_segment_annotation_snapshot(
     return {
         "segment_paths": segment_paths,
         "segment_descriptions": segment_descriptions,
+        "segment_review_descriptions": segment_review_descriptions,
+        "segment_descriptions_en": segment_descriptions_en,
         "segment_statuses": segment_statuses,
         "questions_answers_list": questions_answers_list,
     }
@@ -1051,6 +1112,8 @@ def update_event_segment_description_at_index(
 
     idx = int(segment_index)
     descriptions = list(snapshot["segment_descriptions"])
+    review_descriptions = list(snapshot["segment_review_descriptions"])
+    descriptions_en = list(snapshot["segment_descriptions_en"])
     statuses = list(snapshot["segment_statuses"])
     qa_list = list(snapshot["questions_answers_list"])
 
@@ -1063,6 +1126,8 @@ def update_event_segment_description_at_index(
         project_id=project_id,
         event_type_corrected=event_type_corrected,
         segment_descriptions=descriptions,
+        segment_review_descriptions=review_descriptions,
+        segment_descriptions_en=descriptions_en,
         segment_statuses=statuses,
         questions_answers_list=qa_list,
     )
@@ -1078,8 +1143,12 @@ def update_event_segmentation_result(
 ) -> None:
     if len(segment_paths) != len(segment_descriptions) or len(segment_paths) != len(segment_statuses):
         raise ValueError("分块字段长度不一致")
+    segment_review_descriptions = ["" for _ in segment_paths]
+    segment_descriptions_en = ["" for _ in segment_paths]
     payload_paths = json.dumps(segment_paths, ensure_ascii=False)
     payload_descriptions = json.dumps(segment_descriptions, ensure_ascii=False)
+    payload_review_descriptions = json.dumps(segment_review_descriptions, ensure_ascii=False)
+    payload_descriptions_en = json.dumps(segment_descriptions_en, ensure_ascii=False)
     payload_statuses = json.dumps(segment_statuses, ensure_ascii=False)
     payload_questions_answers = json.dumps([[] for _ in range(len(segment_paths))], ensure_ascii=False)
     with get_event_db_connection() as conn:
@@ -1091,6 +1160,8 @@ def update_event_segmentation_result(
                 segment_count = %s,
                 segment_paths_json = %s,
                 segment_descriptions_json = %s,
+                segment_review_descriptions_json = %s,
+                segment_descriptions_en_json = %s,
                 segment_statuses_json = %s,
                 questions_answers_list = %s
             WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
@@ -1099,6 +1170,8 @@ def update_event_segmentation_result(
                 len(segment_paths),
                 payload_paths,
                 payload_descriptions,
+                payload_review_descriptions,
+                payload_descriptions_en,
                 payload_statuses,
                 payload_questions_answers,
                 event_id,
@@ -1113,13 +1186,23 @@ def update_event_segment_annotations(
     project_id: str,
     event_type_corrected: str,
     segment_descriptions: List[str],
+    segment_review_descriptions: List[str],
+    segment_descriptions_en: List[str],
     segment_statuses: List[str],
     questions_answers_list: Optional[List[List[Dict[str, str]]]] = None,
 ) -> None:
-    if len(segment_descriptions) != len(segment_statuses):
-        raise ValueError("分段描述和分段状态长度不一致")
+    lengths = {
+        len(segment_descriptions),
+        len(segment_review_descriptions),
+        len(segment_descriptions_en),
+        len(segment_statuses),
+    }
+    if len(lengths) != 1:
+        raise ValueError("三套分段描述与分段状态长度不一致")
 
     payload_descriptions = json.dumps(segment_descriptions, ensure_ascii=False)
+    payload_review_descriptions = json.dumps(segment_review_descriptions, ensure_ascii=False)
+    payload_descriptions_en = json.dumps(segment_descriptions_en, ensure_ascii=False)
     payload_statuses = json.dumps(segment_statuses, ensure_ascii=False)
     payload_questions_answers = json.dumps(
         questions_answers_list if questions_answers_list is not None else [],
@@ -1132,12 +1215,16 @@ def update_event_segment_annotations(
             UPDATE event_records
             SET
                 segment_descriptions_json = %s,
+                segment_review_descriptions_json = %s,
+                segment_descriptions_en_json = %s,
                 segment_statuses_json = %s,
                 questions_answers_list = %s
             WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             """,
             (
                 payload_descriptions,
+                payload_review_descriptions,
+                payload_descriptions_en,
                 payload_statuses,
                 payload_questions_answers,
                 event_id,

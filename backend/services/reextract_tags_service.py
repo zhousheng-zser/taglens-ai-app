@@ -22,6 +22,8 @@ REEXTRACT_INFER_HARD_TIMEOUT_SEC = float(
     os.getenv("REEXTRACT_INFER_HARD_TIMEOUT_SEC", str(LLM_GATEWAY_HARD_TIMEOUT_SEC + 30))
 )
 REEXTRACT_STALL_ABORT_SEC = float(os.getenv("REEXTRACT_STALL_ABORT_SEC", "600"))
+REEXTRACT_STALL_HEARTBEAT_SEC = float(os.getenv("REEXTRACT_STALL_HEARTBEAT_SEC", "30"))
+REEXTRACT_DB_HARD_TIMEOUT_SEC = float(os.getenv("REEXTRACT_DB_HARD_TIMEOUT_SEC", "120"))
 
 LogCallback = Callable[[str, str], None]
 
@@ -234,9 +236,19 @@ def run_reextract_batch(
                 raise ReextractFatalNetworkError("模型调用未返回结果，终止任务。")
 
             log("  -> 正在更新数据库...", "progress")
-            update_database_with_analysis(
-                image_id, analysis_result, minio_client, log=log
-            )
+            try:
+                call_with_hard_timeout(
+                    REEXTRACT_DB_HARD_TIMEOUT_SEC,
+                    update_database_with_analysis,
+                    image_id,
+                    analysis_result,
+                    minio_client,
+                    log,
+                )
+            except HardTimeoutError as exc:
+                raise TimeoutError(
+                    f"数据库更新硬超时 ({REEXTRACT_DB_HARD_TIMEOUT_SEC:.0f}s): {exc}"
+                ) from exc
             return "success"
         except LLMGatewayError as exc:
             log(f"  -> 失败: {exc.message}", "error")
@@ -249,99 +261,114 @@ def run_reextract_batch(
     fail = 0
     skipped = 0
     last_progress_at = time.monotonic()
+    last_heartbeat_at = time.monotonic()
+    stall_aborted = False
 
     def touch_progress() -> None:
-        nonlocal last_progress_at
+        nonlocal last_progress_at, last_heartbeat_at
         last_progress_at = time.monotonic()
+        last_heartbeat_at = time.monotonic()
 
     touch_progress()
 
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     try:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            if stop_requested():
-                log("检测到已请求停止：不再提交新图片，等待当前任务结束。", "warning")
+        if stop_requested():
+            log("检测到已请求停止：不再提交新图片，等待当前任务结束。", "warning")
 
-            futures: dict = {}
-            next_idx = 0
+        futures: dict = {}
+        next_idx = 0
 
-            def submit_more() -> None:
-                nonlocal next_idx
-                while next_idx < total and len(futures) < MAX_WORKERS and not stop_requested():
-                    futures[executor.submit(process_one, next_idx, candidates[next_idx])] = (
-                        next_idx
-                    )
-                    next_idx += 1
-
-            submit_more()
-
-            while futures:
-                done, _pending = wait(
-                    list(futures.keys()),
-                    timeout=5.0,
-                    return_when=FIRST_COMPLETED,
+        def submit_more() -> None:
+            nonlocal next_idx
+            while next_idx < total and len(futures) < MAX_WORKERS and not stop_requested():
+                futures[executor.submit(process_one, next_idx, candidates[next_idx])] = (
+                    next_idx
                 )
-                if not done:
-                    stalled_for = time.monotonic() - last_progress_at
-                    if stalled_for >= REEXTRACT_STALL_ABORT_SEC:
-                        pending_count = sum(1 for f in futures if not f.done())
+                next_idx += 1
+
+        submit_more()
+
+        while futures:
+            done, _pending = wait(
+                list(futures.keys()),
+                timeout=5.0,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                stalled_for = time.monotonic() - last_progress_at
+                if time.monotonic() - last_heartbeat_at >= REEXTRACT_STALL_HEARTBEAT_SEC:
+                    pending_count = sum(1 for f in futures if not f.done())
+                    log(
+                        f"仍在处理… 距上次完成 {stalled_for:.0f}s，"
+                        f"进行中 {pending_count} 路（MiMo/数据库/BGE 向量化）",
+                        "progress",
+                    )
+                    last_heartbeat_at = time.monotonic()
+                if stalled_for >= REEXTRACT_STALL_ABORT_SEC:
+                    pending_count = sum(1 for f in futures if not f.done())
+                    stall_aborted = True
+                    log(
+                        f"\n任务中止: 已连续 {stalled_for:.0f}s 无任何图片完成 "
+                        f"（阈值 {REEXTRACT_STALL_ABORT_SEC:.0f}s），"
+                        f"仍有 {pending_count} 个并发任务可能卡在 MiMo/网关/数据库。"
+                        "请重启 LLM 网关后重新运行本任务。",
+                        "error",
+                    )
+                    for pending in futures:
+                        if not pending.done():
+                            pending.cancel()
+                    raise ReextractStallError(
+                        f"无进展超过 {REEXTRACT_STALL_ABORT_SEC:.0f}s"
+                    )
+                continue
+
+            for future in done:
+                futures.pop(future, None)
+                try:
+                    status = future.result()
+                    touch_progress()
+                    if status == "success":
+                        ok += 1
+                    elif status == "skipped":
+                        skipped += 1
+                    else:
+                        fail += 1
+                except ReextractFatalNetworkError as exc:
+                    if stop_requested():
                         log(
-                            f"\n任务中止: 已连续 {stalled_for:.0f}s 无任何图片完成 "
-                            f"（阈值 {REEXTRACT_STALL_ABORT_SEC:.0f}s），"
-                            f"仍有 {pending_count} 个并发任务可能卡在 MiMo/网关。"
-                            "请重启 LLM 网关后重新运行本任务。",
-                            "error",
+                            f"  -> 网络异常已触发致命错误（但已请求停止）：{exc}",
+                            "warning",
                         )
+                        fail += 1
+                    else:
+                        log(f"\n任务中止: {exc}", "error")
+                        stall_aborted = True
                         for pending in futures:
                             if not pending.done():
                                 pending.cancel()
-                        raise ReextractStallError(
-                            f"无进展超过 {REEXTRACT_STALL_ABORT_SEC:.0f}s"
-                        )
-                    continue
-
-                for future in done:
-                    futures.pop(future, None)
-                    try:
-                        status = future.result()
-                        touch_progress()
-                        if status == "success":
-                            ok += 1
-                        elif status == "skipped":
-                            skipped += 1
-                        else:
-                            fail += 1
-                    except ReextractFatalNetworkError as exc:
-                        if stop_requested():
-                            log(
-                                f"  -> 网络异常已触发致命错误（但已请求停止）：{exc}",
-                                "warning",
-                            )
-                            fail += 1
-                        else:
-                            log(f"\n任务中止: {exc}", "error")
-                            for pending in futures:
-                                if not pending.done():
-                                    pending.cancel()
-                            raise
-                    except ReextractStallError:
                         raise
-                    except Exception as exc:
-                        touch_progress()
-                        fail += 1
-                        log(f"  -> 失败: {exc}", "error")
+                except ReextractStallError:
+                    raise
+                except Exception as exc:
+                    touch_progress()
+                    fail += 1
+                    log(f"  -> 失败: {exc}", "error")
 
-                if not stop_requested():
-                    submit_more()
+            if not stop_requested():
+                submit_more()
 
-            if stop_requested():
-                log(
-                    "\n收到停止请求：已停止提交新图片，等待进行中的图片处理完成后退出。",
-                    "warning",
-                )
+        if stop_requested():
+            log(
+                "\n收到停止请求：已停止提交新图片，等待进行中的图片处理完成后退出。",
+                "warning",
+            )
 
     except ReextractStallError:
         log(f"\n补齐中止（无进展超时）: 已成功 {ok}，失败 {fail}，跳过 {skipped}", "done")
-        raise
+        return ok, fail
+    finally:
+        executor.shutdown(wait=not stall_aborted, cancel_futures=stall_aborted)
 
     log(f"\n补齐完成: 成功 {ok}，失败 {fail}，跳过 {skipped}", "done")
     return ok, fail

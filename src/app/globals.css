@@ -3,6 +3,10 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    scrollbar-gutter: stable;
+  }
+
   :root {
     --background: 0 0% 100%;
     --foreground: 0 0% 3.9%;
@@ -105,5 +109,29 @@
   .date-picker-visible-icon::-webkit-calendar-picker-indicator {
     opacity: 0;
     pointer-events: none;
+  }
+
+  /* 标签搜索：从 container 对称撑满视口（避免 100vw 滚动条导致左窄右宽） */
+  .search-full-bleed {
+    --search-inline-pad: 0.5rem;
+    box-sizing: border-box;
+    width: calc(100vw - var(--search-inline-pad) * 2);
+    max-width: none;
+    margin-left: calc(50% - 50vw + var(--search-inline-pad));
+    margin-right: calc(50% - 50vw + var(--search-inline-pad));
+    padding-left: var(--search-inline-pad);
+    padding-right: var(--search-inline-pad);
+  }
+
+  @media (min-width: 640px) {
+    .search-full-bleed {
+      --search-inline-pad: 0.625rem;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .search-full-bleed {
+      --search-inline-pad: 0.75rem;
+    }
   }
 }
