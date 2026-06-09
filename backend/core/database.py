@@ -334,6 +334,8 @@ def search_images(
     end_date: Optional[str] = None,
     camera_name: Optional[str] = None,
     biz_category: Optional[str] = None,
+    file_path: Optional[str] = None,
+    description_keywords: Optional[List[str]] = None,
     query_embedding: Optional[bytes] = None,  # 单个查询文本的向量化结果（向后兼容）
     query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
     query_tags: Optional[List[str]] = None,  # 与 query_embeddings 对应的查询标签文本（用于相似度缓存）
@@ -384,6 +386,17 @@ def search_images(
         if biz_category:
             where_conditions.append("i.sz_tag_ref_json LIKE %s")
             params.append(f"%{biz_category}%")
+
+        if file_path:
+            where_conditions.append("i.relative_path LIKE %s")
+            params.append(f"%{file_path}%")
+
+        if description_keywords:
+            for keyword in description_keywords:
+                kw = (keyword or "").strip()
+                if kw:
+                    where_conditions.append("ar.description LIKE %s")
+                    params.append(f"%{kw}%")
 
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         

@@ -134,6 +134,8 @@ class SearchRequest(BaseModel):
     endDate: Optional[str] = None    # ISO 格式日期时间
     cameraName: Optional[str] = None  # 相机名模糊匹配（sz_name）
     bizCategory: Optional[str] = None  # 业态目录模糊匹配（sz_tag_ref_json）
+    filePath: Optional[str] = None  # 文件路径模糊匹配（relative_path）
+    descriptionKeywords: Optional[List[str]] = None  # 综合描述模糊匹配（多个关键词 AND）
     similarityThreshold: Optional[float] = 0.6  # 相似度阈值,范围0-1
 
 class ExportImageItem(BaseModel):
@@ -1115,6 +1117,8 @@ def _search_images_sync(
             end_date=request.endDate,
             camera_name=request.cameraName,
             biz_category=request.bizCategory,
+            file_path=request.filePath,
+            description_keywords=request.descriptionKeywords,
             query_embeddings=query_embeddings if query_embeddings else None,  # 传递多个向量
             query_tags=queries if queries else None,
             query_weights=weights if weights else None,  # 传递权重列表

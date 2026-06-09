@@ -560,6 +560,8 @@ export interface SearchRequest {
   endDate?: string;
   cameraName?: string;
   bizCategory?: string;
+  filePath?: string;
+  descriptionKeywords?: string[];
   page?: number;
   pageSize?: number;
   similarityThreshold?: number;
