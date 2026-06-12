@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pymysql
 import pymysql.cursors
@@ -955,9 +955,11 @@ def _is_valid_segment_video_path(raw_path: str) -> bool:
 def get_pending_segments_for_ai_description(
     limit: int,
     event_type_codes: Optional[List[str]] = None,
+    exclude_media_paths: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     safe_limit = max(int(limit or 0), 1)
     normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
+    exclude_paths = exclude_media_paths or set()
     where_sql = """
         segment_paths_json IS NOT NULL
         AND TRIM(segment_paths_json) <> ''
@@ -1019,6 +1021,8 @@ def get_pending_segments_for_ai_description(
             normalized_path = _normalize_video_object_path(raw_path)
             segment_media_path = _build_video_url(normalized_path)
             if not segment_media_path:
+                continue
+            if segment_media_path in exclude_paths:
                 continue
 
             pending.append(

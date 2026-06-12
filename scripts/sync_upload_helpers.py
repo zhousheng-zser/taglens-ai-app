@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""同步任务上传阶段：等待后端就绪、连接失败重试（不退出进程）。"""
+"""同步任务上传阶段：等待后端就绪、连接失败重试、批次导入统计上报。"""
 
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Optional
 
 import requests
@@ -17,6 +19,77 @@ BACKEND_WAIT_INTERVAL_SEC = 60
 CONSECUTIVE_CONNECTION_FAIL_MAX = 10
 
 _consecutive_connection_failures = 0
+
+
+@dataclass
+class ImportBatchStats:
+    total: int = 0
+    dedup: int = 0
+    imported: int = 0
+    failed: int = 0
+
+    def record_attempt(self) -> None:
+        self.total += 1
+
+    def record_response(self, status: Optional[str]) -> None:
+        if status == "success":
+            self.imported += 1
+        elif status == "skipped":
+            self.dedup += 1
+        else:
+            self.failed += 1
+
+    def record_failed(self) -> None:
+        self.failed += 1
+
+    def merge(self, other: "ImportBatchStats") -> None:
+        self.total += other.total
+        self.dedup += other.dedup
+        self.imported += other.imported
+        self.failed += other.failed
+
+
+def report_import_batch_stats(
+    *,
+    project_name: str,
+    script_path: str,
+    batch_key: Optional[str],
+    stats: ImportBatchStats,
+    log: Callable[..., None] = print,
+) -> None:
+    """整批同步完成后上报导入统计；total 为 0 时跳过。"""
+    if stats.total <= 0:
+        log(">>> 本批次无图片处理，跳过统计上报")
+        return
+
+    session = requests.Session()
+    session.proxies = {"http": None, "https": None}
+    completed_at = datetime.now().isoformat()
+    form = {
+        "project_name": project_name,
+        "script_path": script_path,
+        "batch_key": batch_key or "",
+        "total_count": str(stats.total),
+        "dedup_count": str(stats.dedup),
+        "imported_count": str(stats.imported),
+        "failed_count": str(stats.failed),
+        "completed_at": completed_at,
+    }
+    try:
+        resp = session.post(
+            f"{BACKEND_BASE}/project/sync-import-stats",
+            data=form,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            log(
+                f">>> 导入统计已上报: total={stats.total}, dedup={stats.dedup}, "
+                f"imported={stats.imported}, failed={stats.failed}"
+            )
+        else:
+            log(f">>> 导入统计上报失败: HTTP {resp.status_code} - {resp.text[:200]}")
+    except requests.RequestException as exc:
+        log(f">>> 导入统计上报异常: {exc}")
 
 
 def _probe_backend(session: requests.Session) -> bool:

@@ -1050,6 +1050,38 @@ def get_all_projects_db() -> List[Dict[str, Any]]:
         cursor.execute("SELECT * FROM projects ORDER BY created_at DESC")
         return [dict(row) for row in cursor.fetchall()]
 
+
+def get_project_by_name_or_script_db(name: str, script_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """按项目名称或脚本路径查找项目。"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if name:
+            cursor.execute("SELECT * FROM projects WHERE name = %s LIMIT 1", (name,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        if script_path:
+            script_name = os.path.basename(script_path)
+            cursor.execute(
+                "SELECT * FROM projects WHERE script_path LIKE %s LIMIT 1",
+                (f"%{script_name}",),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+    return None
+
+
+def update_project_last_run_db(project_id: str, completed_at: Optional[str] = None) -> None:
+    now_str = completed_at or datetime.now().isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE projects SET last_run = %s WHERE id = %s",
+            (now_str, project_id),
+        )
+
+
 def add_project_db(project_id: str, name: str, script_path: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()

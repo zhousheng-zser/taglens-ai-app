@@ -52,8 +52,12 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
+import { ProjectSyncStatsPanel } from '@/components/project-sync/ProjectSyncStatsPanel';
+
+type ProjectSyncViewMode = 'stats' | 'projects';
 
 function ProjectSyncContent() {
+    const [viewMode, setViewMode] = useState<ProjectSyncViewMode>('stats');
     const [projects, setProjects] = useState<ProjectParams[]>([]);
     const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -344,7 +348,36 @@ function ProjectSyncContent() {
     );
 
     return (
-        <div className="h-screen bg-[#09090b] text-zinc-200 flex overflow-hidden font-sans selection:bg-blue-500/30">
+        <div className={
+            viewMode === 'stats'
+                ? 'min-h-screen bg-[#09090b] text-zinc-200 flex flex-col font-sans selection:bg-blue-500/30'
+                : 'h-screen bg-[#09090b] text-zinc-200 flex flex-col overflow-hidden font-sans selection:bg-blue-500/30'
+        }>
+            <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-white/5 bg-zinc-950/80 backdrop-blur-xl">
+                <Button
+                    variant={viewMode === 'stats' ? 'default' : 'ghost'}
+                    size="sm"
+                    className={viewMode === 'stats' ? 'bg-blue-600 hover:bg-blue-500' : 'text-zinc-400 hover:text-white hover:bg-white/5'}
+                    onClick={() => setViewMode('stats')}
+                >
+                    <LayoutGrid className="h-4 w-4 mr-1.5" />
+                    统计概览
+                </Button>
+                <Button
+                    variant={viewMode === 'projects' ? 'default' : 'ghost'}
+                    size="sm"
+                    className={viewMode === 'projects' ? 'bg-blue-600 hover:bg-blue-500' : 'text-zinc-400 hover:text-white hover:bg-white/5'}
+                    onClick={() => setViewMode('projects')}
+                >
+                    <Database className="h-4 w-4 mr-1.5" />
+                    项目管理
+                </Button>
+            </div>
+
+            {viewMode === 'stats' ? (
+                <ProjectSyncStatsPanel />
+            ) : (
+        <div className="flex flex-1 overflow-hidden">
             {/* 左侧侧边栏 */}
             <div className="w-72 flex flex-col border-r border-white/5 bg-zinc-950/50 backdrop-blur-xl">
                 <div className="p-4 pt-6">
@@ -698,6 +731,8 @@ function ProjectSyncContent() {
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
+        </div>
+            )}
         </div >
     );
 }

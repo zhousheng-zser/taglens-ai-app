@@ -84,6 +84,8 @@ from sync_upload_helpers import (
     wait_for_backend_ready,
     on_upload_connection_error,
     reset_upload_connection_streak,
+    ImportBatchStats,
+    report_import_batch_stats,
 )
 
 PROJECT_LOCAL_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "runtime", "sync_task_01"))
@@ -96,6 +98,7 @@ PULL_LOG_FILE = os.path.join(LOG_DIR, "sync_task_01_pull.log")
 
 REMOTE_SH = os.path.join(SCRIPT_DIR, "QualityJudgment.sh")
 PROJECT_NAME="视频质量诊断"
+SCRIPT_PATH = "scripts/sync_task_01.py"
 PROJECT_ROOT="/root/CollectionIMGJudgment"
 
 
@@ -296,6 +299,7 @@ def normalize_null(x):
 
 
 def process_archive(archive_file):
+    stats = ImportBatchStats()
 
     try:
 
@@ -386,6 +390,7 @@ def process_archive(archive_file):
             
                     if subfile.endswith('.jpg'):
                         print(f">>> 正在处理图片: {subfile} ...")
+                        stats.record_attempt()
                         # 创建 Session，localhost 不走代理，外部 API 继续使用代理
                         session = requests.Session()
                         session.proxies = {
@@ -430,18 +435,22 @@ def process_archive(archive_file):
                                         print(f"    ⏭️ 跳过重复: {subfile} ({res_json.get('message')})")
                                     else:
                                         print(f"    ❌ 处理失败: {subfile} - {res_json.get('message')}")
+                                    stats.record_response(status)
                                 else:
                                     print(f"    ❌ 请求失败: Status {response.status_code} - {response.text}")
+                                    stats.record_failed()
                                     
                         except requests.exceptions.ConnectionError as e:
                             print(f"    ❌ 无法连接到后端，跳过本张并继续")
+                            stats.record_failed()
                             on_upload_connection_error(e)
                             continue
                         except requests.exceptions.Timeout:
                             print(f"    ❌ 请求超时 (300s)。后端处理时间过长。")
+                            stats.record_failed()
                         except Exception as e:
                             print(f"    ❌ 调用接口发生未预期的异常: {type(e).__name__}: {e}")
-                            # 如果是其他严重错误也可以考虑退出，但暂时只针对连接错误退出
+                            stats.record_failed()
                         finally:
                             # 无论成功失败，都删除本地文件
                             if os.path.exists(subfile_path):
@@ -473,6 +482,7 @@ def process_archive(archive_file):
     shutil.rmtree(TMP_DIR, ignore_errors=True) 
     print(">>> 所有上传任务完成 ✅")
     os.remove(os.path.abspath(archive_file))
+    return stats
 
 
 def create_ssh_connection():
@@ -749,10 +759,13 @@ def download_latest_ready_batch_and_process():
         return False
 
     # 下载完成后统一开始处理（不受时间窗口限制）
+    batch_stats = ImportBatchStats()
     for archive in local_archives:
         try:
             print(f"🚀 开始处理本地归档: {archive}")
-            process_archive(archive)
+            archive_stats = process_archive(archive)
+            if archive_stats:
+                batch_stats.merge(archive_stats)
         except Exception as e:
             print(f"❌ 处理失败(仍会继续处理下一个): {archive}, error={e}")
 
@@ -779,6 +792,13 @@ def download_latest_ready_batch_and_process():
         except Exception:
             pass
 
+    batch_key = f"collection-{start_ts}" if start_ts else None
+    report_import_batch_stats(
+        project_name=PROJECT_NAME,
+        script_path=SCRIPT_PATH,
+        batch_key=batch_key,
+        stats=batch_stats,
+    )
     return True
 
 

@@ -221,3 +221,52 @@ export async function updateProjectModel(projectId: string, model: string): Prom
         return { success: false, message: e.toString() };
     }
 }
+
+export type SyncImportGranularity = 'day' | 'week' | 'month';
+
+export interface ProjectSyncImportSeriesPoint {
+    bucketKey: string;
+    label: string;
+    totalCount: number;
+    dedupCount: number;
+    importedCount: number;
+    failedCount: number;
+}
+
+export interface ProjectSyncImportSummary {
+    projectId: string;
+    projectName: string;
+    totalCount: number;
+    dedupCount: number;
+    importedCount: number;
+    failedCount: number;
+    series: ProjectSyncImportSeriesPoint[];
+}
+
+export interface ProjectSyncImportStatsResponse {
+    success: boolean;
+    granularity?: SyncImportGranularity;
+    rangeLabel?: string;
+    anchor?: string;
+    projects?: ProjectSyncImportSummary[];
+}
+
+export async function getProjectSyncImportStats(
+    granularity: SyncImportGranularity = 'day',
+    anchor?: string,
+): Promise<ProjectSyncImportStatsResponse> {
+    try {
+        const params = new URLSearchParams({ granularity });
+        if (anchor) {
+            params.set('anchor', anchor);
+        }
+        const res = await fetch(
+            `${BACKEND_URL}/project/sync-import-stats?${params.toString()}`,
+            { cache: 'no-store' },
+        );
+        return await res.json();
+    } catch (e) {
+        console.error('Fetch sync import stats failed', e);
+        return { success: false, projects: [] };
+    }
+}

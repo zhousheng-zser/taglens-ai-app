@@ -46,6 +46,8 @@ from core.database import (
     update_project_stop_time_db,
     update_project_status_by_script_db,
     delete_image_by_uuid,
+    get_project_by_name_or_script_db,
+    update_project_last_run_db,
 )
 from services.project_sync_systemd import (
     is_managed_sync_script,
@@ -56,7 +58,7 @@ from services.project_sync_systemd import (
     stop_script as sync_stop_script,
 )
 from core.event_database import init_event_database
-from core.manage_database import init_manage_database
+from core.manage_database import init_manage_database, insert_project_sync_import_batch, get_project_sync_import_stats
 from services.bulk_import_storage import (
     create_bulk_import_job,
     update_bulk_import_job_status,
@@ -305,6 +307,8 @@ async def lifespan(app: FastAPI):
         print("✓ BGE向量化模型预加载完成")
     except Exception as e:
         print(f"⚠ BGE向量化模型预加载失败: {e}")
+
+    asyncio.create_task(_auto_load_keyword_cache_on_startup())
 
     yield
     
@@ -1266,6 +1270,53 @@ def _load_keyword_cache_sync(
     return {"success": True, "keywordCount": count, **status}
 
 
+async def _auto_load_keyword_cache_on_startup() -> None:
+    """服务启动后在后台异步加载标签库，不阻塞 HTTP 服务就绪。"""
+    from services.keyword_search_cache import (
+        KeywordCacheAlreadyLoadedError,
+        KeywordCacheLoadingError,
+        get_keyword_cache_status,
+    )
+
+    enabled = os.getenv("KEYWORD_CACHE_AUTO_LOAD", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
+        print("[keyword_cache] 启动时自动加载已禁用 (KEYWORD_CACHE_AUTO_LOAD=false)")
+        return
+
+    status = get_keyword_cache_status()
+    if status.get("loaded"):
+        print(
+            f"[keyword_cache] 启动跳过：标签库已就绪 "
+            f"({status.get('keywordCount', 0)} 个唯一标签)"
+        )
+        return
+    if status.get("loading"):
+        print("[keyword_cache] 启动跳过：标签库正在加载中")
+        return
+
+    print("[keyword_cache] 正在后台异步加载标签库…")
+    try:
+        result = await run_blocking(_load_keyword_cache_sync, False, None, None)
+        print(
+            "[keyword_cache] 启动自动加载完成: "
+            f"{result.get('keywordCount', 0)} 个唯一标签, "
+            f"{result.get('mappingRowCount', 0)} 条图片标签映射, "
+            f"耗时 {result.get('lastLoadSeconds')}s"
+        )
+    except KeywordCacheAlreadyLoadedError:
+        pass
+    except KeywordCacheLoadingError:
+        print("[keyword_cache] 启动自动加载跳过：已有加载任务进行中")
+    except Exception as exc:
+        print(f"[keyword_cache] 启动自动加载失败: {exc}")
+        traceback.print_exc()
+
+
 @app.get("/keyword-cache/status")
 async def keyword_cache_status_api():
     from services.keyword_search_cache import get_keyword_cache_status
@@ -2220,6 +2271,83 @@ async def update_project_api(
         
     return {"success": True}
 
+
+@app.post("/project/sync-import-stats")
+async def post_project_sync_import_stats(
+    project_name: str = Form(...),
+    script_path: str = Form(""),
+    batch_key: Optional[str] = Form(None),
+    total_count: int = Form(0),
+    dedup_count: int = Form(0),
+    imported_count: int = Form(0),
+    failed_count: int = Form(0),
+    completed_at: Optional[str] = Form(None),
+):
+    """同步脚本整批完成后写入导入统计（无需登录，localhost 调用）。"""
+    project = get_project_by_name_or_script_db(project_name, script_path or None)
+    if not project:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到项目: name={project_name}, script_path={script_path}",
+        )
+
+    completed = completed_at or datetime.now().isoformat()
+    batch_id = insert_project_sync_import_batch(
+        project_id=str(project["id"]),
+        batch_key=batch_key,
+        total_count=total_count,
+        dedup_count=dedup_count,
+        imported_count=imported_count,
+        failed_count=failed_count,
+        completed_at=completed,
+    )
+    update_project_last_run_db(str(project["id"]), completed)
+    return {
+        "success": True,
+        "batchId": batch_id,
+        "projectId": str(project["id"]),
+    }
+
+
+@app.get("/project/sync-import-stats")
+async def get_project_sync_import_stats_api(
+    granularity: str = Query("day"),
+    range_size: int = Query(30, alias="range"),
+    anchor: Optional[str] = Query(None),
+):
+    """查询全部项目的同步导入统计（日/周/月聚合）。"""
+    try:
+        default_range = {"day": 30, "week": 12, "month": 12}.get(granularity, 30)
+        effective_range = range_size if range_size > 0 else default_range
+        stats = get_project_sync_import_stats(
+            granularity=granularity,
+            range_size=effective_range,
+            anchor=anchor.strip() if anchor else None,
+        )
+        projects_db = get_all_projects_db()
+        name_by_id = {str(p["id"]): p["name"] for p in projects_db}
+        series_template = stats.get("seriesTemplate") or []
+        for item in stats["projects"]:
+            item["projectName"] = name_by_id.get(item["projectId"], item["projectId"])
+        for proj in projects_db:
+            pid = str(proj["id"])
+            if not any(p["projectId"] == pid for p in stats["projects"]):
+                stats["projects"].append(
+                    {
+                        "projectId": pid,
+                        "projectName": proj["name"],
+                        "totalCount": 0,
+                        "dedupCount": 0,
+                        "importedCount": 0,
+                        "failedCount": 0,
+                        "series": [dict(point) for point in series_template],
+                    }
+                )
+        stats["projects"].sort(key=lambda x: x.get("projectName", ""))
+        stats.pop("seriesTemplate", None)
+        return {"success": True, **stats}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # --- 运行服务器 ---

@@ -57,6 +57,15 @@ def count_known() -> int:
         return len(_KNOWN_PATHS)
 
 
+def get_known_paths() -> Set[str]:
+    """返回当前已知的损坏视频路径集合（只读副本）。"""
+    global _KNOWN_PATHS
+    with _REGISTRY_LOCK:
+        if _KNOWN_PATHS is None:
+            _KNOWN_PATHS = _load_paths_from_file()
+        return set(_KNOWN_PATHS)
+
+
 def is_known_damaged(media_path: str) -> bool:
     global _KNOWN_PATHS
     path = _normalize_path(media_path)

@@ -108,6 +108,30 @@ class SegmentFillResult:
     damage_log: str = ""
     event_id: str = ""
     segment_index: int = 0
+    recorded_damaged: bool = False
+
+
+def _should_record_damaged(error: str) -> bool:
+    """补齐永久失败（非网络、非 QRL 服务不可用）时写入损坏列表。"""
+    if _is_network_error_message(error):
+        return False
+    msg = (error or "").lower()
+    if "404" in msg and ("qrl" in msg or "api" in msg or "not found" in msg):
+        return False
+    if "qrl 视觉 api 不可用" in msg or "qrl 视觉 api 返回 404" in msg:
+        return False
+    if "未能下载视频" in error or "媒体拉取" in error:
+        return False
+    return bool((error or "").strip())
+
+
+def _record_fill_failure(segment_media_path: str, reason: str) -> bool:
+    if not segment_media_path or not _should_record_damaged(reason):
+        return False
+    text = (reason or "").replace("\t", " ").replace("\n", " ").strip()
+    if len(text) > 500:
+        text = text[:500] + "…"
+    return record_damaged(segment_media_path, f"补齐失败: {text}")
 
 
 def fill_one_segment_description(
@@ -167,8 +191,9 @@ def fill_one_segment_description(
     damage_log = damage_report.log_line()
     if damage_report.should_skip:
         reason = damage_report.skip_reason or "视频损坏"
+        recorded = False
         if segment_media_path:
-            record_damaged(segment_media_path, reason)
+            recorded = record_damaged(segment_media_path, reason)
         return SegmentFillResult(
             success=False,
             skipped=True,
@@ -176,6 +201,7 @@ def fill_one_segment_description(
             damage_log=damage_log,
             event_id=event_id,
             segment_index=segment_index,
+            recorded_damaged=recorded,
         )
 
     description = None
@@ -195,6 +221,8 @@ def fill_one_segment_description(
         except SegmentAiMediaError as exc:
             message = str(exc)
             is_damaged = "视频损坏" in message or "跳过补齐" in message
+            if is_damaged and segment_media_path:
+                record_damaged(segment_media_path, message)
             return SegmentFillResult(
                 success=False,
                 skipped=is_damaged,
@@ -217,12 +245,14 @@ def fill_one_segment_description(
                     f"连续 {max_retries} 次网络异常，"
                     "终止整批事件分段描述补齐任务。"
                 ) from exc
+            recorded = _record_fill_failure(segment_media_path, err)
             return SegmentFillResult(
                 success=False,
                 error=err,
                 damage_log=damage_log,
                 event_id=event_id,
                 segment_index=segment_index,
+                recorded_damaged=recorded,
             )
         except Exception as exc:
             err = str(exc)
@@ -238,12 +268,14 @@ def fill_one_segment_description(
                     f"连续 {max_retries} 次网络异常，"
                     "终止整批事件分段描述补齐任务。"
                 ) from exc
+            recorded = _record_fill_failure(segment_media_path, err)
             return SegmentFillResult(
                 success=False,
                 error=err,
                 damage_log=damage_log,
                 event_id=event_id,
                 segment_index=segment_index,
+                recorded_damaged=recorded,
             )
 
     if description is None:

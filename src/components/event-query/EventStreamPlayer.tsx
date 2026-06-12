@@ -23,6 +23,23 @@ function resolveMediaUrlForApi(url: string): string {
   return value;
 }
 
+type SegmentReviewStatus = '待定' | '正样本' | '负样本';
+
+function normalizeSegmentStatus(value: string | undefined | null): SegmentReviewStatus {
+  if (value === '正样本' || value === '负样本' || value === '待定') return value;
+  return '待定';
+}
+
+function segmentStatusBadgeClass(status: SegmentReviewStatus): string {
+  if (status === '正样本') {
+    return 'bg-emerald-600/90 text-white border-emerald-500/70';
+  }
+  if (status === '负样本') {
+    return 'bg-rose-600/90 text-white border-rose-500/70';
+  }
+  return 'bg-amber-600/90 text-white border-amber-500/70';
+}
+
 export type EventStreamSavePayload = {
   eventId: string;
   projectId: string;
@@ -577,7 +594,16 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
               </div>
             )}
             <div className="text-xs text-muted-foreground pt-1">
-              当前状态：{activeEditableSegmentIndex === null ? '-' : (draftStatuses[activeEditableSegmentIndex] || '待定')}
+              当前状态：
+              {activeEditableSegmentIndex === null ? (
+                '-'
+              ) : (
+                <span
+                  className={`ml-1 inline-flex items-center rounded px-2 py-0.5 text-xs font-medium border ${segmentStatusBadgeClass(normalizeSegmentStatus(draftStatuses[activeEditableSegmentIndex]))}`}
+                >
+                  {normalizeSegmentStatus(draftStatuses[activeEditableSegmentIndex])}
+                </span>
+              )}
             </div>
             <div className="pt-1 space-y-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -763,8 +789,10 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
         {Array.from({ length: segmentLineCount }).map((_, idx) => (
           <div key={`${record.uuid}-edit-row-${idx}`} className="grid grid-cols-[70px_110px_1fr_1fr_1fr] items-center gap-2">
             <div className="text-xs font-mono text-foreground/95 text-center">{idx.toString().padStart(3, '0')}</div>
-            <div className="h-8 rounded-md border border-border/40 bg-background/30 px-2 text-xs font-mono text-foreground/95 flex items-center">
-              {draftStatuses[idx] || '待定'}
+            <div
+              className={`h-8 rounded-md border px-2 text-xs font-medium flex items-center justify-center ${segmentStatusBadgeClass(normalizeSegmentStatus(draftStatuses[idx]))}`}
+            >
+              {normalizeSegmentStatus(draftStatuses[idx])}
             </div>
             <div className="h-8 rounded-md border border-border/40 bg-background/30 px-3 text-xs flex items-center text-foreground/95 truncate" title={draftDescriptions[idx] || ''}>
               {draftDescriptions[idx] || '-'}

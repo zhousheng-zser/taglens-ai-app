@@ -9,8 +9,8 @@ import secrets
 import calendar
 import time
 from contextlib import contextmanager
-from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pymysql
 import pymysql.cursors
@@ -184,6 +184,302 @@ def init_manage_database() -> None:
                 (DEFAULT_ADMIN_USERNAME, hash_password(DEFAULT_ADMIN_PASSWORD), now, now),
             )
             print(f"已创建默认管理员账号: {DEFAULT_ADMIN_USERNAME}")
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_sync_import_batches (
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                project_id VARCHAR(128) NOT NULL,
+                batch_key VARCHAR(128) NULL,
+                total_count INT NOT NULL DEFAULT 0,
+                dedup_count INT NOT NULL DEFAULT 0,
+                imported_count INT NOT NULL DEFAULT 0,
+                failed_count INT NOT NULL DEFAULT 0,
+                completed_at VARCHAR(64) NOT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                KEY idx_psib_project_completed (project_id, completed_at),
+                KEY idx_psib_project_id (project_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+
+
+def insert_project_sync_import_batch(
+    *,
+    project_id: str,
+    batch_key: Optional[str],
+    total_count: int,
+    dedup_count: int,
+    imported_count: int,
+    failed_count: int,
+    completed_at: Optional[str] = None,
+) -> int:
+    now = datetime.now().isoformat()
+    completed = completed_at or now
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO project_sync_import_batches (
+                project_id, batch_key, total_count, dedup_count,
+                imported_count, failed_count, completed_at, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                project_id,
+                batch_key,
+                int(total_count),
+                int(dedup_count),
+                int(imported_count),
+                int(failed_count),
+                completed,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def _completed_at_date_sql() -> str:
+    return "SUBSTRING(b.completed_at, 1, 10)"
+
+
+def _parse_date_anchor(anchor: str) -> date:
+    return datetime.strptime(anchor[:10], "%Y-%m-%d").date()
+
+
+def _parse_month_anchor(anchor: str) -> Tuple[int, int]:
+    normalized = anchor.strip()[:7]
+    year_str, month_str = normalized.split("-", 1)
+    return int(year_str), int(month_str)
+
+
+def _add_months(year: int, month: int, delta: int) -> Tuple[int, int]:
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
+
+
+def _monday_of_week(value: date) -> date:
+    return value - timedelta(days=value.weekday())
+
+
+def _yearweek_bucket_key(value: date) -> str:
+    iso = value.isocalendar()
+    return f"{iso.year}{iso.week:02d}"
+
+
+def _yearweek_bucket_label(value: date) -> str:
+    iso = value.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def _month_bucket_key(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _empty_series_point(bucket_key: str, label: str) -> Dict[str, Any]:
+    return {
+        "bucketKey": bucket_key,
+        "label": label,
+        "totalCount": 0,
+        "dedupCount": 0,
+        "importedCount": 0,
+        "failedCount": 0,
+    }
+
+
+def _build_expected_buckets(
+    granularity: str,
+    anchor: Optional[str],
+    range_size: int,
+) -> Tuple[List[Dict[str, str]], str, str, List[Any]]:
+    """返回 (expected_buckets, filter_sql, range_label, filter_params)。"""
+    date_col = f"STR_TO_DATE({_completed_at_date_sql()}, '%%Y-%%m-%%d')"
+
+    if granularity == "day":
+        if anchor:
+            center = _parse_date_anchor(anchor)
+            start = center - timedelta(days=15)
+            end = center + timedelta(days=15)
+            range_label = f"{start.isoformat()} ~ {end.isoformat()}（共 31 天）"
+        else:
+            range_size = max(1, min(range_size, 365))
+            end = date.today()
+            start = end - timedelta(days=range_size - 1)
+            range_label = f"最近 {range_size} 天"
+        buckets = []
+        cursor_day = start
+        while cursor_day <= end:
+            buckets.append({
+                "bucketKey": cursor_day.isoformat(),
+                "label": cursor_day.strftime("%m-%d"),
+            })
+            cursor_day += timedelta(days=1)
+        filter_sql = f"{date_col} BETWEEN %s AND %s"
+        return buckets, filter_sql, range_label, [start.isoformat(), end.isoformat()]
+
+    if granularity == "week":
+        if anchor:
+            if "-W" in anchor.upper():
+                parts = anchor.upper().split("-W", 1)
+                iso_year = int(parts[0])
+                iso_week = int(parts[1][:2])
+                center_monday = date.fromisocalendar(iso_year, iso_week, 1)
+            else:
+                center_monday = _monday_of_week(_parse_date_anchor(anchor))
+            start = center_monday - timedelta(weeks=6)
+            end = center_monday + timedelta(weeks=6, days=6)
+            range_label = (
+                f"{_yearweek_bucket_label(center_monday)} 前后各 6 周 "
+                f"（{_yearweek_bucket_label(start)} ~ {_yearweek_bucket_label(end)}）"
+            )
+        else:
+            range_size = max(1, min(range_size, 52))
+            end = date.today()
+            start = end - timedelta(weeks=range_size - 1)
+            range_label = f"最近 {range_size} 周"
+        buckets = []
+        week_start = _monday_of_week(start)
+        last_monday = _monday_of_week(end)
+        while week_start <= last_monday:
+            buckets.append({
+                "bucketKey": _yearweek_bucket_key(week_start),
+                "label": _yearweek_bucket_label(week_start),
+            })
+            week_start += timedelta(weeks=1)
+        filter_sql = f"{date_col} BETWEEN %s AND %s"
+        return buckets, filter_sql, range_label, [start.isoformat(), end.isoformat()]
+
+    # month
+    if anchor:
+        center_year, center_month = _parse_month_anchor(anchor)
+        start_year, start_month = _add_months(center_year, center_month, -6)
+        end_year, end_month = _add_months(center_year, center_month, 6)
+        start = date(start_year, start_month, 1)
+        end_day = calendar.monthrange(end_year, end_month)[1]
+        end = date(end_year, end_month, end_day)
+        range_label = (
+            f"{_month_bucket_key(center_year, center_month)} 前后各 6 月 "
+            f"（{_month_bucket_key(start_year, start_month)} ~ {_month_bucket_key(end_year, end_month)}）"
+        )
+    else:
+        range_size = max(1, min(range_size, 36))
+        end = date.today()
+        end_year, end_month = end.year, end.month
+        start_year, start_month = _add_months(end_year, end_month, -(range_size - 1))
+        start = date(start_year, start_month, 1)
+        range_label = f"最近 {range_size} 月"
+    buckets = []
+    y, m = start.year, start.month
+    end_key = _month_bucket_key(end.year, end.month)
+    while True:
+        key = _month_bucket_key(y, m)
+        buckets.append({"bucketKey": key, "label": key})
+        if key == end_key:
+            break
+        y, m = _add_months(y, m, 1)
+    filter_sql = f"{date_col} BETWEEN %s AND %s"
+    return buckets, filter_sql, range_label, [start.isoformat(), end.isoformat()]
+
+
+def get_project_sync_import_stats(
+    *,
+    granularity: str = "day",
+    range_size: int = 30,
+    anchor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """按项目聚合同步导入统计，支持 day/week/month；可选 anchor 锚点窗口。"""
+    if granularity not in {"day", "week", "month"}:
+        raise ValueError("granularity 须为 day、week 或 month")
+
+    expected_buckets, filter_sql, range_label, filter_params = _build_expected_buckets(
+        granularity,
+        anchor,
+        range_size,
+    )
+
+    if granularity == "day":
+        group_sql = _completed_at_date_sql()
+        label_sql = "DATE_FORMAT(STR_TO_DATE(SUBSTRING(b.completed_at, 1, 10), '%%Y-%%m-%%d'), '%%m-%%d')"
+    elif granularity == "week":
+        group_sql = "YEARWEEK(STR_TO_DATE(SUBSTRING(b.completed_at, 1, 10), '%%Y-%%m-%%d'), 1)"
+        label_sql = (
+            "CONCAT(YEAR(STR_TO_DATE(SUBSTRING(b.completed_at, 1, 10), '%%Y-%%m-%%d')), '-W', "
+            "LPAD(WEEK(STR_TO_DATE(SUBSTRING(b.completed_at, 1, 10), '%%Y-%%m-%%d'), 1), 2, '0'))"
+        )
+    else:
+        group_sql = "DATE_FORMAT(STR_TO_DATE(SUBSTRING(b.completed_at, 1, 10), '%%Y-%%m-%%d'), '%%Y-%%m')"
+        label_sql = group_sql
+
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT
+                b.project_id,
+                {group_sql} AS bucket_key,
+                MIN({label_sql}) AS bucket_label,
+                SUM(b.total_count) AS total_count,
+                SUM(b.dedup_count) AS dedup_count,
+                SUM(b.imported_count) AS imported_count,
+                SUM(b.failed_count) AS failed_count
+            FROM project_sync_import_batches b
+            WHERE {filter_sql}
+            GROUP BY b.project_id, bucket_key
+            ORDER BY b.project_id ASC, bucket_key ASC
+            """,
+            tuple(filter_params),
+        )
+        rows = cursor.fetchall()
+
+    by_project: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        pid = str(row["project_id"])
+        if pid not in by_project:
+            by_project[pid] = {}
+        bucket_key = str(row["bucket_key"])
+        by_project[pid][bucket_key] = {
+            "bucketKey": bucket_key,
+            "label": str(row["bucket_label"] or bucket_key),
+            "totalCount": int(row["total_count"] or 0),
+            "dedupCount": int(row["dedup_count"] or 0),
+            "importedCount": int(row["imported_count"] or 0),
+            "failedCount": int(row["failed_count"] or 0),
+        }
+
+    projects: List[Dict[str, Any]] = []
+    for pid, bucket_map in by_project.items():
+        series = []
+        totals = {"totalCount": 0, "dedupCount": 0, "importedCount": 0, "failedCount": 0}
+        for expected in expected_buckets:
+            point = bucket_map.get(expected["bucketKey"])
+            if point is None:
+                point = _empty_series_point(expected["bucketKey"], expected["label"])
+            else:
+                point = {**point, "label": point.get("label") or expected["label"]}
+            series.append(point)
+            totals["totalCount"] += point["totalCount"]
+            totals["dedupCount"] += point["dedupCount"]
+            totals["importedCount"] += point["importedCount"]
+            totals["failedCount"] += point["failedCount"]
+        projects.append({
+            "projectId": pid,
+            "totalCount": totals["totalCount"],
+            "dedupCount": totals["dedupCount"],
+            "importedCount": totals["importedCount"],
+            "failedCount": totals["failedCount"],
+            "series": series,
+        })
+
+    return {
+        "granularity": granularity,
+        "rangeLabel": range_label,
+        "anchor": anchor,
+        "seriesTemplate": [
+            _empty_series_point(item["bucketKey"], item["label"]) for item in expected_buckets
+        ],
+        "projects": projects,
+    }
 
 
 def _row_to_user(row: Mapping[str, Any]) -> Dict[str, Any]:

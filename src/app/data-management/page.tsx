@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
     Trash2, FileDiff, Activity, Loader2, AlertTriangle, ShieldAlert,
-    Terminal, X, Check, AlertCircle, Info, Lock, ChevronRight, Sparkles, Scissors, ChevronsUpDown
+    Terminal, Check, AlertCircle, Info, Lock, ChevronRight, Sparkles, Scissors, ChevronsUpDown, ArrowLeft
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -106,6 +106,7 @@ function DataManagementContent() {
     const [isSegmentDescFillRunning, setIsSegmentDescFillRunning] = useState(false);
     const logEndRef = useRef<HTMLDivElement>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
+    const closingLogModalOnlyRef = useRef(false);
 
     // Auto-scroll logic
     useEffect(() => {
@@ -181,7 +182,9 @@ function DataManagementContent() {
             }
         } catch (error: any) {
             if (error?.name === 'AbortError') {
-                addLog('任务已被用户手动结束。', 'warning');
+                if (!closingLogModalOnlyRef.current) {
+                    addLog('任务已被用户手动结束。', 'warning');
+                }
             } else if (isStreamDisconnectError(error?.message || '')) {
                 addLog(
                     `浏览器日志连接已断开（${error.message}）。这通常不是 QRL 重试失败；后台任务可能仍在运行。`,
@@ -283,7 +286,9 @@ function DataManagementContent() {
             }
         } catch (error: any) {
             if (error?.name === 'AbortError') {
-                addLog('日志查看已被用户中断。', 'warning');
+                if (!closingLogModalOnlyRef.current) {
+                    addLog('日志查看已被用户中断。', 'warning');
+                }
             } else if (isStreamDisconnectError(error?.message || '')) {
                 addLog(`日志连接断开（${error.message}），后台任务可能仍在运行。`, 'warning');
                 const statusUrl = statusEndpointForTaskUrl(endpoint);
@@ -369,6 +374,20 @@ function DataManagementContent() {
                 abortControllerRef.current.abort();
             }
         });
+    };
+
+    /** 关闭日志面板并返回数据管理主页；后台任务继续运行（可稍后在卡片上「查看进度」） */
+    const handleBackToManagement = () => {
+        closingLogModalOnlyRef.current = true;
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            abortControllerRef.current = null;
+        }
+        setIsProcessing(false);
+        setShowLogModal(false);
+        window.setTimeout(() => {
+            closingLogModalOnlyRef.current = false;
+        }, 0);
     };
 
     const reextractModelLabels: Record<'gemini' | 'qwen' | 'codex' | 'mimo', string> = {
@@ -965,7 +984,16 @@ function DataManagementContent() {
                                 </div>
                                 <div className="flex items-center gap-3">
                                     {isProcessing && <Loader2 className="w-4 h-4 animate-spin text-slate-500" />}
-                                    {!isTaskDone && (
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-8 px-3 text-xs border-white/20 text-slate-200 hover:bg-white/10"
+                                        onClick={handleBackToManagement}
+                                    >
+                                        <ArrowLeft className="w-3.5 h-3.5 mr-1.5" />
+                                        返回
+                                    </Button>
+                                    {isProcessing && !isTaskDone && (
                                         <Button
                                             variant="outline"
                                             size="sm"
@@ -975,17 +1003,6 @@ function DataManagementContent() {
                                             结束任务
                                         </Button>
                                     )}
-                                    <button
-                                        onClick={() => setShowLogModal(false)}
-                                        className={cn(
-                                            "p-2 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors",
-                                            !isTaskDone && "opacity-50 cursor-not-allowed hidden"
-                                        )}
-                                        disabled={!isTaskDone}
-                                        aria-label="返回"
-                                    >
-                                        <X className="w-5 h-5" />
-                                    </button>
                                 </div>
                             </div>
 
@@ -1015,7 +1032,7 @@ function DataManagementContent() {
                                     ) : (
                                         <span className="flex items-center gap-2">
                                             <Loader2 className="w-3 h-3 animate-spin" />
-                                            Processing Stream...
+                                            Processing Stream... · 可点击「返回」回到数据管理，任务仍在后台运行
                                         </span>
                                     )}
                                 </div>

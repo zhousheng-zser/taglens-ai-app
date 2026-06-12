@@ -129,12 +129,12 @@ export default function SearchPage() {
   }, []);
 
   useEffect(() => {
-    if (!cacheStatus.loading && !isCacheOperating) return;
+    if (cacheStatus.loaded && !cacheStatus.loading && !isCacheOperating) return;
     const timer = window.setInterval(() => {
       void refreshCacheStatus();
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [cacheStatus.loading, isCacheOperating]);
+  }, [cacheStatus.loaded, cacheStatus.loading, isCacheOperating]);
 
   const formatCacheStatusText = () => {
     if (cacheStatus.loading || isCacheOperating) {
