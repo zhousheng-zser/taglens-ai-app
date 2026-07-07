@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -36,7 +37,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Loader2, Copy, Check, Download, X, ImageIcon, CircleHelp } from 'lucide-react';
+import { Loader2, Copy, Check, Download, X, ImageIcon, CircleHelp, ArrowLeft } from 'lucide-react';
 
 const DTC_CATEGORIES = ['concept', 'simple', 'complex'] as const;
 
@@ -71,6 +72,49 @@ function FieldLabelWithHint({ label, hint }: { label: string; hint: string }) {
   );
 }
 
+function PreviewImagePanel({
+  label,
+  url,
+  emptyText,
+  onOpen,
+}: {
+  label: string;
+  url?: string;
+  emptyText: string;
+  onOpen: (url: string, title: string) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-border/50 bg-black p-2">
+      <p className="text-xs text-muted-foreground mb-2">{label}</p>
+      {url ? (
+        <button
+          type="button"
+          className="group relative block w-full rounded-md overflow-hidden cursor-zoom-in hover:ring-2 hover:ring-primary/60 transition-shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onOpen(url, label);
+          }}
+        >
+          <img
+            src={url}
+            alt={label}
+            className="w-full max-h-[60vh] object-contain pointer-events-none select-none"
+            draggable={false}
+          />
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/60 py-1 text-center text-[11px] text-white opacity-0 transition-opacity group-hover:opacity-100">
+            点击放大
+          </span>
+        </button>
+      ) : (
+        <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
+          {emptyText}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DtcDataFetchContent() {
   const { toast } = useToast();
   const [algorithm, setAlgorithm] = useState<DtcAlgorithm>('dtc_v2');
@@ -94,6 +138,8 @@ function DtcDataFetchContent() {
   const [errorMessage, setErrorMessage] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [enlargedImage, setEnlargedImage] = useState<{ url: string; title: string } | null>(null);
+  const [portalReady, setPortalReady] = useState(false);
 
   const parsedThreshold = Number.parseFloat(thresholdText);
   const thresholdValid = Number.isFinite(parsedThreshold) && parsedThreshold > 0 && parsedThreshold < 1;
@@ -115,6 +161,18 @@ function DtcDataFetchContent() {
 
   const buildArtifactUrl = (taskId: string, filePath: string) =>
     `${artifactProxyBase}/${taskId}/artifact?file_path=${encodeURIComponent(filePath)}&algorithm=${algorithm}`;
+
+  const openEnlargedImage = (url: string, title: string) => {
+    setEnlargedImage({ url, title });
+  };
+
+  useEffect(() => {
+    setPortalReady(true);
+  }, []);
+
+  useEffect(() => {
+    setEnlargedImage(null);
+  }, [previewIndex]);
   const selectedTaskIdRef = useRef('');
   const resultsRequestSeqRef = useRef(0);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -849,134 +907,162 @@ function DtcDataFetchContent() {
         </CardContent>
       </Card>
 
-      {previewIndex != null && mergedResults[previewIndex] ? (
-        <div
-          className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
-          onClick={() => setPreviewIndex(null)}
-        >
-          <div
-            className="bg-background rounded-lg w-[94vw] max-w-[1200px] max-h-[90vh] overflow-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="sticky top-0 bg-background border-b p-4 flex justify-between items-center z-10">
-              <div>
-                <h2 className="text-lg font-bold">结果预览</h2>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {getDisplayFileName(mergedResults[previewIndex])}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 text-xs"
-                  disabled={previewIndex <= 0}
-                  onClick={() => setPreviewIndex((i) => (i != null && i > 0 ? i - 1 : i))}
+      {portalReady && previewIndex != null && mergedResults[previewIndex]
+        ? createPortal(
+            (() => {
+              const previewItem = mergedResults[previewIndex];
+              const overlayPath = previewItem.overlayPath || previewItem.imagePath;
+              return (
+                <div
+                  className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4"
+                  onClick={() => {
+                    setEnlargedImage(null);
+                    setPreviewIndex(null);
+                  }}
                 >
-                  上一条
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 text-xs"
-                  disabled={previewIndex >= mergedResults.length - 1}
-                  onClick={() =>
-                    setPreviewIndex((i) => (i != null && i < mergedResults.length - 1 ? i + 1 : i))
-                  }
-                >
-                  下一条
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setPreviewIndex(null)}>
-                  <X className="h-5 w-5" />
-                </Button>
-              </div>
-            </div>
-            <div className="p-6 space-y-4">
-              <p className="text-sm text-muted-foreground">{getResultSummary(mergedResults[previewIndex])}</p>
-              {selectedTaskId ? (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="rounded-lg border border-border/50 bg-black p-2">
-                    <p className="text-xs text-muted-foreground mb-2">原图</p>
-                    {mergedResults[previewIndex].sourcePath ? (
-                      <img
-                        src={buildArtifactUrl(selectedTaskId, mergedResults[previewIndex].sourcePath!)}
-                        alt={`${getDisplayFileName(mergedResults[previewIndex])}-source`}
-                        className="w-full max-h-[60vh] object-contain"
-                      />
-                    ) : (
-                      <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
-                        无原图
+                  <div
+                    className="bg-background rounded-lg w-[94vw] max-w-[1200px] max-h-[90vh] overflow-auto"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="sticky top-0 bg-background border-b p-4 flex justify-between items-center z-10">
+                      <div>
+                        <h2 className="text-lg font-bold">
+                          {enlargedImage ? `${enlargedImage.title} - 大图预览` : '结果预览'}
+                        </h2>
+                        <p className="text-xs text-muted-foreground mt-1">{getDisplayFileName(previewItem)}</p>
                       </div>
-                    )}
-                  </div>
-                  {getResultMode(mergedResults[previewIndex]) === 'mask' ? (
-                    <div className="rounded-lg border border-border/50 bg-black p-2">
-                      <p className="text-xs text-muted-foreground mb-2">Mask</p>
-                      {mergedResults[previewIndex].maskPath ? (
-                        <img
-                          src={buildArtifactUrl(selectedTaskId, mergedResults[previewIndex].maskPath!)}
-                          alt={`${getDisplayFileName(mergedResults[previewIndex])}-mask`}
-                          className="w-full max-h-[60vh] object-contain"
-                        />
-                      ) : (
-                        <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
-                          无Mask图
+                      <div className="flex items-center gap-2">
+                        {enlargedImage ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-xs gap-1"
+                            onClick={() => setEnlargedImage(null)}
+                          >
+                            <ArrowLeft className="h-3.5 w-3.5" />
+                            返回三图预览
+                          </Button>
+                        ) : (
+                          <>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 text-xs"
+                              disabled={previewIndex <= 0}
+                              onClick={() => {
+                                setEnlargedImage(null);
+                                setPreviewIndex((i) => (i != null && i > 0 ? i - 1 : i));
+                              }}
+                            >
+                              上一条
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 text-xs"
+                              disabled={previewIndex >= mergedResults.length - 1}
+                              onClick={() => {
+                                setEnlargedImage(null);
+                                setPreviewIndex((i) => (i != null && i < mergedResults.length - 1 ? i + 1 : i));
+                              }}
+                            >
+                              下一条
+                            </Button>
+                          </>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setEnlargedImage(null);
+                            setPreviewIndex(null);
+                          }}
+                        >
+                          <X className="h-5 w-5" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      {enlargedImage ? (
+                        <div className="rounded-lg border border-border/50 bg-black p-3 flex items-center justify-center min-h-[50vh]">
+                          <img
+                            src={enlargedImage.url}
+                            alt={enlargedImage.title}
+                            className="max-w-full max-h-[75vh] w-auto h-auto object-contain"
+                          />
                         </div>
+                      ) : (
+                        <>
+                          <p className="text-sm text-muted-foreground">
+                            {getResultSummary(previewItem)}
+                            <span className="ml-2 text-xs">（点击图片可查看原尺寸大图）</span>
+                          </p>
+                          {selectedTaskId ? (
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                              <PreviewImagePanel
+                                label="原图"
+                                emptyText="无原图"
+                                url={
+                                  previewItem.sourcePath
+                                    ? buildArtifactUrl(selectedTaskId, previewItem.sourcePath)
+                                    : undefined
+                                }
+                                onOpen={openEnlargedImage}
+                              />
+                              {getResultMode(previewItem) === 'mask' ? (
+                                <PreviewImagePanel
+                                  label="Mask"
+                                  emptyText="无Mask图"
+                                  url={
+                                    previewItem.maskPath
+                                      ? buildArtifactUrl(selectedTaskId, previewItem.maskPath)
+                                      : undefined
+                                  }
+                                  onOpen={openEnlargedImage}
+                                />
+                              ) : null}
+                              <PreviewImagePanel
+                                label="Overlay"
+                                emptyText="无Overlay图"
+                                url={overlayPath ? buildArtifactUrl(selectedTaskId, overlayPath) : undefined}
+                                onOpen={openEnlargedImage}
+                              />
+                            </div>
+                          ) : (
+                            <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
+                              无预览图
+                            </div>
+                          )}
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="gap-1.5"
+                              onClick={() => downloadJson(previewItem, getJsonFileName(previewItem, previewIndex))}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              下载JSON
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="gap-1.5"
+                              onClick={() => handleCopyJson(previewIndex, previewItem)}
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                              复制JSON
+                            </Button>
+                          </div>
+                        </>
                       )}
                     </div>
-                  ) : null}
-                  <div className="rounded-lg border border-border/50 bg-black p-2">
-                    <p className="text-xs text-muted-foreground mb-2">Overlay</p>
-                    {mergedResults[previewIndex].overlayPath || mergedResults[previewIndex].imagePath ? (
-                      <img
-                        src={buildArtifactUrl(
-                          selectedTaskId,
-                          mergedResults[previewIndex].overlayPath || mergedResults[previewIndex].imagePath!
-                        )}
-                        alt={getDisplayFileName(mergedResults[previewIndex])}
-                        className="w-full max-h-[60vh] object-contain"
-                      />
-                    ) : (
-                      <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
-                        无Overlay图
-                      </div>
-                    )}
                   </div>
                 </div>
-              ) : (
-                <div className="flex h-40 items-center justify-center text-sm text-muted-foreground rounded-lg border">
-                  无预览图
-                </div>
-              )}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="gap-1.5"
-                  onClick={() =>
-                    downloadJson(
-                      mergedResults[previewIndex],
-                      getJsonFileName(mergedResults[previewIndex], previewIndex)
-                    )
-                  }
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  下载JSON
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="gap-1.5"
-                  onClick={() => handleCopyJson(previewIndex, mergedResults[previewIndex])}
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  复制JSON
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
+              );
+            })(),
+            document.body
+          )
+        : null}
     </div>
   );
 }

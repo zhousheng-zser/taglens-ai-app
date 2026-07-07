@@ -2,7 +2,7 @@
 # 浦东道运：根据当前目录下的 uuids.txt，用 mysql 查询 web-op.tbl_vqd_event_info，
 # 输出 vei_ubi_vqd_event_id 与 vei_ubi_short_id（制表符分隔）。
 #
-# 与 scripts/QualityJudgment02.sh 一致：MySQL 用户为 webadmin（视频质量诊断为 admin）。
+# 与 scripts/QualityJudgment02.sh 一致：MySQL 用户为 webadmin（交委指挥中心为 admin）。
 # 默认端口参考 scripts/sync_task_02.py 的 TARGET_SSH_DB_PORT；若与采集机实际不一致，
 # 请改下方 TARGET_IP / TARGET_DB_PORT（与运行 QualityJudgment02.sh 时传入一致）。
 #

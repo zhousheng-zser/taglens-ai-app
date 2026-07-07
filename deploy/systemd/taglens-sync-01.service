@@ -1,5 +1,5 @@
 [Unit]
-Description=TagLens 项目同步 sync_task_01 (视频质量诊断)
+Description=TagLens 项目同步 sync_task_01 (交委指挥中心)
 Documentation=file:/opt/Traffic-LLM/zser/taglens-ai-app/README.md
 After=network-online.target
 Wants=network-online.target taglens-backend.service taglens-llm-gateway.service

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response
@@ -15,6 +16,7 @@ from core.manage_database import (
     create_user,
     delete_time_range,
     delete_user,
+    get_pending_workload_daily,
     get_review_stats,
     get_review_stats_timeseries,
     list_user_time_ranges,
@@ -42,6 +44,12 @@ class CreateTimeRangeRequest(BaseModel):
     rangeName: str
     startTime: str
     endTime: str
+    workloadStatus: int = 0
+    workloadQa: int = 0
+    workloadAiDescription: int = 0
+    workloadReviewDescription: int = 0
+    workloadEnglishDescription: int = 0
+    workloadAccidentQa: int = 0
 
 
 def _cookie_kwargs() -> Dict[str, Any]:
@@ -160,6 +168,12 @@ async def add_time_range(
             range_name=request.rangeName.strip(),
             start_time=request.startTime,
             end_time=request.endTime,
+            workload_status=request.workloadStatus,
+            workload_qa=request.workloadQa,
+            workload_ai_description=request.workloadAiDescription,
+            workload_review_description=request.workloadReviewDescription,
+            workload_english_description=request.workloadEnglishDescription,
+            workload_accident_qa=request.workloadAccidentQa,
         )
         return {"success": True, "timeRange": time_range}
     except Exception as exc:
@@ -177,6 +191,12 @@ async def remove_time_range(range_id: int, _: Dict[str, Any] = Depends(require_a
 @router.get("/review-stats")
 async def review_stats(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     return {"success": True, "stats": get_review_stats()}
+
+
+@router.get("/pending-workload")
+async def pending_workload(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    payload = await run_blocking(get_pending_workload_daily)
+    return {"success": True, **payload}
 
 
 @router.get("/review-stats/timeseries")

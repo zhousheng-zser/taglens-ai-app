@@ -24,11 +24,13 @@ import {
   createUser,
   deleteTimeRange,
   deleteUser,
+  getPendingWorkload,
   getReviewStats,
   getReviewStatsTimeseries,
   listTimeRanges,
   listUsers,
   type CurrentUser,
+  type PendingWorkloadSummary,
   type ReviewStatsItem,
   type ReviewStatsTimeseries,
   type UserTimeRange,
@@ -41,6 +43,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { TASK_CATEGORIES, TASK_CATEGORY_LABELS } from '@/constants/taskAssignment';
 
 function pad2(n: number) {
   return String(n).padStart(2, '0');
@@ -108,7 +111,17 @@ function UserManagementContent() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [newUser, setNewUser] = useState({ username: '', password: '', displayName: '', role: 'reviewer' as 'admin' | 'reviewer' });
-  const [newRange, setNewRange] = useState({ rangeName: '', startTime: '', endTime: '' });
+  const [newRange, setNewRange] = useState({
+    rangeName: '',
+    startTime: '',
+    endTime: '',
+    workloadStatus: '0',
+    workloadQa: '0',
+    workloadAiDescription: '0',
+    workloadReviewDescription: '0',
+    workloadEnglishDescription: '0',
+    workloadAccidentQa: '0',
+  });
 
   const [statsTab, setStatsTab] = useState<StatsTab>('day');
   const [tsMonth, setTsMonth] = useState(() => formatLocalYM(today));
@@ -119,6 +132,9 @@ function UserManagementContent() {
   const [tsData, setTsData] = useState<ReviewStatsTimeseries | null>(null);
   const [tsLoading, setTsLoading] = useState(false);
   const [tsError, setTsError] = useState('');
+  const [pendingWorkload, setPendingWorkload] = useState<PendingWorkloadSummary | null>(null);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [pendingError, setPendingError] = useState('');
 
   const reviewers = useMemo(() => users.filter((user) => user.role === 'reviewer'), [users]);
   const selectedRanges = selectedUserId ? rangesByUser[selectedUserId] || [] : [];
@@ -156,6 +172,21 @@ function UserManagementContent() {
     }
   };
 
+  const fetchPendingWorkload = async () => {
+    setPendingLoading(true);
+    setPendingError('');
+    try {
+      const data = await getPendingWorkload();
+      setPendingWorkload(data);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '加载待分配工作量失败';
+      setPendingError(msg);
+      setPendingWorkload(null);
+    } finally {
+      setPendingLoading(false);
+    }
+  };
+
   const loadData = async () => {
     setIsLoading(true);
     setError('');
@@ -172,7 +203,7 @@ function UserManagementContent() {
         const firstReviewer = nextUsers.find((user) => user.role === 'reviewer');
         setSelectedUserId(firstReviewer?.id ?? nextUsers[0].id);
       }
-      await fetchTimeseries();
+      await Promise.all([fetchTimeseries(), fetchPendingWorkload()]);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '加载失败';
       setError(msg);
@@ -238,8 +269,24 @@ function UserManagementContent() {
       rangeName: newRange.rangeName,
       startTime: newRange.startTime.replace('T', ' '),
       endTime: newRange.endTime.replace('T', ' '),
+      workloadStatus: Number(newRange.workloadStatus) || 0,
+      workloadQa: Number(newRange.workloadQa) || 0,
+      workloadAiDescription: Number(newRange.workloadAiDescription) || 0,
+      workloadReviewDescription: Number(newRange.workloadReviewDescription) || 0,
+      workloadEnglishDescription: Number(newRange.workloadEnglishDescription) || 0,
+      workloadAccidentQa: Number(newRange.workloadAccidentQa) || 0,
     });
-    setNewRange({ rangeName: '', startTime: '', endTime: '' });
+    setNewRange({
+      rangeName: '',
+      startTime: '',
+      endTime: '',
+      workloadStatus: '0',
+      workloadQa: '0',
+      workloadAiDescription: '0',
+      workloadReviewDescription: '0',
+      workloadEnglishDescription: '0',
+      workloadAccidentQa: '0',
+    });
     await loadData();
   };
 
@@ -249,6 +296,23 @@ function UserManagementContent() {
   };
 
   const getStatsForUser = (userId: number) => stats.find((item) => item.userId === userId);
+
+  const pendingWorkloadItems = useMemo(() => {
+    if (!pendingWorkload) return [];
+    const valueByCategory = {
+      status: pendingWorkload.pendingStatus,
+      qa: pendingWorkload.pendingQa,
+      ai_description: pendingWorkload.pendingAiDescription,
+      review_description: pendingWorkload.pendingReviewDescription,
+      english_description: pendingWorkload.pendingEnglishDescription,
+      accident_qa: pendingWorkload.pendingAccidentQa,
+    } as const;
+    return TASK_CATEGORIES.map((category) => ({
+      category,
+      label: TASK_CATEGORY_LABELS[category],
+      count: valueByCategory[category],
+    }));
+  }, [pendingWorkload]);
 
   return (
     <div className="space-y-6">
@@ -315,7 +379,7 @@ function UserManagementContent() {
                   <TableHead>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>任务段</TableHead>
-                  <TableHead>五类完成数</TableHead>
+                  <TableHead>六类完成数</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -336,7 +400,7 @@ function UserManagementContent() {
                       <TableCell>{rangesByUser[user.id]?.length || 0}</TableCell>
                       <TableCell>
                         {user.role === 'reviewer'
-                          ? `样本 ${userStats?.statusDone || 0} / 问答 ${userStats?.qaDone || 0} / AI描述 ${userStats?.aiDescriptionDone || 0} / 审核描述 ${userStats?.reviewDescriptionDone || 0} / 英文描述 ${userStats?.englishDescriptionDone || 0}`
+                          ? `样本 ${userStats?.statusDone || 0} / 问答 ${userStats?.qaDone || 0} / AI描述 ${userStats?.aiDescriptionDone || 0} / 审核描述 ${userStats?.reviewDescriptionDone || 0} / 英文描述 ${userStats?.englishDescriptionDone || 0} / 专项问答 ${userStats?.accidentQaDone || 0}`
                           : '-'}
                       </TableCell>
                       <TableCell className="text-right">
@@ -354,9 +418,61 @@ function UserManagementContent() {
       </div>
 
       <Card>
+        <CardHeader className="pb-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>待分配处理的工作量</CardTitle>
+              <CardDescription>
+                统计 {pendingWorkload?.startTime?.slice(0, 10) ?? '2020-01-01'} 至当前：
+                各任务类别中仍待处理、且尚未分配给审核员的事件数量。
+                每日最多全量统计一次，当日重复打开直接读取数据库快照。
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void fetchPendingWorkload()}
+              disabled={pendingLoading}
+            >
+              {pendingLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              刷新
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {pendingError ? (
+            <p className="text-sm text-destructive">{pendingError}</p>
+          ) : pendingLoading && !pendingWorkload ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              正在统计待分配工作量…
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              {pendingWorkloadItems.map((item) => (
+                <div
+                  key={item.category}
+                  className="rounded-lg border border-border/40 bg-background/30 px-3 py-3"
+                >
+                  <p className="text-xs text-muted-foreground">{item.label}</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums">{item.count.toLocaleString()}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {pendingWorkload ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              统计日期：{pendingWorkload.statDate} · 统计截止时间：{pendingWorkload.computedAt}
+              {pendingWorkload.fromCache ? ' · 已使用今日数据库快照' : ' · 今日首次全量统计'}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader>
           <CardTitle>事件任务时间段分配</CardTitle>
-          <CardDescription>审核员只能查询并处理自己被分配时间段内的事件数据。</CardDescription>
+          <CardDescription>为审核员指定时间段与六类工作量；系统会自动分配待标注事件，且同类任务在审核员之间不重复。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-3 md:grid-cols-4">
@@ -396,6 +512,32 @@ function UserManagementContent() {
               />
             </div>
           </div>
+          <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">
+            <div className="space-y-2">
+              <Label>样本工作量</Label>
+              <Input type="number" min={0} value={newRange.workloadStatus} onChange={(e) => setNewRange({ ...newRange, workloadStatus: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>问答工作量</Label>
+              <Input type="number" min={0} value={newRange.workloadQa} onChange={(e) => setNewRange({ ...newRange, workloadQa: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>AI描述工作量</Label>
+              <Input type="number" min={0} value={newRange.workloadAiDescription} onChange={(e) => setNewRange({ ...newRange, workloadAiDescription: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>审核描述工作量</Label>
+              <Input type="number" min={0} value={newRange.workloadReviewDescription} onChange={(e) => setNewRange({ ...newRange, workloadReviewDescription: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>英文描述工作量</Label>
+              <Input type="number" min={0} value={newRange.workloadEnglishDescription} onChange={(e) => setNewRange({ ...newRange, workloadEnglishDescription: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>专项问答工作量</Label>
+              <Input type="number" min={0} value={newRange.workloadAccidentQa} onChange={(e) => setNewRange({ ...newRange, workloadAccidentQa: e.target.value })} placeholder="如 500" />
+            </div>
+          </div>
           <Button onClick={handleCreateRange} disabled={!selectedUserId}>
             <Plus className="mr-2 h-4 w-4" />
             添加任务时间段
@@ -407,6 +549,8 @@ function UserManagementContent() {
                 <TableHead>任务名称</TableHead>
                 <TableHead>开始时间</TableHead>
                 <TableHead>结束时间</TableHead>
+                <TableHead>工作量（样本/问答/AI/审核/英文/专项）</TableHead>
+                <TableHead>已分配</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -416,6 +560,12 @@ function UserManagementContent() {
                   <TableCell>{range.rangeName}</TableCell>
                   <TableCell>{range.startTime}</TableCell>
                   <TableCell>{range.endTime}</TableCell>
+                  <TableCell className="text-xs">
+                    {range.workloadStatus || 0} / {range.workloadQa || 0} / {range.workloadAiDescription || 0} / {range.workloadReviewDescription || 0} / {range.workloadEnglishDescription || 0} / {range.workloadAccidentQa || 0}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {range.assignedStatus || 0} / {range.assignedQa || 0} / {range.assignedAiDescription || 0} / {range.assignedReviewDescription || 0} / {range.assignedEnglishDescription || 0} / {range.assignedAccidentQa || 0}
+                  </TableCell>
                   <TableCell className="text-right">
                     <Button variant="ghost" size="sm" onClick={() => handleDeleteRange(range.id)}>
                       <Trash2 className="h-4 w-4" />
@@ -425,7 +575,7 @@ function UserManagementContent() {
               ))}
               {selectedRanges.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={4} className="text-center text-muted-foreground">暂无任务时间段</TableCell>
+                  <TableCell colSpan={6} className="text-center text-muted-foreground">暂无任务时间段</TableCell>
                 </TableRow>
               ) : null}
             </TableBody>
@@ -437,7 +587,7 @@ function UserManagementContent() {
         <CardHeader>
           <CardTitle>审核统计图表</CardTitle>
           <CardDescription>
-            支持按月 / 按日 / 按小时维度查看审核记录分布；筛选单个审核员时展示样本 / 问答 / AI描述 / 审核描述 / 英文描述 五条曲线。
+            支持按月 / 按日 / 按小时维度查看审核记录分布；筛选单个审核员时展示样本 / 问答 / AI描述 / 审核描述 / 英文描述 / 专项问答 六条曲线。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

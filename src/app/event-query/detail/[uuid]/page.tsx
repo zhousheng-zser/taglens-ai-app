@@ -22,7 +22,7 @@ import {
 } from '@/lib/eventQueryNav';
 import type { EventSearchResult } from '@/types/event';
 
-function EventQueryDetailContent() {
+function EventQueryDetailContent({ currentUser }: { currentUser: CurrentUser }) {
     const params = useParams<{ uuid: string }>();
     const searchParams = useSearchParams();
     const router = useRouter();
@@ -244,6 +244,11 @@ function EventQueryDetailContent() {
                         <EventStreamPlayer
                             key={currentRecord.uuid}
                             record={currentRecord}
+                            editableTaskCategories={
+                                currentUser.role === 'admin'
+                                    ? null
+                                    : (currentRecord.assignedTaskCategories ?? null)
+                            }
                             onDirtyChange={setHasUnsavedEdits}
                             onSaved={handleSegmentSaved}
                         />
@@ -284,7 +289,7 @@ export default function EventQueryDetailPage() {
 
     return (
         <AuthGate onUser={setUser}>
-            {user ? <EventQueryDetailContent /> : null}
+            {user ? <EventQueryDetailContent currentUser={user} /> : null}
         </AuthGate>
     );
 }

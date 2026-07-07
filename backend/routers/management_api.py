@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 import logging
 from pathlib import Path
 import os
@@ -69,6 +69,7 @@ EVENT_VIDEO_SEGMENT_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "e
 CURRENT_EVENT_VIDEO_SEGMENT_TASK: Dict[str, Any] = {
     "running": False,
     "limit": None,
+    "projectIds": None,
     "eventTypeCodes": None,
     "started_at": None,
     "cancel_event": None,
@@ -79,6 +80,79 @@ class PathRequest(BaseModel):
 
 def format_log(message: str, type: str = "info"):
     return json.dumps({"message": message, "type": type}, ensure_ascii=False) + "\n"
+
+
+LOG_STREAM_MAX_REPLAY_LINES = 200
+
+
+async def _log_file_follow_generator(
+    path: Path,
+    *,
+    from_start: bool,
+    is_running: Callable[[], bool],
+    empty_message: str,
+):
+    """跟踪任务日志文件；from_start 时仅回放最新 LOG_STREAM_MAX_REPLAY_LINES 条。"""
+    if not path.exists():
+        yield format_log(empty_message, "info")
+        yield format_log("日志流结束", "done")
+        return
+
+    position = path.stat().st_size
+    if from_start:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            yield format_log(f"读取日志时出错: {exc}", "error")
+            yield format_log("日志流结束", "done")
+            return
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        omitted = max(0, len(lines) - LOG_STREAM_MAX_REPLAY_LINES)
+        if omitted > 0:
+            yield format_log(
+                f"（仅回放最新 {LOG_STREAM_MAX_REPLAY_LINES} 条，另有 {omitted} 条更早日志未展示）",
+                "warning",
+            )
+            lines = lines[-LOG_STREAM_MAX_REPLAY_LINES:]
+        for line in lines:
+            yield f"{line}\n"
+        position = path.stat().st_size
+
+    idle_rounds = 0
+    try:
+        while True:
+            got_new = False
+            with path.open("r", encoding="utf-8") as f:
+                f.seek(position)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        position = f.tell()
+                        break
+                    if line.strip():
+                        yield line
+                        got_new = True
+                    position = f.tell()
+
+            if is_running():
+                idle_rounds = 0
+                await asyncio.sleep(0.2)
+                continue
+
+            if got_new:
+                idle_rounds = 0
+                await asyncio.sleep(0.2)
+                continue
+
+            idle_rounds += 1
+            if idle_rounds >= 2:
+                break
+            await asyncio.sleep(0.2)
+
+        yield format_log("日志流结束", "done")
+    except Exception as exc:
+        yield format_log(f"读取日志时出错: {exc}", "error")
+        yield format_log("日志流结束", "done")
 
 
 def _append_segment_desc_fill_log_line(line: str) -> None:
@@ -367,6 +441,7 @@ class ReextractTagsRequest(BaseModel):
 
 class EventVideoSegmentRequest(BaseModel):
     limit: int = 10
+    projectIds: List[str] = []
     eventTypeCodes: List[str] = []
 
 
@@ -393,6 +468,7 @@ def _segment_and_persist_one_event(minio_client, row: Dict[str, Any]) -> Dict[st
 async def _run_event_video_segment_job(
     limit: int,
     event_type_codes: Optional[List[str]] = None,
+    project_ids: Optional[List[str]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> None:
     global CURRENT_EVENT_VIDEO_SEGMENT_TASK
@@ -402,7 +478,10 @@ async def _run_event_video_segment_job(
 
     safe_limit = max(int(limit or 0), 1)
     normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
-    scope_text = "全部事件类型" if not normalized_codes else f"事件类型={','.join(normalized_codes)}"
+    normalized_project_ids = [item.strip() for item in (project_ids or []) if item and item.strip()]
+    project_text = "全部项目" if not normalized_project_ids else f"项目={','.join(normalized_project_ids)}"
+    type_text = "全部事件类型" if not normalized_codes else f"事件类型={','.join(normalized_codes)}"
+    scope_text = f"{project_text}, {type_text}"
     try:
         await _log_event_video_segment(
             f"任务启动: 事件视频分块 (处理数量: {safe_limit}, {scope_text})",
@@ -427,11 +506,12 @@ async def _run_event_video_segment_job(
         get_pending_event_videos_for_segmentation,
         safe_limit,
         normalized_codes,
+        normalized_project_ids,
     )
     total = len(rows)
     if total <= 0:
         await _log_event_video_segment(
-            "未找到可处理视频（仅处理未分块、video_path 非空且符合事件类型筛选的记录）",
+            "未找到可处理视频（仅处理未分块、video_path 非空且符合项目/事件类型筛选的记录）",
             "warning",
         )
         await _log_event_video_segment("任务结束", "done")
@@ -484,52 +564,21 @@ async def _run_event_video_segment_job(
 
 
 async def _event_video_segment_log_follow_generator(from_start: bool = False):
-    """跟踪事件视频分块日志文件（启动任务时从头读；重连时从尾部读）。"""
-    if not EVENT_VIDEO_SEGMENT_LOG_PATH.exists():
-        yield format_log("当前暂无事件视频分块任务日志。", "info")
-        yield format_log("日志流结束", "done")
-        return
-
-    position = 0 if from_start else EVENT_VIDEO_SEGMENT_LOG_PATH.stat().st_size
-    idle_rounds = 0
-
-    try:
-        while True:
-            got_new = False
-            with EVENT_VIDEO_SEGMENT_LOG_PATH.open("r", encoding="utf-8") as f:
-                f.seek(position)
-                while True:
-                    line = f.readline()
-                    if not line:
-                        position = f.tell()
-                        break
-                    if line.strip():
-                        yield line
-                        got_new = True
-                    position = f.tell()
-
-            if CURRENT_EVENT_VIDEO_SEGMENT_TASK.get("running"):
-                idle_rounds = 0
-                await asyncio.sleep(0.2)
-                continue
-
-            if got_new:
-                idle_rounds = 0
-                await asyncio.sleep(0.2)
-                continue
-
-            idle_rounds += 1
-            if idle_rounds >= 2:
-                break
-            await asyncio.sleep(0.2)
-
-        yield format_log("日志流结束", "done")
-    except Exception as exc:
-        yield format_log(f"读取日志时出错: {exc}", "error")
-        yield format_log("日志流结束", "done")
+    """跟踪事件视频分块日志文件（启动任务时回放最新日志；重连时从尾部读）。"""
+    async for line in _log_file_follow_generator(
+        EVENT_VIDEO_SEGMENT_LOG_PATH,
+        from_start=from_start,
+        is_running=lambda: bool(CURRENT_EVENT_VIDEO_SEGMENT_TASK.get("running")),
+        empty_message="当前暂无事件视频分块任务日志。",
+    ):
+        yield line
 
 
-async def event_video_segment_generator(limit: int, event_type_codes: Optional[List[str]] = None):
+async def event_video_segment_generator(
+    limit: int,
+    event_type_codes: Optional[List[str]] = None,
+    project_ids: Optional[List[str]] = None,
+):
     global CURRENT_EVENT_VIDEO_SEGMENT_TASK
 
     if CURRENT_EVENT_VIDEO_SEGMENT_TASK.get("running"):
@@ -549,6 +598,7 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
     CURRENT_EVENT_VIDEO_SEGMENT_TASK = {
         "running": True,
         "limit": limit,
+        "projectIds": list(project_ids or []),
         "eventTypeCodes": list(event_type_codes or []),
         "started_at": datetime.utcnow().isoformat() + "Z",
         "cancel_event": cancel_event,
@@ -556,7 +606,12 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
 
     async def _job_wrapper() -> None:
         try:
-            await _run_event_video_segment_job(limit, event_type_codes, cancel_event=cancel_event)
+            await _run_event_video_segment_job(
+                limit,
+                event_type_codes,
+                project_ids,
+                cancel_event=cancel_event,
+            )
         except Exception as exc:
             await _log_event_video_segment(f"任务异常: {exc}", "error")
             await _log_event_video_segment("任务结束", "done")
@@ -579,7 +634,7 @@ async def event_video_segment_generator(limit: int, event_type_codes: Optional[L
 
 @router.post("/event-video-segment")
 async def event_video_segment_endpoint(req: EventVideoSegmentRequest):
-    return await event_video_segment_generator(req.limit, req.eventTypeCodes)
+    return await event_video_segment_generator(req.limit, req.eventTypeCodes, req.projectIds)
 
 
 @router.get("/event-video-segment/status")
@@ -835,49 +890,14 @@ async def _run_segment_desc_fill_job(
 
 
 async def _segment_desc_fill_log_follow_generator(from_start: bool = False):
-    """跟踪分段描述补齐日志文件（启动任务时从头读；重连时从尾部读）。"""
-    if not SEGMENT_DESC_FILL_LOG_PATH.exists():
-        yield format_log("当前暂无事件分段描述补齐任务日志。", "info")
-        yield format_log("日志流结束", "done")
-        return
-
-    position = 0 if from_start else SEGMENT_DESC_FILL_LOG_PATH.stat().st_size
-    idle_rounds = 0
-
-    try:
-        while True:
-            got_new = False
-            with SEGMENT_DESC_FILL_LOG_PATH.open("r", encoding="utf-8") as f:
-                f.seek(position)
-                while True:
-                    line = f.readline()
-                    if not line:
-                        position = f.tell()
-                        break
-                    if line.strip():
-                        yield line
-                        got_new = True
-                    position = f.tell()
-
-            if CURRENT_SEGMENT_DESC_FILL_TASK.get("running"):
-                idle_rounds = 0
-                await asyncio.sleep(0.2)
-                continue
-
-            if got_new:
-                idle_rounds = 0
-                await asyncio.sleep(0.2)
-                continue
-
-            idle_rounds += 1
-            if idle_rounds >= 2:
-                break
-            await asyncio.sleep(0.2)
-
-        yield format_log("日志流结束", "done")
-    except Exception as exc:
-        yield format_log(f"读取日志时出错: {exc}", "error")
-        yield format_log("日志流结束", "done")
+    """跟踪分段描述补齐日志文件（启动任务时回放最新日志；重连时从尾部读）。"""
+    async for line in _log_file_follow_generator(
+        SEGMENT_DESC_FILL_LOG_PATH,
+        from_start=from_start,
+        is_running=lambda: bool(CURRENT_SEGMENT_DESC_FILL_TASK.get("running")),
+        empty_message="当前暂无事件分段描述补齐任务日志。",
+    ):
+        yield line
 
 
 @router.post("/event-segment-desc-fill")
@@ -1051,49 +1071,14 @@ def _reextract_task_is_running() -> bool:
 
 
 async def _reextract_log_follow_generator(from_start: bool = False):
-    """跟踪缺失标签补齐日志文件（启动任务时从头读；重连时从尾部读）。"""
-    if not REEXTRACT_LOG_PATH.exists():
-        yield format_log("当前暂无缺失标签补齐任务日志。", "info")
-        yield format_log("日志流结束", "done")
-        return
-
-    position = 0 if from_start else REEXTRACT_LOG_PATH.stat().st_size
-    idle_rounds = 0
-
-    try:
-        while True:
-            got_new = False
-            with REEXTRACT_LOG_PATH.open("r", encoding="utf-8") as f:
-                f.seek(position)
-                while True:
-                    line = f.readline()
-                    if not line:
-                        position = f.tell()
-                        break
-                    if line.strip():
-                        yield line
-                        got_new = True
-                    position = f.tell()
-
-            if _reextract_task_is_running():
-                idle_rounds = 0
-                await asyncio.sleep(0.2)
-                continue
-
-            if got_new:
-                idle_rounds = 0
-                await asyncio.sleep(0.2)
-                continue
-
-            idle_rounds += 1
-            if idle_rounds >= 2:
-                break
-            await asyncio.sleep(0.2)
-
-        yield format_log("日志流结束", "done")
-    except Exception as exc:
-        yield format_log(f"读取日志时出错: {exc}", "error")
-        yield format_log("日志流结束", "done")
+    """跟踪缺失标签补齐日志文件（启动任务时回放最新日志；重连时从尾部读）。"""
+    async for line in _log_file_follow_generator(
+        REEXTRACT_LOG_PATH,
+        from_start=from_start,
+        is_running=_reextract_task_is_running,
+        empty_message="当前暂无缺失标签补齐任务日志。",
+    ):
+        yield line
 
 
 @router.get("/reextract-tags/log-stream")

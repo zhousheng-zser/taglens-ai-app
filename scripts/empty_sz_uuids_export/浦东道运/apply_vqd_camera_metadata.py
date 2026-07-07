@@ -6,7 +6,7 @@
 
   camera_id, sz_name, sz_tag_ref_json
 
-逻辑与「视频质量诊断」目录下 apply_vqd_camera_metadata.py 相同；
+逻辑与「交委指挥中心」目录下 apply_vqd_camera_metadata.py 相同；
 默认仅 path 过滤为「浦东道运」，其它参数仍可用命令行覆盖。
 
 按 file_path 文件名解析事件 ID：{uuid}_{事件id}.jpg。

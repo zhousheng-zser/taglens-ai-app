@@ -133,6 +133,47 @@ def init_manage_database() -> None:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
+        _ensure_column(cursor, "user_time_ranges", "workload_status", "INT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "user_time_ranges", "workload_qa", "INT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "user_time_ranges", "workload_ai_description", "INT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "user_time_ranges", "workload_review_description", "INT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "user_time_ranges", "workload_english_description", "INT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "user_time_ranges", "workload_accident_qa", "INT NOT NULL DEFAULT 0")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_task_assignments (
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                time_range_id INT NOT NULL,
+                task_category VARCHAR(32) NOT NULL,
+                event_id VARCHAR(255) NOT NULL,
+                project_id VARCHAR(255) NOT NULL,
+                event_type_code VARCHAR(64) NOT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_event_task_category (event_id, project_id, event_type_code, task_category),
+                KEY idx_eta_user_range (user_id, time_range_id),
+                KEY idx_eta_range_category (time_range_id, task_category),
+                CONSTRAINT fk_eta_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                CONSTRAINT fk_eta_time_range FOREIGN KEY (time_range_id) REFERENCES user_time_ranges(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_workload_daily_snapshots (
+                stat_date VARCHAR(10) NOT NULL PRIMARY KEY,
+                start_time VARCHAR(64) NOT NULL,
+                end_time VARCHAR(64) NOT NULL,
+                computed_at VARCHAR(64) NOT NULL,
+                pending_status INT NOT NULL DEFAULT 0,
+                pending_qa INT NOT NULL DEFAULT 0,
+                pending_ai_description INT NOT NULL DEFAULT 0,
+                pending_review_description INT NOT NULL DEFAULT 0,
+                pending_english_description INT NOT NULL DEFAULT 0,
+                pending_accident_qa INT NOT NULL DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS event_review_records (
@@ -164,6 +205,7 @@ def init_manage_database() -> None:
         _ensure_column(cursor, "event_review_records", "ai_description_done", "TINYINT NOT NULL DEFAULT 0")
         _ensure_column(cursor, "event_review_records", "review_description_done", "TINYINT NOT NULL DEFAULT 0")
         _ensure_column(cursor, "event_review_records", "english_description_done", "TINYINT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "event_review_records", "accident_qa_done", "TINYINT NOT NULL DEFAULT 0")
         cursor.execute(
             """
             UPDATE event_review_records
@@ -576,33 +618,77 @@ def delete_user(user_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def _time_range_row_to_dict(row: Dict[str, Any], assigned_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    result = {
+        "id": int(row["id"]),
+        "userId": int(row["user_id"]),
+        "rangeName": row["range_name"],
+        "startTime": row["start_time"],
+        "endTime": row["end_time"],
+        "createdAt": row["created_at"],
+        "workloadStatus": int(row.get("workload_status") or 0),
+        "workloadQa": int(row.get("workload_qa") or 0),
+        "workloadAiDescription": int(row.get("workload_ai_description") or 0),
+        "workloadReviewDescription": int(row.get("workload_review_description") or 0),
+        "workloadEnglishDescription": int(row.get("workload_english_description") or 0),
+        "workloadAccidentQa": int(row.get("workload_accident_qa") or 0),
+    }
+    if assigned_counts is not None:
+        result["assignedStatus"] = assigned_counts.get("status", 0)
+        result["assignedQa"] = assigned_counts.get("qa", 0)
+        result["assignedAiDescription"] = assigned_counts.get("ai_description", 0)
+        result["assignedReviewDescription"] = assigned_counts.get("review_description", 0)
+        result["assignedEnglishDescription"] = assigned_counts.get("english_description", 0)
+        result["assignedAccidentQa"] = assigned_counts.get("accident_qa", 0)
+    return result
+
+
 def list_user_time_ranges(user_id: int) -> List[Dict[str, Any]]:
+    from core.task_assignment import get_assigned_counts_by_range
+
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, user_id, range_name, start_time, end_time, created_at
+            SELECT id, user_id, range_name, start_time, end_time, created_at,
+                   workload_status, workload_qa, workload_ai_description,
+                   workload_review_description, workload_english_description, workload_accident_qa
             FROM user_time_ranges
             WHERE user_id = %s
             ORDER BY start_time ASC, id ASC
             """,
             (user_id,),
         )
-        return [
-            {
-                "id": int(row["id"]),
-                "userId": int(row["user_id"]),
-                "rangeName": row["range_name"],
-                "startTime": row["start_time"],
-                "endTime": row["end_time"],
-                "createdAt": row["created_at"],
-            }
-            for row in cursor.fetchall()
-        ]
+        rows = cursor.fetchall()
+    return [
+        _time_range_row_to_dict(row, get_assigned_counts_by_range(int(row["id"])))
+        for row in rows
+    ]
 
 
-def create_time_range(user_id: int, range_name: str, start_time: str, end_time: str) -> Dict[str, Any]:
+def create_time_range(
+    user_id: int,
+    range_name: str,
+    start_time: str,
+    end_time: str,
+    workload_status: int = 0,
+    workload_qa: int = 0,
+    workload_ai_description: int = 0,
+    workload_review_description: int = 0,
+    workload_english_description: int = 0,
+    workload_accident_qa: int = 0,
+) -> Dict[str, Any]:
+    from core.task_assignment import allocate_tasks_for_time_range, get_assigned_counts_by_range
+
     now = datetime.now().isoformat()
+    workloads = {
+        "workload_status": max(0, int(workload_status)),
+        "workload_qa": max(0, int(workload_qa)),
+        "workload_ai_description": max(0, int(workload_ai_description)),
+        "workload_review_description": max(0, int(workload_review_description)),
+        "workload_english_description": max(0, int(workload_english_description)),
+        "workload_accident_qa": max(0, int(workload_accident_qa)),
+    }
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
@@ -610,13 +696,146 @@ def create_time_range(user_id: int, range_name: str, start_time: str, end_time: 
             raise ValueError("用户不存在")
         cursor.execute(
             """
-            INSERT INTO user_time_ranges (user_id, range_name, start_time, end_time, created_at)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO user_time_ranges (
+                user_id, range_name, start_time, end_time, created_at,
+                workload_status, workload_qa, workload_ai_description,
+                workload_review_description, workload_english_description, workload_accident_qa
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (user_id, range_name, start_time, end_time, now),
+            (
+                user_id,
+                range_name,
+                start_time,
+                end_time,
+                now,
+                workloads["workload_status"],
+                workloads["workload_qa"],
+                workloads["workload_ai_description"],
+                workloads["workload_review_description"],
+                workloads["workload_english_description"],
+                workloads["workload_accident_qa"],
+            ),
         )
         range_id = int(cursor.lastrowid)
-    return next(item for item in list_user_time_ranges(user_id) if item["id"] == range_id)
+    try:
+        allocate_tasks_for_time_range(range_id)
+    except Exception as exc:
+        delete_time_range(range_id)
+        raise ValueError(f"任务分配失败: {exc}") from exc
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, user_id, range_name, start_time, end_time, created_at,
+                   workload_status, workload_qa, workload_ai_description,
+                   workload_review_description, workload_english_description, workload_accident_qa
+            FROM user_time_ranges WHERE id = %s
+            """,
+            (range_id,),
+        )
+        row = cursor.fetchone()
+    return _time_range_row_to_dict(row, get_assigned_counts_by_range(range_id))
+
+
+def _pending_workload_snapshot_to_api(row: Dict[str, Any], from_cache: bool) -> Dict[str, Any]:
+    return {
+        "statDate": str(row["stat_date"]),
+        "startTime": str(row["start_time"]),
+        "endTime": str(row["end_time"]),
+        "computedAt": str(row["computed_at"]),
+        "pendingStatus": int(row["pending_status"] or 0),
+        "pendingQa": int(row["pending_qa"] or 0),
+        "pendingAiDescription": int(row["pending_ai_description"] or 0),
+        "pendingReviewDescription": int(row["pending_review_description"] or 0),
+        "pendingEnglishDescription": int(row["pending_english_description"] or 0),
+        "pendingAccidentQa": int(row["pending_accident_qa"] or 0),
+        "fromCache": from_cache,
+    }
+
+
+def _get_pending_workload_snapshot_row(stat_date: str) -> Optional[Dict[str, Any]]:
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT stat_date, start_time, end_time, computed_at,
+                   pending_status, pending_qa, pending_ai_description,
+                   pending_review_description, pending_english_description, pending_accident_qa
+            FROM pending_workload_daily_snapshots
+            WHERE stat_date = %s
+            LIMIT 1
+            """,
+            (stat_date,),
+        )
+        return cursor.fetchone()
+
+
+def _upsert_pending_workload_snapshot(
+    stat_date: str,
+    start_time: str,
+    end_time: str,
+    computed_at: str,
+    counts: Dict[str, int],
+) -> Dict[str, Any]:
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO pending_workload_daily_snapshots (
+                stat_date, start_time, end_time, computed_at,
+                pending_status, pending_qa, pending_ai_description,
+                pending_review_description, pending_english_description, pending_accident_qa
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                start_time = VALUES(start_time),
+                end_time = VALUES(end_time),
+                computed_at = VALUES(computed_at),
+                pending_status = VALUES(pending_status),
+                pending_qa = VALUES(pending_qa),
+                pending_ai_description = VALUES(pending_ai_description),
+                pending_review_description = VALUES(pending_review_description),
+                pending_english_description = VALUES(pending_english_description),
+                pending_accident_qa = VALUES(pending_accident_qa)
+            """,
+            (
+                stat_date,
+                start_time,
+                end_time,
+                computed_at,
+                int(counts.get("status", 0)),
+                int(counts.get("qa", 0)),
+                int(counts.get("ai_description", 0)),
+                int(counts.get("review_description", 0)),
+                int(counts.get("english_description", 0)),
+                int(counts.get("accident_qa", 0)),
+            ),
+        )
+    row = _get_pending_workload_snapshot_row(stat_date)
+    if not row:
+        raise RuntimeError("待分配工作量快照写入失败")
+    return row
+
+
+def get_pending_workload_daily() -> Dict[str, Any]:
+    """每日最多全量统计一次；当日已有快照则直接读库。"""
+    from core.task_assignment import PENDING_WORKLOAD_START_TIME, compute_pending_workload_counts
+
+    stat_date = datetime.now().strftime("%Y-%m-%d")
+    cached = _get_pending_workload_snapshot_row(stat_date)
+    if cached is not None:
+        return _pending_workload_snapshot_to_api(cached, from_cache=True)
+
+    counts, end_time = compute_pending_workload_counts()
+    computed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    saved = _upsert_pending_workload_snapshot(
+        stat_date=stat_date,
+        start_time=PENDING_WORKLOAD_START_TIME,
+        end_time=end_time,
+        computed_at=computed_at,
+        counts=counts,
+    )
+    return _pending_workload_snapshot_to_api(saved, from_cache=False)
 
 
 def delete_time_range(range_id: int) -> bool:
@@ -665,6 +884,7 @@ def upsert_event_review_record(
     ai_description_done: bool,
     review_description_done: bool,
     english_description_done: bool,
+    accident_qa_done: bool = True,
 ) -> Dict[str, Any]:
     now = datetime.now().isoformat()
     with get_manage_db_connection() as conn:
@@ -676,9 +896,10 @@ def upsert_event_review_record(
                 reviewer_id, reviewer_username, reviewer_display_name, review_time,
                 status_review_done, qa_review_done, description_review_done,
                 ai_description_done, review_description_done, english_description_done,
+                accident_qa_done,
                 created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 reviewer_id = VALUES(reviewer_id),
                 reviewer_username = VALUES(reviewer_username),
@@ -689,6 +910,7 @@ def upsert_event_review_record(
                 ai_description_done = VALUES(ai_description_done),
                 review_description_done = VALUES(review_description_done),
                 english_description_done = VALUES(english_description_done),
+                accident_qa_done = VALUES(accident_qa_done),
                 updated_at = VALUES(updated_at)
             """,
             (
@@ -705,6 +927,7 @@ def upsert_event_review_record(
                 1 if ai_description_done else 0,
                 1 if review_description_done else 0,
                 1 if english_description_done else 0,
+                1 if accident_qa_done else 0,
                 now,
                 now,
             ),
@@ -737,6 +960,7 @@ def get_event_review_record(event_id: str, project_id: str, event_type_code: str
             "aiDescriptionDone": bool(row.get("ai_description_done")),
             "reviewDescriptionDone": bool(row.get("review_description_done")),
             "englishDescriptionDone": bool(row.get("english_description_done")),
+            "accidentQaReviewDone": bool(row.get("accident_qa_done")),
         }
 
 
@@ -768,6 +992,7 @@ def get_event_review_records_for_keys(keys: List[tuple[str, str, str]]) -> Dict[
                     "aiDescriptionDone": bool(row.get("ai_description_done")),
                     "reviewDescriptionDone": bool(row.get("review_description_done")),
                     "englishDescriptionDone": bool(row.get("english_description_done")),
+                    "accidentQaReviewDone": bool(row.get("accident_qa_done")),
                 }
     return result
 
@@ -786,7 +1011,8 @@ def get_review_stats() -> List[Dict[str, Any]]:
                 SUM(CASE WHEN r.qa_review_done = 1 THEN 1 ELSE 0 END) AS qa_done,
                 SUM(CASE WHEN r.ai_description_done = 1 THEN 1 ELSE 0 END) AS ai_description_done,
                 SUM(CASE WHEN r.review_description_done = 1 THEN 1 ELSE 0 END) AS review_description_done,
-                SUM(CASE WHEN r.english_description_done = 1 THEN 1 ELSE 0 END) AS english_description_done
+                SUM(CASE WHEN r.english_description_done = 1 THEN 1 ELSE 0 END) AS english_description_done,
+                SUM(CASE WHEN r.accident_qa_done = 1 THEN 1 ELSE 0 END) AS accident_qa_done
             FROM users u
             LEFT JOIN event_review_records r ON r.reviewer_id = u.id
             WHERE u.role = 'reviewer'
@@ -805,6 +1031,7 @@ def get_review_stats() -> List[Dict[str, Any]]:
                 "aiDescriptionDone": int(row["ai_description_done"] or 0),
                 "reviewDescriptionDone": int(row["review_description_done"] or 0),
                 "englishDescriptionDone": int(row["english_description_done"] or 0),
+                "accidentQaDone": int(row["accident_qa_done"] or 0),
             }
             for row in cursor.fetchall()
         ]
@@ -920,7 +1147,8 @@ def get_review_stats_timeseries(
                        SUM(CASE WHEN r.qa_review_done = 1 THEN 1 ELSE 0 END) AS qa,
                        SUM(CASE WHEN r.ai_description_done = 1 THEN 1 ELSE 0 END) AS ai_dsc,
                        SUM(CASE WHEN r.review_description_done = 1 THEN 1 ELSE 0 END) AS rev_dsc,
-                       SUM(CASE WHEN r.english_description_done = 1 THEN 1 ELSE 0 END) AS en_dsc
+                       SUM(CASE WHEN r.english_description_done = 1 THEN 1 ELSE 0 END) AS en_dsc,
+                       SUM(CASE WHEN r.accident_qa_done = 1 THEN 1 ELSE 0 END) AS acc_qa
                 FROM event_review_records r
                 WHERE {where}
                 GROUP BY time_label
@@ -957,6 +1185,10 @@ def get_review_stats_timeseries(
                 {
                     "label": f"{display} (英文描述)",
                     "data": [metric_at(tl, "en_dsc") for tl in sorted_labels],
+                },
+                {
+                    "label": f"{display} (专项问答)",
+                    "data": [metric_at(tl, "acc_qa") for tl in sorted_labels],
                 },
             ]
             total_review_events = total_events_where(role_reviewer_only=False)

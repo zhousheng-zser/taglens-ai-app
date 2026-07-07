@@ -480,7 +480,7 @@ def batch_reextract_missing_tags_codex() -> None:
                 mime_type = "image/webp"
             data_uri = f"data:{mime_type};base64,{base64.b64encode(img_bytes).decode('utf-8')}"
 
-            project_name = "浦东道运" if "浦东道运" in rel_path else "视频质量诊断"
+            project_name = "浦东道运" if "浦东道运" in rel_path else "交委指挥中心"
             final_prompt = build_codex_prompt(project_name=project_name, camera_id=camera_id)
             print("  -> 本地执行 Codex...", flush=True)
             analysis_result = analyze_image_with_codex_local(

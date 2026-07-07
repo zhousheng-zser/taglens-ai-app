@@ -10,7 +10,7 @@
   - sz_tag_ref_json 为 JSON 数组字符串，元素来自映射表 szTagRef1/2/3（非空项）。
 
 按 file_path 中文件名解析事件 ID：{uuid}_{事件id}.jpg，与 export_empty_sz_uuids_by_path.py 一致。
-默认只处理 file_path 包含「视频质量诊断」的图片，且默认仅更新 sz_name 为空的记录。
+默认只处理 file_path 包含「交委指挥中心」的图片，且默认仅更新 sz_name 为空的记录。
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--path-substring",
-        default="视频质量诊断",
+        default="交委指挥中心",
         help="只处理 file_path 包含该子串的记录（空字符串表示不限制）",
     )
     parser.add_argument(

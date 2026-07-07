@@ -5,6 +5,18 @@ export interface UserTimeRange {
   startTime: string;
   endTime: string;
   createdAt: string;
+  workloadStatus?: number;
+  workloadQa?: number;
+  workloadAiDescription?: number;
+  workloadReviewDescription?: number;
+  workloadEnglishDescription?: number;
+  workloadAccidentQa?: number;
+  assignedStatus?: number;
+  assignedQa?: number;
+  assignedAiDescription?: number;
+  assignedReviewDescription?: number;
+  assignedEnglishDescription?: number;
+  assignedAccidentQa?: number;
 }
 
 export interface CurrentUser {
@@ -28,6 +40,7 @@ export interface ReviewStatsItem {
   aiDescriptionDone: number;
   reviewDescriptionDone: number;
   englishDescriptionDone: number;
+  accidentQaDone: number;
 }
 
 export interface ReviewStatsTimeseriesDataset {
@@ -43,6 +56,20 @@ export interface ReviewStatsTimeseries {
   totalReviewEvents: number;
   participantCount: number;
   timeRangeLabel: string;
+}
+
+export interface PendingWorkloadSummary {
+  statDate: string;
+  startTime: string;
+  endTime: string;
+  computedAt: string;
+  pendingStatus: number;
+  pendingQa: number;
+  pendingAiDescription: number;
+  pendingReviewDescription: number;
+  pendingEnglishDescription: number;
+  pendingAccidentQa: number;
+  fromCache: boolean;
 }
 
 export const AUTH_STATE_CHANGED_EVENT = 'taglens-auth-state-changed';
@@ -128,6 +155,12 @@ export async function createTimeRange(userId: number, input: {
   rangeName: string;
   startTime: string;
   endTime: string;
+  workloadStatus?: number;
+  workloadQa?: number;
+  workloadAiDescription?: number;
+  workloadReviewDescription?: number;
+  workloadEnglishDescription?: number;
+  workloadAccidentQa?: number;
 }): Promise<UserTimeRange> {
   const data = await readJson<{ success: boolean; timeRange: UserTimeRange }>(
     await fetch(`/api/backend/auth/users/${userId}/time-ranges`, {
@@ -148,6 +181,25 @@ export async function getReviewStats(): Promise<ReviewStatsItem[]> {
     await fetch('/api/backend/auth/review-stats', { cache: 'no-store' }),
   );
   return data.stats;
+}
+
+export async function getPendingWorkload(): Promise<PendingWorkloadSummary> {
+  const data = await readJson<PendingWorkloadSummary & { success: boolean }>(
+    await fetch('/api/backend/auth/pending-workload', { cache: 'no-store' }),
+  );
+  return {
+    statDate: data.statDate,
+    startTime: data.startTime,
+    endTime: data.endTime,
+    computedAt: data.computedAt,
+    pendingStatus: data.pendingStatus,
+    pendingQa: data.pendingQa,
+    pendingAiDescription: data.pendingAiDescription,
+    pendingReviewDescription: data.pendingReviewDescription,
+    pendingEnglishDescription: data.pendingEnglishDescription,
+    pendingAccidentQa: data.pendingAccidentQa,
+    fromCache: Boolean(data.fromCache),
+  };
 }
 
 export async function getReviewStatsTimeseries(input: {

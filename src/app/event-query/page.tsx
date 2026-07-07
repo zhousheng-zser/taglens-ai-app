@@ -15,6 +15,8 @@ import { useToast } from '@/hooks/use-toast';
 import { format, subMinutes, subHours, subDays, startOfWeek, startOfMonth, subMonths } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { getEventMeta, searchEvents } from '@/app/actions';
+import type { TaskCategory } from '@/constants/taskAssignment';
+import { getTaskCategoryFilterOptionsForRange } from '@/constants/taskAssignment';
 import type { EventOptionItem, EventSearchResult } from '@/types/event';
 import type { CurrentUser } from '@/lib/auth';
 import {
@@ -24,6 +26,7 @@ import {
   loadEventQuerySession,
   saveEventQuerySession,
   slimEventSearchResults,
+  takeCachedEventQueryPageResults,
   type EventQuerySessionState,
 } from '@/lib/eventQueryNav';
 import {
@@ -86,6 +89,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const [descriptionStatus, setDescriptionStatus] = useState<'all' | 'all_edited' | 'all_unedited' | 'partially_edited'>('all');
   const [selectedRange, setSelectedRange] = useState('all');
   const [selectedAssignedRangeId, setSelectedAssignedRangeId] = useState<string>('');
+  const [assignedTaskCategoryFilter, setAssignedTaskCategoryFilter] = useState<'all' | TaskCategory>('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [page, setPage] = useState(1);
@@ -107,6 +111,13 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const isReviewer = currentUser?.role === 'reviewer';
   const assignedRanges = currentUser?.timeRanges || [];
   const selectedAssignedRange = assignedRanges.find((item) => String(item.id) === selectedAssignedRangeId);
+  const taskCategoryFilterOptions = getTaskCategoryFilterOptionsForRange(selectedAssignedRange);
+
+  useEffect(() => {
+    if (!taskCategoryFilterOptions.some((option) => option.value === assignedTaskCategoryFilter)) {
+      setAssignedTaskCategoryFilter('all');
+    }
+  }, [taskCategoryFilterOptions, assignedTaskCategoryFilter]);
 
   useEffect(() => {
     setJumpPageInput(String(page));
@@ -131,6 +142,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     setDescriptionStatus(saved.descriptionStatus);
     setSelectedRange(saved.selectedRange);
     setSelectedAssignedRangeId(saved.selectedAssignedRangeId);
+    setAssignedTaskCategoryFilter(saved.assignedTaskCategoryFilter || 'all');
     setStartDate(saved.startDate);
     setEndDate(saved.endDate);
     setPage(saved.page);
@@ -152,6 +164,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
       descriptionStatus,
       selectedRange,
       selectedAssignedRangeId,
+      assignedTaskCategoryFilter,
       queryStartDate,
       queryEndDate,
       startDate,
@@ -231,6 +244,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     setDescriptionStatus('all');
     setSelectedRange('all');
     setSelectedAssignedRangeId('');
+    setAssignedTaskCategoryFilter('all');
     setStartDate('');
     setEndDate('');
     setPage(1);
@@ -239,6 +253,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
   const handleAssignedRangeSelect = (rangeId: string) => {
     setSelectedAssignedRangeId(rangeId);
     setSelectedRange('assigned');
+    setAssignedTaskCategoryFilter('all');
     const matched = assignedRanges.find((item) => String(item.id) === rangeId);
     if (!matched) return;
     setStartDate(matched.startTime.slice(0, 10));
@@ -263,10 +278,15 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     };
   };
 
-  const fetchResults = async (targetPage: number = page, sessionOverride?: EventQuerySessionState) => {
+  const fetchResults = async (
+    targetPage: number = page,
+    sessionOverride?: EventQuerySessionState,
+    overridePageSize?: number,
+  ) => {
     setIsLoading(true);
     try {
       const src = sessionOverride;
+      const effectivePageSize = overridePageSize ?? src?.pageSize ?? pageSize;
       const { queryStartDate, queryEndDate } = resolveQueryDates(src);
       const response = await searchEvents({
         projectIds: src?.selectedProjectCategories ?? selectedProjectCategories,
@@ -278,13 +298,19 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
         startDate: queryStartDate,
         endDate: queryEndDate,
         page: targetPage,
-        pageSize: src?.pageSize ?? pageSize,
+        pageSize: effectivePageSize,
+        assignedTaskCategory: isReviewer && (src?.assignedTaskCategoryFilter ?? assignedTaskCategoryFilter) !== 'all'
+          ? (src?.assignedTaskCategoryFilter ?? assignedTaskCategoryFilter)
+          : undefined,
       });
 
       if (response.success) {
         setResults(response.results);
         setTotal(response.total);
         setPage(targetPage);
+        if (overridePageSize !== undefined) {
+          setPageSize(overridePageSize);
+        }
       } else {
         setResults([]);
         setTotal(0);
@@ -294,9 +320,11 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     }
   };
 
-  useEffect(() => {
-    fetchResults(page);
-  }, [pageSize]);
+  const handlePageSizeChange = (value: string) => {
+    const size = parseInt(value, 10);
+    setPage(1);
+    fetchResults(1, undefined, size);
+  };
 
   useEffect(() => {
     if (!currentUser) return;
@@ -318,7 +346,14 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
 
       if (shouldRestore && saved) {
         applySessionState(saved);
-        await fetchResults(saved.page, saved);
+        const cached = takeCachedEventQueryPageResults(saved.page, saved.pageSize);
+        if (cached && cached.length > 0) {
+          setResults(cached);
+        } else if (saved.results.length > 0) {
+          setResults(saved.results as EventSearchResult[]);
+        } else {
+          await fetchResults(saved.page, saved);
+        }
         return;
       }
 
@@ -347,6 +382,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
       <Badge variant={item.aiDescriptionDone ?? item.descriptionReviewDone ? 'default' : 'secondary'} className="text-[10px]">AI</Badge>
       <Badge variant={item.reviewDescriptionDone ? 'default' : 'secondary'} className="text-[10px]">审核</Badge>
       <Badge variant={item.englishDescriptionDone ? 'default' : 'secondary'} className="text-[10px]">英文</Badge>
+      <Badge variant={item.accidentQaReviewDone ? 'default' : 'secondary'} className="text-[10px]">专项</Badge>
     </div>
   );
 
@@ -442,6 +478,31 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
               {isReviewer && assignedRanges.length === 0 ? (
                 <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200">
                   当前账号还没有分配事件任务时间段，请联系管理员。
+                </div>
+              ) : null}
+              {isReviewer && assignedRanges.length > 0 ? (
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="space-y-2 w-full sm:w-[280px]">
+                    <label className="text-xs font-medium text-muted-foreground">任务类型</label>
+                    <Select
+                      value={assignedTaskCategoryFilter}
+                      onValueChange={(value: 'all' | TaskCategory) => {
+                        setAssignedTaskCategoryFilter(value);
+                        setPage(1);
+                      }}
+                    >
+                      <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
+                        <SelectValue placeholder="选择任务类型" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {taskCategoryFilterOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
               ) : null}
               <div className="grid grid-cols-1 md:grid-cols-[repeat(17,minmax(0,1fr))] gap-3 items-end">
@@ -622,7 +683,7 @@ function EventQueryContent({ currentUser }: { currentUser: CurrentUser }) {
               <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between text-xs text-muted-foreground">
                 <div className="flex items-center gap-2">
                   <span>每页显示</span>
-                  <Select value={pageSize.toString()} onValueChange={(value) => { setPageSize(parseInt(value, 10)); setPage(1); }}>
+                  <Select value={pageSize.toString()} onValueChange={handlePageSizeChange}>
                     <SelectTrigger className="h-8 w-[120px] text-xs">
                       <SelectValue />
                     </SelectTrigger>

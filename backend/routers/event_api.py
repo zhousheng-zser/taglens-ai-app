@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field
 from core.event_database import (
     delete_event_record,
     get_event_record_media_paths,
+    get_event_segment_annotations,
     get_event_dict_cache,
     search_events,
     update_event_segment_annotations,
+    _get_special_qa_questions,
 )
 from core.manage_database import (
     get_event_review_records_for_keys,
@@ -46,6 +48,7 @@ class EventSearchRequest(BaseModel):
     endDate: Optional[str] = None
     page: int = 1
     pageSize: int = 20
+    assignedTaskCategory: Optional[str] = None
 
 
 class EventSearchResult(BaseModel):
@@ -67,6 +70,7 @@ class EventSearchResult(BaseModel):
     segmentDescriptionsEn: List[str] = []
     segmentStatuses: List[str] = []
     questionsAnswersList: List[List[Dict[str, str]]] = []
+    accidentQuestionsAnswersList: List[List[Dict[str, str]]] = []
     eventTypeQuestions: List[str] = []
     imageBigUrl: Optional[str] = None
     imageCompositeUrl: Optional[str] = None
@@ -82,6 +86,8 @@ class EventSearchResult(BaseModel):
     aiDescriptionDone: bool = False
     reviewDescriptionDone: bool = False
     englishDescriptionDone: bool = False
+    accidentQaReviewDone: bool = False
+    assignedTaskCategories: Optional[List[str]] = None
 
 
 class EventSearchResponse(BaseModel):
@@ -110,6 +116,7 @@ class EventSegmentAnnotationUpdateRequest(BaseModel):
     segmentDescriptionsEn: List[str]
     segmentStatuses: List[str]
     questionsAnswersList: List[List[Dict[str, str]]] = []
+    accidentQuestionsAnswersList: List[List[Dict[str, str]]] = []
 
 
 class EventDeleteRequest(BaseModel):
@@ -208,9 +215,12 @@ def _range_contains(request_start: str, request_end: str, assigned_start: str, a
     return req_start >= ass_start and req_end <= ass_end
 
 
-def _apply_reviewer_time_scope(request: EventSearchRequest, current_user: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+def _apply_reviewer_time_scope(
+    request: EventSearchRequest,
+    current_user: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     if current_user.get("role") == "admin":
-        return request.startDate, request.endDate
+        return request.startDate, request.endDate, None
 
     ranges = list_user_time_ranges(int(current_user["id"]))
     if not ranges:
@@ -218,11 +228,11 @@ def _apply_reviewer_time_scope(request: EventSearchRequest, current_user: Dict[s
 
     if not request.startDate or not request.endDate:
         first_range = ranges[0]
-        return _format_range_start(first_range["startTime"]), _format_range_end(first_range["endTime"])
+        return _format_range_start(first_range["startTime"]), _format_range_end(first_range["endTime"]), first_range
 
     for item in ranges:
         if _range_contains(request.startDate, request.endDate, item["startTime"], item["endTime"]):
-            return request.startDate, request.endDate
+            return request.startDate, request.endDate, item
 
     raise HTTPException(status_code=403, detail="查询时间范围不在当前审核员的任务分配内")
 
@@ -267,6 +277,97 @@ def _is_qa_review_done(questions_answers_list: List[List[Dict[str, str]]], segme
     return True
 
 
+def _is_accident_qa_done(
+    event_type_code: str,
+    segment_statuses: List[str],
+    accident_questions_answers_list: List[List[Dict[str, str]]],
+    segment_count: int,
+) -> bool:
+    questions = _get_special_qa_questions(event_type_code)
+    if not questions:
+        return True
+    positive_indexes = [
+        idx
+        for idx, status in enumerate(segment_statuses[:segment_count])
+        if status == "正样本"
+    ]
+    if not positive_indexes:
+        return True
+    if len(accident_questions_answers_list) < segment_count:
+        return False
+    for idx in positive_indexes:
+        segment_items = accident_questions_answers_list[idx] or []
+        if len(segment_items) < len(questions):
+            return False
+        for question, qa in zip(questions, segment_items):
+            if str(qa.get("question", "")).strip() != question:
+                return False
+            if not str(qa.get("answer", "")).strip():
+                return False
+    return True
+
+
+def _merge_reviewer_save_fields(
+    current_user: Dict[str, Any],
+    event_id: str,
+    project_id: str,
+    event_type_code: str,
+    segment_descriptions: List[str],
+    segment_review_descriptions: List[str],
+    segment_descriptions_en: List[str],
+    segment_statuses: List[str],
+    questions_answers_list: List[List[Dict[str, str]]],
+    accident_questions_answers_list: List[List[Dict[str, str]]],
+) -> Tuple[
+    List[str],
+    List[str],
+    List[str],
+    List[str],
+    List[List[Dict[str, str]]],
+    List[List[Dict[str, str]]],
+]:
+    from core.task_assignment import get_reviewer_editable_categories
+
+    editable = get_reviewer_editable_categories(
+        int(current_user["id"]),
+        str(current_user.get("role") or ""),
+        event_id,
+        project_id,
+        event_type_code,
+    )
+    if editable is None:
+        return (
+            segment_descriptions,
+            segment_review_descriptions,
+            segment_descriptions_en,
+            segment_statuses,
+            questions_answers_list,
+            accident_questions_answers_list,
+        )
+
+    existing = get_event_segment_annotations(event_id, project_id, event_type_code)
+    if "ai_description" not in editable:
+        segment_descriptions = existing["segment_descriptions"]
+    if "review_description" not in editable:
+        segment_review_descriptions = existing["segment_review_descriptions"]
+    if "english_description" not in editable:
+        segment_descriptions_en = existing["segment_descriptions_en"]
+    if "status" not in editable:
+        segment_statuses = existing["segment_statuses"]
+    if "qa" not in editable:
+        questions_answers_list = existing["questions_answers_list"]
+    if "accident_qa" not in editable:
+        accident_questions_answers_list = existing["accident_questions_answers_list"]
+    return (
+        segment_descriptions,
+        segment_review_descriptions,
+        segment_descriptions_en,
+        segment_statuses,
+        questions_answers_list,
+        accident_questions_answers_list,
+    )
+
+
 @router.get("/meta", response_model=EventMetaResponse)
 async def get_event_meta(_: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     cache = await run_blocking(get_event_dict_cache)
@@ -292,9 +393,31 @@ async def search_events_api(
         raise HTTPException(status_code=400, detail="questionAnswerStatus 取值非法")
     if request.descriptionStatus not in {"all", "all_edited", "all_unedited", "partially_edited"}:
         raise HTTPException(status_code=400, detail="descriptionStatus 取值非法")
+    if request.assignedTaskCategory:
+        from core.task_assignment import TASK_CATEGORIES
+
+        if request.assignedTaskCategory not in TASK_CATEGORIES:
+            raise HTTPException(status_code=400, detail="assignedTaskCategory 取值非法")
 
     try:
-        scoped_start_date, scoped_end_date = _apply_reviewer_time_scope(request, current_user)
+        scoped_start_date, scoped_end_date, matched_range = _apply_reviewer_time_scope(request, current_user)
+        event_keys_filter = None
+        if matched_range is not None:
+            from core.task_assignment import (
+                TASK_CATEGORIES,
+                get_user_assigned_keys,
+                get_user_assigned_keys_for_category,
+                time_range_has_workload,
+            )
+
+            if time_range_has_workload(matched_range):
+                user_id = int(current_user["id"])
+                range_id = int(matched_range["id"])
+                category = (request.assignedTaskCategory or "").strip()
+                if category and category in TASK_CATEGORIES:
+                    event_keys_filter = get_user_assigned_keys_for_category(user_id, range_id, category)
+                else:
+                    event_keys_filter = get_user_assigned_keys(user_id, range_id)
 
         def _search() -> tuple[list, int]:
             rows, total = search_events(
@@ -308,6 +431,7 @@ async def search_events_api(
                 end_date=scoped_end_date,
                 page=request.page,
                 page_size=request.pageSize,
+                event_keys_filter=event_keys_filter,
             )
             keys = [
                 (item["eventId"], item["projectId"], item["eventTypeCode"])
@@ -321,6 +445,19 @@ async def search_events_api(
             return rows, total
 
         results, total = await run_blocking(_search)
+        if current_user.get("role") != "admin":
+            from core.task_assignment import get_assigned_categories_map_for_user
+
+            keys = [
+                (item["eventId"], item["projectId"], item["eventTypeCode"])
+                for item in results
+            ]
+            category_map = get_assigned_categories_map_for_user(int(current_user["id"]), keys)
+            for item in results:
+                key = (item["eventId"], item["projectId"], item["eventTypeCode"])
+                categories = category_map.get(key)
+                if categories:
+                    item["assignedTaskCategories"] = categories
         return {"success": True, "results": results, "total": total}
     except HTTPException:
         raise
@@ -371,34 +508,62 @@ async def update_event_segment_annotations_api(
         raise HTTPException(status_code=400, detail="segmentDescriptionsEn 与 segmentDescriptions 长度不一致")
     if len(request.questionsAnswersList) != len(request.segmentDescriptions):
         raise HTTPException(status_code=400, detail="questionsAnswersList 与 segmentDescriptions 长度不一致")
+    if len(request.accidentQuestionsAnswersList) != len(request.segmentDescriptions):
+        raise HTTPException(status_code=400, detail="accidentQuestionsAnswersList 与 segmentDescriptions 长度不一致")
     valid_status = {"正样本", "负样本", "待定"}
     if any(item not in valid_status for item in request.segmentStatuses):
         raise HTTPException(status_code=400, detail="segmentStatuses 含非法值")
     try:
+        (
+            segment_descriptions,
+            segment_review_descriptions,
+            segment_descriptions_en,
+            segment_statuses,
+            questions_answers_list,
+            accident_questions_answers_list,
+        ) = _merge_reviewer_save_fields(
+            current_user,
+            request.eventId,
+            request.projectId,
+            request.eventTypeCode,
+            request.segmentDescriptions,
+            request.segmentReviewDescriptions,
+            request.segmentDescriptionsEn,
+            request.segmentStatuses,
+            request.questionsAnswersList,
+            request.accidentQuestionsAnswersList,
+        )
         update_event_segment_annotations(
             event_id=request.eventId,
             project_id=request.projectId,
             event_type_corrected=request.eventTypeCode,
-            segment_descriptions=request.segmentDescriptions,
-            segment_review_descriptions=request.segmentReviewDescriptions,
-            segment_descriptions_en=request.segmentDescriptionsEn,
-            segment_statuses=request.segmentStatuses,
-            questions_answers_list=request.questionsAnswersList,
+            segment_descriptions=segment_descriptions,
+            segment_review_descriptions=segment_review_descriptions,
+            segment_descriptions_en=segment_descriptions_en,
+            segment_statuses=segment_statuses,
+            questions_answers_list=questions_answers_list,
+            accident_questions_answers_list=accident_questions_answers_list,
         )
-        segment_count = len(request.segmentDescriptions)
+        segment_count = len(segment_descriptions)
         review = upsert_event_review_record(
             event_id=request.eventId,
             project_id=request.projectId,
             event_type_code=request.eventTypeCode,
             reviewer=current_user,
-            status_review_done=_is_status_review_done(request.segmentStatuses, segment_count),
-            qa_review_done=_is_qa_review_done(request.questionsAnswersList, segment_count),
-            ai_description_done=_is_ai_description_done(request.segmentDescriptions, segment_count),
+            status_review_done=_is_status_review_done(segment_statuses, segment_count),
+            qa_review_done=_is_qa_review_done(questions_answers_list, segment_count),
+            ai_description_done=_is_ai_description_done(segment_descriptions, segment_count),
             review_description_done=_is_review_description_done(
-                request.segmentReviewDescriptions, segment_count
+                segment_review_descriptions, segment_count
             ),
             english_description_done=_is_english_description_done(
-                request.segmentDescriptionsEn, segment_count
+                segment_descriptions_en, segment_count
+            ),
+            accident_qa_done=_is_accident_qa_done(
+                request.eventTypeCode,
+                segment_statuses,
+                accident_questions_answers_list,
+                segment_count,
             ),
         )
         return {"success": True, "review": review}

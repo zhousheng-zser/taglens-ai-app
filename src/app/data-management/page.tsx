@@ -80,6 +80,33 @@ function statusEndpointForTaskUrl(taskUrl: string): string | null {
     return null;
 }
 
+const MAX_VISIBLE_LOGS = 200;
+
+interface ParsedStreamLog {
+    message: string;
+    type: LogType;
+    done?: boolean;
+}
+
+function parseStreamLogLines(lines: string[]): ParsedStreamLog[] {
+    const batch: ParsedStreamLog[] = [];
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+            const data = JSON.parse(line);
+            const type = (data.type || 'info') as LogType;
+            batch.push({
+                message: data.message,
+                type,
+                done: type === 'done',
+            });
+        } catch {
+            console.warn('Log parse error', line);
+        }
+    }
+    return batch;
+}
+
 function DataManagementContent() {
     const { toast } = useToast();
 
@@ -91,8 +118,10 @@ function DataManagementContent() {
     const [segmentLimit, setSegmentLimit] = useState('10');
     const [segmentDescFillLimit, setSegmentDescFillLimit] = useState('10');
     const [segmentEventTypeOptions, setSegmentEventTypeOptions] = useState<EventOptionItem[]>([]);
+    const [segmentProjectOptions, setSegmentProjectOptions] = useState<EventOptionItem[]>([]);
     const [segmentEventTypesLoading, setSegmentEventTypesLoading] = useState(true);
     const [selectedSegmentEventTypes, setSelectedSegmentEventTypes] = useState<string[]>([]);
+    const [selectedSegmentProjects, setSelectedSegmentProjects] = useState<string[]>([]);
     const [selectedSegmentDescFillEventTypes, setSelectedSegmentDescFillEventTypes] = useState<string[]>([]);
 
     // Log Modal States
@@ -107,6 +136,8 @@ function DataManagementContent() {
     const logEndRef = useRef<HTMLDivElement>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
     const closingLogModalOnlyRef = useRef(false);
+    const totalReceivedLogsRef = useRef(0);
+    const [hasOlderLogsHidden, setHasOlderLogsHidden] = useState(false);
 
     // Auto-scroll logic
     useEffect(() => {
@@ -115,18 +146,52 @@ function DataManagementContent() {
         }
     }, [logs, showLogModal]);
 
+    const resetLogSession = () => {
+        totalReceivedLogsRef.current = 0;
+        setHasOlderLogsHidden(false);
+        setLogs([]);
+    };
+
+    const appendLogEntries = (entries: Array<{ message: string; type: LogType }>) => {
+        if (entries.length === 0) return;
+        totalReceivedLogsRef.current += entries.length;
+        const timestamp = new Date().toLocaleTimeString();
+        setLogs(prev => {
+            const merged = [
+                ...prev,
+                ...entries.map(entry => ({
+                    message: entry.message,
+                    type: entry.type,
+                    timestamp,
+                })),
+            ];
+            return merged.length > MAX_VISIBLE_LOGS ? merged.slice(-MAX_VISIBLE_LOGS) : merged;
+        });
+        if (totalReceivedLogsRef.current > MAX_VISIBLE_LOGS) {
+            setHasOlderLogsHidden(true);
+        }
+    };
+
+    const applyParsedStreamLogs = (
+        parsed: ParsedStreamLog[],
+        onDone?: () => void,
+    ) => {
+        if (parsed.length === 0) return;
+        appendLogEntries(parsed.map(item => ({ message: item.message, type: item.type })));
+        if (parsed.some(item => item.done)) {
+            setIsTaskDone(true);
+            onDone?.();
+        }
+    };
+
     const addLog = (message: string, type: LogType = 'info') => {
-        setLogs(prev => [...prev, {
-            message,
-            type,
-            timestamp: new Date().toLocaleTimeString()
-        }]);
+        appendLogEntries([{ message, type }]);
     };
 
     const runStreamTask = async (url: string, body: any, taskName: string) => {
         setShowLogModal(true);
         setCurrentTaskName(taskName);
-        setLogs([]);
+        resetLogSession();
         addLog(`Initializing connection to ${taskName}...`, 'system');
         setIsTaskDone(false);
         setIsProcessing(true);
@@ -165,20 +230,7 @@ function DataManagementContent() {
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || ''; // Keep incomplete part
 
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try {
-                        const data = JSON.parse(line);
-                        // Backend sends { message, type }
-                        addLog(data.message, data.type || 'info');
-
-                        if (data.type === 'done') {
-                            setIsTaskDone(true);
-                        }
-                    } catch (e) {
-                        console.warn("Log parse error", line);
-                    }
-                }
+                applyParsedStreamLogs(parseStreamLogLines(lines));
             }
         } catch (error: any) {
             if (error?.name === 'AbortError') {
@@ -236,8 +288,8 @@ function DataManagementContent() {
         setShowLogModal(true);
         setCurrentTaskName(taskName);
         if (options?.clearLogs !== false) {
-            setLogs([]);
-            addLog('正在连接任务日志（将回放已有日志并继续跟踪）...', 'system');
+            resetLogSession();
+            addLog('正在连接任务日志（将回放最新日志并继续跟踪）...', 'system');
         }
         setIsTaskDone(false);
         setIsProcessing(true);
@@ -270,19 +322,7 @@ function DataManagementContent() {
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
 
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try {
-                        const data = JSON.parse(line);
-                        addLog(data.message, data.type || 'info');
-                        if (data.type === 'done') {
-                            setIsTaskDone(true);
-                            onDone?.();
-                        }
-                    } catch {
-                        console.warn('Log parse error', line);
-                    }
-                }
+                applyParsedStreamLogs(parseStreamLogLines(lines), onDone);
             }
         } catch (error: any) {
             if (error?.name === 'AbortError') {
@@ -453,6 +493,7 @@ function DataManagementContent() {
             '/api/management/event-video-segment',
             {
                 limit,
+                projectIds: selectedSegmentProjects,
                 eventTypeCodes: selectedSegmentEventTypes,
             },
             '事件视频分块',
@@ -507,7 +548,7 @@ function DataManagementContent() {
     }, []);
 
     useEffect(() => {
-        const loadEventTypeOptions = async () => {
+        const loadEventMetaOptions = async () => {
             setSegmentEventTypesLoading(true);
             try {
                 // 与「事件数据查询」一致：经 Server Action 转发并携带登录 Cookie（直连 8000 会 401）
@@ -517,13 +558,19 @@ function DataManagementContent() {
                 } else {
                     setSegmentEventTypeOptions([]);
                 }
+                if (meta.success && Array.isArray(meta.projectOptions)) {
+                    setSegmentProjectOptions(meta.projectOptions);
+                } else {
+                    setSegmentProjectOptions([]);
+                }
             } catch {
                 setSegmentEventTypeOptions([]);
+                setSegmentProjectOptions([]);
             } finally {
                 setSegmentEventTypesLoading(false);
             }
         };
-        loadEventTypeOptions();
+        loadEventMetaOptions();
     }, []);
 
     const getLogColor = (type: LogType) => {
@@ -548,6 +595,13 @@ function DataManagementContent() {
             default: return <ChevronRight className="w-3 h-3 inline mr-2 opacity-50" />;
         }
     };
+
+    const segmentProjectLabel = selectedSegmentProjects.length > 0
+        ? segmentProjectOptions
+            .filter((item) => selectedSegmentProjects.includes(item.code))
+            .map((item) => item.name)
+            .join(' / ')
+        : '全部项目';
 
     const segmentEventTypeLabel = selectedSegmentEventTypes.length > 0
         ? segmentEventTypeOptions
@@ -908,6 +962,46 @@ function DataManagementContent() {
                                     />
                                 </div>
                                 <div className="space-y-2">
+                                    <Label className="text-xs text-slate-500 uppercase tracking-wider font-bold">项目筛选（可多选）</Label>
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button
+                                                variant="outline"
+                                                className="h-10 w-full justify-between bg-slate-950/50 border-white/10 text-amber-100 font-normal"
+                                            >
+                                                <span className="truncate text-left text-sm">{segmentProjectLabel}</span>
+                                                <ChevronsUpDown className="h-4 w-4 opacity-70" />
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent className="w-[320px] max-h-[320px] overflow-y-auto">
+                                            {segmentEventTypesLoading ? (
+                                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                                    正在加载项目...
+                                                </DropdownMenuItem>
+                                            ) : segmentProjectOptions.length === 0 ? (
+                                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                                    暂无项目（请检查后端字典或登录状态）
+                                                </DropdownMenuItem>
+                                            ) : (
+                                                segmentProjectOptions.map((project) => (
+                                                    <DropdownMenuCheckboxItem
+                                                        key={project.code}
+                                                        checked={selectedSegmentProjects.includes(project.code)}
+                                                        onSelect={(event) => event.preventDefault()}
+                                                        onCheckedChange={(checked) => {
+                                                            setSelectedSegmentProjects((prev) =>
+                                                                checked ? [...prev, project.code] : prev.filter((item) => item !== project.code),
+                                                            );
+                                                        }}
+                                                    >
+                                                        {project.name}
+                                                    </DropdownMenuCheckboxItem>
+                                                ))
+                                            )}
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                </div>
+                                <div className="space-y-2">
                                     <Label className="text-xs text-slate-500 uppercase tracking-wider font-bold">事件类型筛选（可多选）</Label>
                                     <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
@@ -1008,11 +1102,16 @@ function DataManagementContent() {
 
                             {/* Log Content */}
                             <div className="flex-grow overflow-y-auto p-6 font-mono text-xs md:text-sm space-y-1.5 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+                                {hasOlderLogsHidden ? (
+                                    <div className="mb-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-yellow-300/90">
+                                        仅展示最新 {MAX_VISIBLE_LOGS} 条日志，更早日志已省略（完整记录见服务器日志文件）。
+                                    </div>
+                                ) : null}
                                 {logs.length === 0 && (
                                     <div className="text-slate-600 italic">Waiting for stream...</div>
                                 )}
                                 {logs.map((log, i) => (
-                                    <div key={i} className={cn("flex items-start gap-4 break-words leading-relaxed animate-in fade-in slide-in-from-left-2 duration-100", getLogColor(log.type))}>
+                                    <div key={`${i}-${log.timestamp}-${log.message.slice(0, 24)}`} className={cn("flex items-start gap-4 break-words leading-relaxed", getLogColor(log.type))}>
                                         <span className="text-slate-700 shrink-0 select-none w-20">{log.timestamp}</span>
                                         <span className="flex-grow">
                                             {getLogIcon(log.type)}

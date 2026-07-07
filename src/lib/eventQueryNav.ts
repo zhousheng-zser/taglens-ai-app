@@ -1,5 +1,7 @@
 import type { EventStreamSavePayload } from '@/components/event-query/EventStreamPlayer';
 import type { EventSearchRequest, EventSearchResult } from '@/types/event';
+import { isAccidentQaReviewDone } from '@/constants/multiCarAccidentQuestions';
+import type { TaskCategory } from '@/constants/taskAssignment';
 
 const SESSION_KEY = 'taglens-event-query-session';
 const RESTORE_FLAG_KEY = 'taglens-event-query-restore';
@@ -24,7 +26,11 @@ export type EventSearchResultNavItem = {
     aiDescriptionDone?: boolean;
     reviewDescriptionDone?: boolean;
     englishDescriptionDone?: boolean;
+    accidentQaReviewDone?: boolean;
+    assignedTaskCategories?: TaskCategory[] | null;
 };
+
+import type { TaskCategory } from '@/constants/taskAssignment';
 
 export interface EventQuerySessionState {
     selectedProjectCategories: string[];
@@ -35,6 +41,7 @@ export interface EventQuerySessionState {
     descriptionStatus: 'all' | 'all_edited' | 'all_unedited' | 'partially_edited';
     selectedRange: string;
     selectedAssignedRangeId: string;
+    assignedTaskCategoryFilter: 'all' | TaskCategory;
     queryStartDate?: string;
     queryEndDate?: string;
     startDate: string;
@@ -93,6 +100,8 @@ export function slimEventSearchResult(item: EventSearchResult): EventSearchResul
         aiDescriptionDone: item.aiDescriptionDone,
         reviewDescriptionDone: item.reviewDescriptionDone,
         englishDescriptionDone: item.englishDescriptionDone,
+        accidentQaReviewDone: item.accidentQaReviewDone,
+        assignedTaskCategories: item.assignedTaskCategories,
     };
 }
 
@@ -116,6 +125,10 @@ export function buildEventSearchRequestFromSession(state: EventQuerySessionState
         endDate,
         page: state.page,
         pageSize: state.pageSize,
+        assignedTaskCategory:
+            state.assignedTaskCategoryFilter && state.assignedTaskCategoryFilter !== 'all'
+                ? state.assignedTaskCategoryFilter
+                : undefined,
     };
 }
 
@@ -215,6 +228,7 @@ export function applySegmentSaveToRecord(
         segmentDescriptionsEn: payload.segmentDescriptionsEn,
         segmentStatuses: payload.segmentStatuses,
         questionsAnswersList: payload.questionsAnswersList,
+        accidentQuestionsAnswersList: payload.accidentQuestionsAnswersList,
         statusReviewDone: payload.segmentStatuses.every((status) => status === '正样本' || status === '负样本'),
         qaReviewDone: payload.questionsAnswersList.every(
             (items) => items.length > 0 && items.every((qa) => qa.question.trim() && qa.answer.trim()),
@@ -223,6 +237,12 @@ export function applySegmentSaveToRecord(
         aiDescriptionDone: isTextListDone(payload.segmentDescriptions),
         reviewDescriptionDone: isTextListDone(payload.segmentReviewDescriptions),
         englishDescriptionDone: isTextListDone(payload.segmentDescriptionsEn),
+        accidentQaReviewDone: isAccidentQaReviewDone(
+            payload.eventTypeCode,
+            payload.segmentStatuses,
+            payload.accidentQuestionsAnswersList,
+            payload.segmentStatuses.length,
+        ),
     };
 }
 
@@ -245,6 +265,12 @@ function applySegmentSaveToNavItem(
         aiDescriptionDone: isTextListDone(payload.segmentDescriptions),
         reviewDescriptionDone: isTextListDone(payload.segmentReviewDescriptions),
         englishDescriptionDone: isTextListDone(payload.segmentDescriptionsEn),
+        accidentQaReviewDone: isAccidentQaReviewDone(
+            payload.eventTypeCode,
+            payload.segmentStatuses,
+            payload.accidentQuestionsAnswersList,
+            payload.segmentStatuses.length,
+        ),
         descriptionPreview: descriptionPreview || item.descriptionPreview,
     };
 }

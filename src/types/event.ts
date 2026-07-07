@@ -1,3 +1,5 @@
+import type { TaskCategory } from '@/constants/taskAssignment';
+
 export interface EventSearchRequest {
   projectIds?: string[];
   eventTypeCodes?: string[];
@@ -9,6 +11,8 @@ export interface EventSearchRequest {
   endDate?: string;
   page?: number;
   pageSize?: number;
+  /** 审核员按分配任务类别筛选 */
+  assignedTaskCategory?: TaskCategory | 'all';
 }
 
 export interface EventSearchResult {
@@ -30,6 +34,7 @@ export interface EventSearchResult {
   segmentDescriptionsEn?: string[];
   segmentStatuses?: string[];
   questionsAnswersList?: Array<Array<{ question: string; answer: string }>>;
+  accidentQuestionsAnswersList?: Array<Array<{ question: string; answer: string }>>;
   eventTypeQuestions?: string[];
   imageBigUrl?: string | null;
   imageCompositeUrl?: string | null;
@@ -45,7 +50,12 @@ export interface EventSearchResult {
   aiDescriptionDone?: boolean;
   reviewDescriptionDone?: boolean;
   englishDescriptionDone?: boolean;
+  accidentQaReviewDone?: boolean;
+  /** 审核员被分配的可编辑任务类别；有值时仅这些类别可编辑 */
+  assignedTaskCategories?: TaskCategory[] | null;
 }
+
+export type { TaskCategory } from '@/constants/taskAssignment';
 
 export interface EventSearchResponse {
   success: boolean;

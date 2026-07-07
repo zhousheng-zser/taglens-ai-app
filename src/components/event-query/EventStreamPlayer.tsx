@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { PanelRightClose, PanelRightOpen, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import type { EventSearchResult } from '@/types/event';
@@ -12,6 +12,33 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import {
+  getAccidentQuestionPlaceholder,
+  getSpecialQaSwitchLabel,
+  hasSpecialQaEvent,
+  isAccidentYesNoQuestion,
+  normalizeAccidentQuestionsAnswers,
+  readSpecialQaModeEnabled,
+  writeSpecialQaModeEnabled,
+} from '@/constants/multiCarAccidentQuestions';
+import { isTaskCategoryEditable, type TaskCategory } from '@/constants/taskAssignment';
+
+const DESCRIPTION_PANEL_STORAGE_KEY = 'taglens-description-panel-visible';
+
+function readDescriptionPanelVisible(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.localStorage.getItem(DESCRIPTION_PANEL_STORAGE_KEY) === '1';
+}
+
+function writeDescriptionPanelVisible(visible: boolean): void {
+  if (typeof window === 'undefined') return;
+  if (visible) {
+    window.localStorage.setItem(DESCRIPTION_PANEL_STORAGE_KEY, '1');
+  } else {
+    window.localStorage.removeItem(DESCRIPTION_PANEL_STORAGE_KEY);
+  }
+}
 
 function resolveMediaUrlForApi(url: string): string {
   const value = (url || '').trim();
@@ -49,15 +76,23 @@ export type EventStreamSavePayload = {
   segmentDescriptionsEn: string[];
   segmentStatuses: string[];
   questionsAnswersList: Array<Array<{ question: string; answer: string }>>;
+  accidentQuestionsAnswersList: Array<Array<{ question: string; answer: string }>>;
 };
 
 export type EventStreamPlayerProps = {
   record: EventSearchResult;
   onDirtyChange: (dirty: boolean) => void;
   onSaved: (payload: EventStreamSavePayload) => void;
+  /** null/undefined 表示全部可编辑；有值时仅对应任务类别可编辑 */
+  editableTaskCategories?: TaskCategory[] | null;
 };
 
-export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record, onDirtyChange, onSaved }: EventStreamPlayerProps) {
+export const EventStreamPlayer = React.memo(function EventStreamPlayer({
+  record,
+  onDirtyChange,
+  onSaved,
+  editableTaskCategories = null,
+}: EventStreamPlayerProps) {
   const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number>(-1);
@@ -70,19 +105,32 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
   const [draftEnglishDescriptions, setDraftEnglishDescriptions] = useState<string[]>([]);
   const [draftStatuses, setDraftStatuses] = useState<string[]>([]);
   const [draftQuestionsAnswers, setDraftQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
+  const [draftAccidentQuestionsAnswers, setDraftAccidentQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
   const [initialDescriptions, setInitialDescriptions] = useState<string[]>([]);
   const [initialReviewDescriptions, setInitialReviewDescriptions] = useState<string[]>([]);
   const [initialEnglishDescriptions, setInitialEnglishDescriptions] = useState<string[]>([]);
   const [initialStatuses, setInitialStatuses] = useState<string[]>([]);
   const [initialQuestionsAnswers, setInitialQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
+  const [initialAccidentQuestionsAnswers, setInitialAccidentQuestionsAnswers] = useState<Array<Array<{ question: string; answer: string }>>>([]);
+  const [accidentQaModeEnabled, setAccidentQaModeEnabled] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isAiGenerating, setIsAiGenerating] = useState(false);
   const [quickMarkStatus, setQuickMarkStatus] = useState<'待定' | '正样本' | '负样本' | null>(null);
   const [quickMarkSelections, setQuickMarkSelections] = useState<number[]>([]);
-  const [descriptionPanelMode, setDescriptionPanelMode] = useState<'review' | 'english'>('review');
+  const [descriptionPanelMode, setDescriptionPanelMode] = useState<'ai' | 'review' | 'english'>('ai');
+  const [descriptionPanelVisible, setDescriptionPanelVisible] = useState(false);
 
   const descriptionTextareaClass =
-    'flex-1 min-h-[120px] xl:min-h-0 w-full rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-none disabled:opacity-60';
+    'flex-1 min-h-[120px] xl:min-h-0 w-full rounded-md border border-border/40 bg-background/40 p-2 text-xs leading-5 resize-none disabled:opacity-60 read-only:opacity-70 read-only:cursor-default';
+
+  const canEditStatus = isTaskCategoryEditable(editableTaskCategories, 'status');
+  const canEditQa = isTaskCategoryEditable(editableTaskCategories, 'qa');
+  const canEditAiDescription = isTaskCategoryEditable(editableTaskCategories, 'ai_description');
+  const canEditReviewDescription = isTaskCategoryEditable(editableTaskCategories, 'review_description');
+  const canEditEnglishDescription = isTaskCategoryEditable(editableTaskCategories, 'english_description');
+  const canEditAccidentQa = isTaskCategoryEditable(editableTaskCategories, 'accident_qa');
+  const canSaveAnyTask = canEditStatus || canEditQa || canEditAiDescription
+    || canEditReviewDescription || canEditEnglishDescription || canEditAccidentQa;
 
   const getActiveSegmentDescription = (streamIndex: number) => {
     const descriptions = draftDescriptions || [];
@@ -91,6 +139,11 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
     return value.trim() || '-';
   };
   const activeEditableSegmentIndex = activeStreamIndex >= 0 ? activeStreamIndex : null;
+  const activeSegmentStatus = activeEditableSegmentIndex === null
+    ? null
+    : normalizeSegmentStatus(draftStatuses[activeEditableSegmentIndex]);
+  const showAccidentQaSwitch = hasSpecialQaEvent(record.eventTypeCode) && activeSegmentStatus === '正样本';
+  const showAccidentQaQuestions = showAccidentQaSwitch && accidentQaModeEnabled;
 
   const segmentLineCount = Math.max(
     record.segmentCount || 0,
@@ -151,35 +204,77 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
     setDraftEnglishDescriptions(nextEnglishDescriptions);
     setDraftStatuses(nextStatuses);
     const nextQuestionsAnswers = normalizeQuestionsAnswers(record.questionsAnswersList, segmentLineCount);
+    const nextAccidentQuestionsAnswers = normalizeAccidentQuestionsAnswers(
+      record.accidentQuestionsAnswersList,
+      segmentLineCount,
+      record.eventTypeCode,
+    );
     setDraftQuestionsAnswers(nextQuestionsAnswers);
+    setDraftAccidentQuestionsAnswers(nextAccidentQuestionsAnswers);
     setInitialDescriptions(nextDescriptions);
     setInitialReviewDescriptions(nextReviewDescriptions);
     setInitialEnglishDescriptions(nextEnglishDescriptions);
     setInitialStatuses(nextStatuses);
     setInitialQuestionsAnswers(nextQuestionsAnswers);
+    setInitialAccidentQuestionsAnswers(nextAccidentQuestionsAnswers);
+    setAccidentQaModeEnabled(readSpecialQaModeEnabled(record.eventTypeCode));
     setQuickMarkSelections([]);
     setQuickMarkStatus(null);
-    setDescriptionPanelMode('review');
+    setDescriptionPanelMode('ai');
     onDirtyChange(false);
   }, [record.uuid, record.videoUrl, record.videoPath]);
 
+  useEffect(() => {
+    setDescriptionPanelVisible(readDescriptionPanelVisible());
+  }, []);
+
+  const toggleDescriptionPanel = (visible: boolean) => {
+    setDescriptionPanelVisible(visible);
+    writeDescriptionPanelVisible(visible);
+  };
+
   const isDirty = useMemo(
-    () => JSON.stringify(draftDescriptions) !== JSON.stringify(initialDescriptions)
-      || JSON.stringify(draftReviewDescriptions) !== JSON.stringify(initialReviewDescriptions)
-      || JSON.stringify(draftEnglishDescriptions) !== JSON.stringify(initialEnglishDescriptions)
-      || JSON.stringify(draftStatuses) !== JSON.stringify(initialStatuses)
-      || JSON.stringify(draftQuestionsAnswers) !== JSON.stringify(initialQuestionsAnswers),
+    () => {
+      const checks: boolean[] = [];
+      if (canEditAiDescription) {
+        checks.push(JSON.stringify(draftDescriptions) !== JSON.stringify(initialDescriptions));
+      }
+      if (canEditReviewDescription) {
+        checks.push(JSON.stringify(draftReviewDescriptions) !== JSON.stringify(initialReviewDescriptions));
+      }
+      if (canEditEnglishDescription) {
+        checks.push(JSON.stringify(draftEnglishDescriptions) !== JSON.stringify(initialEnglishDescriptions));
+      }
+      if (canEditStatus) {
+        checks.push(JSON.stringify(draftStatuses) !== JSON.stringify(initialStatuses));
+      }
+      if (canEditQa) {
+        checks.push(JSON.stringify(draftQuestionsAnswers) !== JSON.stringify(initialQuestionsAnswers));
+      }
+      if (canEditAccidentQa) {
+        checks.push(JSON.stringify(draftAccidentQuestionsAnswers) !== JSON.stringify(initialAccidentQuestionsAnswers));
+      }
+      return checks.some(Boolean);
+    },
     [
+      canEditAiDescription,
+      canEditReviewDescription,
+      canEditEnglishDescription,
+      canEditStatus,
+      canEditQa,
+      canEditAccidentQa,
       draftDescriptions,
       draftReviewDescriptions,
       draftEnglishDescriptions,
       draftStatuses,
       draftQuestionsAnswers,
+      draftAccidentQuestionsAnswers,
       initialDescriptions,
       initialReviewDescriptions,
       initialEnglishDescriptions,
       initialStatuses,
       initialQuestionsAnswers,
+      initialAccidentQuestionsAnswers,
     ],
   );
 
@@ -237,6 +332,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
     englishDescriptions: string[],
     statuses: string[],
     questionsAnswersList: Array<Array<{ question: string; answer: string }>>,
+    accidentQuestionsAnswersList: Array<Array<{ question: string; answer: string }>>,
   ) => {
     const endpoint = '/api/backend/events/segment-annotations';
     const response = await fetch(endpoint, {
@@ -251,6 +347,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
         segmentDescriptionsEn: englishDescriptions,
         segmentStatuses: statuses,
         questionsAnswersList,
+        accidentQuestionsAnswersList,
       }),
     });
     if (!response.ok) {
@@ -262,6 +359,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
     setInitialEnglishDescriptions(englishDescriptions);
     setInitialStatuses(statuses);
     setInitialQuestionsAnswers(questionsAnswersList);
+    setInitialAccidentQuestionsAnswers(accidentQuestionsAnswersList);
     onDirtyChange(false);
     onSaved({
       eventId: record.eventId,
@@ -272,11 +370,12 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
       segmentDescriptionsEn: englishDescriptions,
       segmentStatuses: statuses,
       questionsAnswersList,
+      accidentQuestionsAnswersList,
     });
   };
 
   const applyQuickMarkBatch = async () => {
-    if (isSaving || quickMarkStatus === null || quickMarkSelections.length === 0) return;
+    if (isSaving || quickMarkStatus === null || quickMarkSelections.length === 0 || !canEditStatus) return;
     const next = [...draftStatuses];
     quickMarkSelections.forEach((idx) => {
       if (idx >= 0 && idx < next.length) {
@@ -292,6 +391,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
         draftEnglishDescriptions,
         next,
         draftQuestionsAnswers,
+        draftAccidentQuestionsAnswers,
       );
       setQuickMarkSelections([]);
       setQuickMarkStatus(null);
@@ -303,7 +403,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
   };
 
   const handleSegmentButtonClick = (segmentIndex: number) => {
-    if (quickMarkStatus !== null) {
+    if (quickMarkStatus !== null && canEditStatus) {
       // 快速标注开启时，仅更新状态，不切换播放视频
       applyQuickMarkToSegment(segmentIndex);
       return;
@@ -332,6 +432,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
         draftEnglishDescriptions,
         draftStatuses,
         draftQuestionsAnswers,
+        draftAccidentQuestionsAnswers,
       );
     } catch (error: any) {
       window.alert(`保存失败: ${error?.message || '未知错误'}`);
@@ -341,7 +442,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
   };
 
   const handleAiSmartDescription = async () => {
-    if (activeEditableSegmentIndex === null || isAiGenerating) return;
+    if (activeEditableSegmentIndex === null || isAiGenerating || !canEditAiDescription) return;
     const idx = activeEditableSegmentIndex;
     const segmentVideoUrl = resolveMediaUrlForApi((record.segmentUrls || [])[idx] || '');
     if (!segmentVideoUrl) {
@@ -402,7 +503,13 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
 
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(300px,32%)_minmax(0,1fr)_minmax(0,1fr)] gap-3 xl:items-stretch">
+      <div
+        className={
+          descriptionPanelVisible
+            ? 'grid grid-cols-1 xl:grid-cols-[minmax(280px,30%)_minmax(0,1.15fr)_minmax(0,0.85fr)] gap-3 xl:items-stretch'
+            : 'grid grid-cols-1 xl:grid-cols-[minmax(280px,30%)_minmax(0,1fr)] gap-3 xl:items-stretch'
+        }
+      >
         <div className="flex flex-col gap-3 min-h-0 h-full">
           <div className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video min-h-[240px] shrink-0">
             {activeStreamUrl ? (
@@ -517,11 +624,115 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
               </Button>
             ))}
           </div>
+        </div>
 
-          <div className="rounded-lg border border-border/40 bg-background/30 p-3 space-y-2">
-            <span className="text-xs font-medium text-muted-foreground">问答与标注</span>
+        <div className="flex flex-col h-full min-h-0 rounded-lg border border-border/40 bg-background/30 p-2 space-y-1.5">
+          <div className="flex items-center justify-between gap-2 shrink-0">
+            <span className="text-sm font-medium text-muted-foreground">问答与标注</span>
+            <div className="flex items-center gap-2">
+              {!descriptionPanelVisible ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => toggleDescriptionPanel(true)}
+                  className="h-7 px-2.5 text-xs border-border/50 bg-background/40 hover:bg-background/60"
+                >
+                  <PanelRightOpen className="h-3.5 w-3.5 mr-1" />
+                  显示描述
+                </Button>
+              ) : null}
+              {showAccidentQaSwitch ? (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                  <span>{getSpecialQaSwitchLabel(record.eventTypeCode)}</span>
+                  <Switch
+                    checked={accidentQaModeEnabled}
+                    onCheckedChange={(checked) => {
+                      setAccidentQaModeEnabled(checked);
+                      writeSpecialQaModeEnabled(record.eventTypeCode, checked);
+                    }}
+                  />
+                </label>
+              ) : null}
+            </div>
+          </div>
+          <div className={showAccidentQaQuestions ? 'flex-1 min-h-0 flex flex-col' : 'space-y-2'}>
             {activeEditableSegmentIndex === null ? (
               <div className="text-xs text-muted-foreground">请选择一个分段后编辑回答</div>
+            ) : showAccidentQaQuestions ? (
+              <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-1 content-start auto-rows-min">
+                {(draftAccidentQuestionsAnswers[activeEditableSegmentIndex] || []).map((qa, qaIdx) => {
+                  const isOther = !isAccidentYesNoQuestion(qa.question);
+                  return (
+                    <div
+                      key={`acc-qa-${activeEditableSegmentIndex}-${qaIdx}`}
+                      className={
+                        isOther
+                          ? 'lg:col-span-2 2xl:col-span-3 flex items-start gap-1.5 rounded border border-border/30 bg-background/15 px-1.5 py-1'
+                          : 'flex items-center gap-1.5 rounded border border-border/30 bg-background/15 px-1.5 py-1 min-w-0'
+                      }
+                    >
+                      <span className="text-xs leading-tight text-muted-foreground shrink-0 w-4">
+                        {qaIdx + 1}.
+                      </span>
+                      <div className={isOther ? 'flex-1 min-w-0 space-y-1' : 'flex-1 min-w-0 flex flex-wrap items-center gap-x-1.5 gap-y-0.5'}>
+                        <p className={`text-xs leading-tight break-words ${isOther ? '' : 'flex-1 min-w-[120px]'}`}>
+                          {qa.question}
+                        </p>
+                        {isOther ? (
+                          <textarea
+                            value={qa.answer}
+                            readOnly={!canEditAccidentQa}
+                            onChange={(e) => {
+                              if (!canEditAccidentQa || activeEditableSegmentIndex === null) return;
+                              const next = draftAccidentQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
+                              if (!next[activeEditableSegmentIndex]) return;
+                              next[activeEditableSegmentIndex][qaIdx] = {
+                                ...next[activeEditableSegmentIndex][qaIdx],
+                                answer: e.target.value,
+                              };
+                              setDraftAccidentQuestionsAnswers(next);
+                            }}
+                            className="w-full min-h-[28px] rounded border border-border/40 bg-background/40 p-1 text-xs leading-tight resize-none"
+                            placeholder={getAccidentQuestionPlaceholder(qa.question)}
+                            rows={1}
+                          />
+                        ) : (
+                          <div className="flex gap-1 shrink-0">
+                            {(['是', '否'] as const).map((option) => (
+                              <Button
+                                key={`${qaIdx}-${option}`}
+                                type="button"
+                                size="sm"
+                                disabled={!canEditAccidentQa}
+                                onClick={() => {
+                                  if (!canEditAccidentQa || activeEditableSegmentIndex === null) return;
+                                  const next = draftAccidentQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
+                                  if (!next[activeEditableSegmentIndex]) return;
+                                  next[activeEditableSegmentIndex][qaIdx] = {
+                                    ...next[activeEditableSegmentIndex][qaIdx],
+                                    answer: option,
+                                  };
+                                  setDraftAccidentQuestionsAnswers(next);
+                                }}
+                                className={
+                                  qa.answer === option
+                                    ? option === '是'
+                                      ? 'h-6 min-w-[34px] px-2 text-xs bg-emerald-600/90 hover:bg-emerald-500 text-white border border-emerald-400'
+                                      : 'h-6 min-w-[34px] px-2 text-xs bg-rose-600/90 hover:bg-rose-500 text-white border border-rose-400'
+                                    : 'h-6 min-w-[34px] px-2 text-xs bg-background/40 hover:bg-background/60 border border-border/40'
+                                }
+                              >
+                                {option}
+                              </Button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
               <div className="grid grid-cols-2 gap-2">
               {(draftQuestionsAnswers[activeEditableSegmentIndex] || []).map((qa, qaIdx) => (
@@ -539,8 +750,9 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
                         </div>
                         <Select
                           value={qa.question}
+                          disabled={!canEditQa}
                           onValueChange={(value) => {
-                            if (activeEditableSegmentIndex === null) return;
+                            if (!canEditQa || activeEditableSegmentIndex === null) return;
                             const currentSegment = draftQuestionsAnswers[activeEditableSegmentIndex] || [];
                             const otherQuestion = currentSegment[qaIdx === 0 ? 1 : 0]?.question || '';
                             if (otherQuestion && otherQuestion === value) {
@@ -576,8 +788,9 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
                   })()}
                   <textarea
                     value={qa.answer}
+                    readOnly={!canEditQa}
                     onChange={(e) => {
-                      if (activeEditableSegmentIndex === null) return;
+                      if (!canEditQa || activeEditableSegmentIndex === null) return;
                       const next = draftQuestionsAnswers.map((seg) => seg.map((item) => ({ ...item })));
                       if (!next[activeEditableSegmentIndex]) return;
                       next[activeEditableSegmentIndex][qaIdx] = {
@@ -593,7 +806,9 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
               ))}
               </div>
             )}
-            <div className="text-xs text-muted-foreground pt-1">
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground shrink-0 pt-1">
+            <span>
               当前状态：
               {activeEditableSegmentIndex === null ? (
                 '-'
@@ -604,112 +819,93 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
                   {normalizeSegmentStatus(draftStatuses[activeEditableSegmentIndex])}
                 </span>
               )}
-            </div>
-            <div className="pt-1 space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-              {(['待定', '正样本', '负样本'] as const).map((status) => (
-                <Button
-                  key={`quick-mark-${status}`}
-                  type="button"
-                  size="sm"
-                  onClick={() => setQuickMarkStatus(status)}
-                  className={
-                    quickMarkStatus === status
-                      ? `h-8 px-3 text-xs border ${
-                        status === '正样本'
-                          ? 'bg-emerald-600/90 hover:bg-emerald-500 text-white border-emerald-400'
-                          : status === '负样本'
-                            ? 'bg-rose-600/90 hover:bg-rose-500 text-white border-rose-400'
-                            : 'bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400'
-                      }`
-                      : `h-8 px-3 text-xs border ${
-                        status === '正样本'
-                          ? 'bg-emerald-900/20 hover:bg-emerald-800/35 text-emerald-200 border-emerald-700/60'
-                          : status === '负样本'
-                            ? 'bg-rose-900/20 hover:bg-rose-800/35 text-rose-200 border-rose-700/60'
-                            : 'bg-amber-900/20 hover:bg-amber-800/35 text-amber-200 border-amber-700/60'
-                      }`
-                  }
-                >
-                  {status}
-                </Button>
-              ))}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
+            </span>
+            <span className="hidden sm:inline text-border">|</span>
+            {canEditStatus ? (
+              <>
+            {(['待定', '正样本', '负样本'] as const).map((status) => (
               <Button
+                key={`quick-mark-${status}`}
                 type="button"
                 size="sm"
-                onClick={selectAllSegmentsForQuickMark}
-                disabled={isSaving || quickMarkStatus === null || segmentLineCount <= 0}
-                className="h-8 px-3 text-xs border border-sky-500/60 bg-sky-600/85 hover:bg-sky-500 text-white disabled:opacity-50"
+                onClick={() => setQuickMarkStatus(status)}
+                className={
+                  quickMarkStatus === status
+                    ? `h-7 px-2.5 text-xs border ${
+                      status === '正样本'
+                        ? 'bg-emerald-600/90 hover:bg-emerald-500 text-white border-emerald-400'
+                        : status === '负样本'
+                          ? 'bg-rose-600/90 hover:bg-rose-500 text-white border-rose-400'
+                          : 'bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400'
+                    }`
+                    : `h-7 px-2.5 text-xs border ${
+                      status === '正样本'
+                        ? 'bg-emerald-900/20 hover:bg-emerald-800/35 text-emerald-200 border-emerald-700/60'
+                        : status === '负样本'
+                          ? 'bg-rose-900/20 hover:bg-rose-800/35 text-rose-200 border-rose-700/60'
+                          : 'bg-amber-900/20 hover:bg-amber-800/35 text-amber-200 border-amber-700/60'
+                    }`
+                }
               >
-                全选
+                {status}
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={applyQuickMarkBatch}
-                disabled={isSaving || quickMarkStatus === null || quickMarkSelections.length === 0}
-                className="h-8 px-3 text-xs border border-blue-500/60 bg-blue-600/90 hover:bg-blue-500 text-white disabled:opacity-50"
-              >
-                {isSaving ? '保存中...' : '保存'}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => {
-                  setQuickMarkSelections([]);
-                  setQuickMarkStatus(null);
-                }}
-                disabled={isSaving || quickMarkStatus === null}
-                className="h-8 px-3 text-xs border border-border/50 bg-background/40 hover:bg-background/60 text-foreground disabled:opacity-50"
-              >
-                取消
-              </Button>
-              </div>
-            </div>
-            <div className="text-xs text-muted-foreground">
-              快速标注：{quickMarkStatus ? `状态=${quickMarkStatus}，已选${quickMarkSelections.length}个` : '请选择一个目标状态'}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-col h-full min-h-0 rounded-lg border border-border/40 bg-background/30 p-3 space-y-2">
-          <div className="flex items-center justify-between gap-2 shrink-0">
-            <span className="text-xs font-medium text-muted-foreground">AI 描述</span>
+            ))}
             <Button
               type="button"
               size="sm"
-              onClick={() => void handleAiSmartDescription()}
-              disabled={activeEditableSegmentIndex === null || isSaving || isAiGenerating}
-              className="h-7 shrink-0 px-2.5 text-xs font-medium text-white border-0 shadow-md bg-gradient-to-r from-violet-500 via-fuchsia-500 to-amber-400 hover:from-violet-400 hover:via-fuchsia-400 hover:to-amber-300 disabled:opacity-50 disabled:from-zinc-600 disabled:via-zinc-600 disabled:to-zinc-600"
+              onClick={selectAllSegmentsForQuickMark}
+              disabled={isSaving || quickMarkStatus === null || segmentLineCount <= 0}
+              className="h-7 px-2.5 text-xs border border-sky-500/60 bg-sky-600/85 hover:bg-sky-500 text-white disabled:opacity-50"
             >
-              <Sparkles className="h-3.5 w-3.5 mr-1" />
-              {isAiGenerating ? '生成中…' : 'AI智能描述'}
+              全选
             </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={applyQuickMarkBatch}
+              disabled={isSaving || quickMarkStatus === null || quickMarkSelections.length === 0}
+              className="h-7 px-2.5 text-xs border border-blue-500/60 bg-blue-600/90 hover:bg-blue-500 text-white disabled:opacity-50"
+            >
+              {isSaving ? '保存中...' : '保存'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => {
+                setQuickMarkSelections([]);
+                setQuickMarkStatus(null);
+              }}
+              disabled={isSaving || quickMarkStatus === null}
+              className="h-7 px-2.5 text-xs border border-border/50 bg-background/40 hover:bg-background/60 text-foreground disabled:opacity-50"
+            >
+              取消
+            </Button>
+            <span className="text-xs w-full sm:w-auto">
+              快速标注：{quickMarkStatus ? `状态=${quickMarkStatus}，已选${quickMarkSelections.length}个` : '请选择一个目标状态'}
+            </span>
+              </>
+            ) : (
+              <span className="text-xs text-muted-foreground/80">样本标注不在当前任务范围内（仅可查看）</span>
+            )}
           </div>
-          <span className="text-xs text-muted-foreground shrink-0">
-            {activeEditableSegmentIndex === null
-              ? '请选择分段后编辑'
-              : `当前分段：${activeEditableSegmentIndex.toString().padStart(3, '0')}`}
-          </span>
-          <textarea
-            value={activeEditableSegmentIndex === null ? '' : (draftDescriptions[activeEditableSegmentIndex] || '')}
-            onChange={(e) => {
-              if (activeEditableSegmentIndex === null) return;
-              const next = [...draftDescriptions];
-              next[activeEditableSegmentIndex] = e.target.value;
-              setDraftDescriptions(next);
-            }}
-            placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : '请输入 AI 分段描述'}
-            disabled={activeEditableSegmentIndex === null}
-            className={descriptionTextareaClass}
-          />
         </div>
 
+        {descriptionPanelVisible ? (
         <div className="flex flex-col h-full min-h-0 rounded-lg border border-border/40 bg-background/30 p-3 space-y-2">
           <div className="flex items-center justify-between gap-2 shrink-0 flex-wrap">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setDescriptionPanelMode('ai')}
+                className={
+                  descriptionPanelMode === 'ai'
+                    ? 'h-7 px-2.5 text-xs bg-primary text-primary-foreground hover:bg-primary/90'
+                    : 'h-7 px-2.5 text-xs bg-background/40 hover:bg-background/60'
+                }
+              >
+                AI 描述
+              </Button>
               <Button
                 type="button"
                 size="sm"
@@ -735,49 +931,90 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({ record,
                 英文描述
               </Button>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleSaveAll}
-              disabled={isSaving || !isDirty || activeEditableSegmentIndex === null}
-              className="h-7 px-3 text-xs shrink-0"
-            >
-              {isSaving ? '保存中...' : '全部保存'}
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => toggleDescriptionPanel(false)}
+                className="h-7 px-2.5 text-xs border-border/50 bg-background/40 hover:bg-background/60"
+              >
+                <PanelRightClose className="h-3.5 w-3.5 mr-1" />
+                隐藏描述
+              </Button>
+              {descriptionPanelMode === 'ai' ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void handleAiSmartDescription()}
+                  disabled={activeEditableSegmentIndex === null || isSaving || isAiGenerating}
+                  className="h-7 px-2.5 text-xs font-medium text-white border-0 shadow-md bg-gradient-to-r from-violet-500 via-fuchsia-500 to-amber-400 hover:from-violet-400 hover:via-fuchsia-400 hover:to-amber-300 disabled:opacity-50 disabled:from-zinc-600 disabled:via-zinc-600 disabled:to-zinc-600"
+                >
+                  <Sparkles className="h-3.5 w-3.5 mr-1" />
+                  {isAiGenerating ? '生成中…' : 'AI智能描述'}
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleSaveAll}
+                disabled={isSaving || !isDirty || activeEditableSegmentIndex === null || !canSaveAnyTask}
+                className="h-7 px-3 text-xs shrink-0"
+              >
+                {isSaving ? '保存中...' : '全部保存'}
+              </Button>
+            </div>
           </div>
           <span className="text-xs text-muted-foreground shrink-0">
             {activeEditableSegmentIndex === null
               ? '请选择分段后编辑'
               : `当前分段：${activeEditableSegmentIndex.toString().padStart(3, '0')}`}
           </span>
-          {descriptionPanelMode === 'review' ? (
+          {descriptionPanelMode === 'ai' ? (
+            <textarea
+              value={activeEditableSegmentIndex === null ? '' : (draftDescriptions[activeEditableSegmentIndex] || '')}
+              readOnly={!canEditAiDescription}
+              onChange={(e) => {
+                if (!canEditAiDescription || activeEditableSegmentIndex === null) return;
+                const next = [...draftDescriptions];
+                next[activeEditableSegmentIndex] = e.target.value;
+                setDraftDescriptions(next);
+              }}
+              placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : canEditAiDescription ? '请输入 AI 分段描述' : '当前任务不可编辑 AI 描述'}
+              disabled={activeEditableSegmentIndex === null}
+              className={descriptionTextareaClass}
+            />
+          ) : descriptionPanelMode === 'review' ? (
             <textarea
               value={activeEditableSegmentIndex === null ? '' : (draftReviewDescriptions[activeEditableSegmentIndex] || '')}
+              readOnly={!canEditReviewDescription}
               onChange={(e) => {
-                if (activeEditableSegmentIndex === null) return;
+                if (!canEditReviewDescription || activeEditableSegmentIndex === null) return;
                 const next = [...draftReviewDescriptions];
                 next[activeEditableSegmentIndex] = e.target.value;
                 setDraftReviewDescriptions(next);
               }}
-              placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : '请输入人工审核描述'}
+              placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : canEditReviewDescription ? '请输入人工审核描述' : '当前任务不可编辑审核描述'}
               disabled={activeEditableSegmentIndex === null}
               className={descriptionTextareaClass}
             />
           ) : (
             <textarea
               value={activeEditableSegmentIndex === null ? '' : (draftEnglishDescriptions[activeEditableSegmentIndex] || '')}
+              readOnly={!canEditEnglishDescription}
               onChange={(e) => {
-                if (activeEditableSegmentIndex === null) return;
+                if (!canEditEnglishDescription || activeEditableSegmentIndex === null) return;
                 const next = [...draftEnglishDescriptions];
                 next[activeEditableSegmentIndex] = e.target.value;
                 setDraftEnglishDescriptions(next);
               }}
-              placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : '请输入英文分段描述'}
+              placeholder={activeEditableSegmentIndex === null ? '请先选择一个分段' : canEditEnglishDescription ? '请输入英文分段描述' : '当前任务不可编辑英文描述'}
               disabled={activeEditableSegmentIndex === null}
               className={descriptionTextareaClass}
             />
           )}
         </div>
+        ) : null}
       </div>
 
       <div className="pt-1">

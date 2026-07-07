@@ -60,6 +60,7 @@ STANDARD_PROJECT_OPTIONS: List[Tuple[str, str]] = [
     ("JXDL-9088", "锦绣东路"),
     ("WSWW-9089", "外四外五"),
     ("WHJM-9096", "外环嘉闵"),
+    ("JWZHZX", "交委指挥中心"),
 ]
 
 STANDARD_EVENT_TYPE_OPTIONS: List[Tuple[str, str]] = [
@@ -73,6 +74,52 @@ STANDARD_EVENT_TYPE_OPTIONS: List[Tuple[str, str]] = [
     ("201", "交通拥堵"),
     ("999", "其它"),
 ]
+
+MULTI_CAR_ACCIDENT_EVENT_CODE = "103"
+ABNORMAL_PARKING_EVENT_CODE = "101"
+MULTI_CAR_ACCIDENT_QUESTIONS: List[str] = [
+    "两辆或多辆车处于接触状态?",
+    "车辆横于道路中央?",
+    "在高速路或快速路上，在某个点位上多辆车同时亮起双闪灯并停驻?",
+    "有人员从车上下来，在车道间走动，查看车头车尾，接打电话?",
+    "事故点后方，车流迅速由快变慢?",
+    "车辆是否有破损变形?",
+    "车辆是否有冒烟?",
+    "车辆周围是否有散落零件?",
+    "多辆车上是否有人员下来查看车辆状态沟通交流?",
+    "车辆是否前方畅通后方车辆绕行?",
+    "是否有人拿出手机拍摄?",
+    "是否有人摆放三角警示牌?",
+    "是否有车轮脱落、车轴断裂、底盘严重拖地?",
+    "是否有护栏、防撞桶、隔离墩被撞坏、移位?",
+    "路面是否出现明显刹车痕或轮胎擦痕?",
+    "是否有路灯杆、标志牌、信号灯杆倾斜或被撞倒?",
+    "是否为警车?",
+    "是否为工程车?",
+    "是否为救护车?",
+    "其他",
+]
+
+ABNORMAL_PARKING_QUESTIONS: List[str] = [
+    "是否长时间静止?",
+    "车辆是否停在行车道/超车道?",
+    "是否有人上下车或走动?",
+    "引擎盖是否打开?",
+    "后备箱是否打开?",
+    "是否为警车?",
+    "是否为工程车?",
+    "是否为救护车?",
+    "其他",
+]
+
+
+def _get_special_qa_questions(event_type_code: str) -> List[str]:
+    code = str(event_type_code or "").strip()
+    if code == MULTI_CAR_ACCIDENT_EVENT_CODE:
+        return MULTI_CAR_ACCIDENT_QUESTIONS
+    if code == ABNORMAL_PARKING_EVENT_CODE:
+        return ABNORMAL_PARKING_QUESTIONS
+    return []
 
 
 def _mysql_connect_kwargs() -> Dict[str, Any]:
@@ -277,6 +324,7 @@ def init_event_database() -> None:
         _ensure_column(cursor, "event_records", "segment_statuses_json", "LONGTEXT NULL")
         _ensure_column(cursor, "event_type_dict", "questions_list", "LONGTEXT NULL")
         _ensure_column(cursor, "event_records", "questions_answers_list", "LONGTEXT NULL")
+        _ensure_column(cursor, "event_records", "accident_questions_answers_json", "LONGTEXT NULL")
 
         cursor.execute(
             """
@@ -332,6 +380,13 @@ def init_event_database() -> None:
             UPDATE event_records
             SET questions_answers_list = '[]'
             WHERE questions_answers_list IS NULL OR TRIM(questions_answers_list) = ''
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE event_records
+            SET accident_questions_answers_json = '[]'
+            WHERE accident_questions_answers_json IS NULL OR TRIM(accident_questions_answers_json) = ''
             """
         )
 
@@ -506,6 +561,68 @@ def _parse_questions_answers_2d(
             normalized[idx] = fallback[idx]
         elif len(normalized[idx]) > 2:
             normalized[idx] = normalized[idx][:2]
+    return normalized
+
+
+def _build_default_accident_questions_answers(
+    segment_count: int,
+    event_type_code: str = "",
+) -> List[List[Dict[str, str]]]:
+    questions = _get_special_qa_questions(event_type_code)
+    result: List[List[Dict[str, str]]] = []
+    for _idx in range(max(segment_count, 0)):
+        result.append([
+            {"question": question, "answer": ""}
+            for question in questions
+        ])
+    return result
+
+
+def _parse_accident_questions_answers_2d(
+    raw_value: Optional[str],
+    segment_count: int,
+    event_type_code: str = "",
+) -> List[List[Dict[str, str]]]:
+    questions = _get_special_qa_questions(event_type_code)
+    fallback = _build_default_accident_questions_answers(segment_count, event_type_code)
+    if not questions:
+        return fallback
+    if not raw_value:
+        return fallback
+    try:
+        parsed = json.loads(raw_value)
+    except Exception:
+        return fallback
+    if not isinstance(parsed, list):
+        return fallback
+
+    normalized: List[List[Dict[str, str]]] = []
+    for seg in parsed:
+        if not isinstance(seg, list):
+            normalized.append([])
+            continue
+        by_question: Dict[str, str] = {}
+        for qa in seg:
+            if not isinstance(qa, dict):
+                continue
+            question = str(qa.get("question", "")).strip()
+            answer = str(qa.get("answer", "")).strip()
+            if question:
+                by_question[question] = answer
+        normalized.append([
+            {"question": question, "answer": by_question.get(question, "")}
+            for question in questions
+        ])
+
+    target_len = max(segment_count, 0)
+    if len(normalized) < target_len:
+        normalized.extend([[] for _ in range(target_len - len(normalized))])
+    elif len(normalized) > target_len:
+        normalized = normalized[:target_len]
+
+    for idx in range(target_len):
+        if len(normalized[idx]) < len(questions):
+            normalized[idx] = fallback[idx]
     return normalized
 
 
@@ -690,6 +807,7 @@ def search_events(
     end_date: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
+    event_keys_filter: Optional[Set[Tuple[str, str, str]]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """查询事件记录并返回分页结果。"""
     refresh_event_dict_cache()
@@ -746,6 +864,17 @@ def search_events(
         where_conditions.append("start_time <= %s")
         params.append(end_date)
 
+    if event_keys_filter is not None:
+        if not event_keys_filter:
+            return [], 0
+        key_clauses: List[str] = []
+        for event_id, project_id, event_type_code in event_keys_filter:
+            key_clauses.append(
+                "(event_id = %s AND project_id = %s AND event_type_corrected = %s)"
+            )
+            params.extend([event_id, project_id, event_type_code])
+        where_conditions.append(f"({' OR '.join(key_clauses)})")
+
     where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
     offset = (page - 1) * page_size
 
@@ -779,6 +908,7 @@ def search_events(
                     segment_descriptions_en_json,
                     segment_statuses_json,
                     questions_answers_list,
+                    accident_questions_answers_json,
                     created_at
                 FROM event_records
                 WHERE {where_clause}
@@ -807,6 +937,7 @@ def search_events(
                     segment_descriptions_en_json,
                     segment_statuses_json,
                     questions_answers_list,
+                    accident_questions_answers_json,
                     created_at
                 FROM event_records
                 WHERE {where_clause}
@@ -839,6 +970,11 @@ def search_events(
             segment_count=segment_count,
             event_type_code=row["event_type_corrected"] or "",
             event_id=str(row["event_id"]),
+        )
+        accident_questions_answers_list = _parse_accident_questions_answers_2d(
+            row.get("accident_questions_answers_json"),
+            segment_count=segment_count,
+            event_type_code=row["event_type_corrected"] or "",
         )
         if not _match_question_answer_status(
             questions_answers_list=questions_answers_list,
@@ -880,6 +1016,7 @@ def search_events(
                 "segmentDescriptionsEn": segment_descriptions_en,
                 "segmentStatuses": segment_statuses,
                 "questionsAnswersList": questions_answers_list,
+                "accidentQuestionsAnswersList": accident_questions_answers_list,
                 "eventTypeQuestions": get_event_type_questions_by_code(row["event_type_corrected"] or ""),
                 "imageBigUrl": _build_image_big_url(row["image_paths"]),
                 "imageCompositeUrl": image_variants["composite"],
@@ -900,15 +1037,20 @@ def search_events(
 def get_pending_event_videos_for_segmentation(
     limit: int,
     event_type_codes: Optional[List[str]] = None,
+    project_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     safe_limit = max(int(limit or 0), 1)
     normalized_codes = [item.strip() for item in (event_type_codes or []) if item and item.strip()]
+    normalized_project_ids = [item.strip() for item in (project_ids or []) if item and item.strip()]
     where_sql = """
         video_path IS NOT NULL
         AND TRIM(video_path) <> ''
         AND IFNULL(segment_count, 0) <= 0
     """
     params: List[Any] = []
+    if normalized_project_ids:
+        where_sql += f" AND project_id IN ({_in_clause(len(normalized_project_ids))})"
+        params.extend(normalized_project_ids)
     if normalized_codes:
         where_sql += f" AND event_type_corrected IN ({_in_clause(len(normalized_codes))})"
         params.extend(normalized_codes)
@@ -1185,6 +1327,64 @@ def update_event_segmentation_result(
         )
 
 
+def get_event_segment_annotations(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+) -> Dict[str, Any]:
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                segment_count,
+                segment_descriptions_json,
+                segment_review_descriptions_json,
+                segment_descriptions_en_json,
+                segment_statuses_json,
+                questions_answers_list,
+                accident_questions_answers_json
+            FROM event_records
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
+            LIMIT 1
+            """,
+            (event_id, project_id, event_type_corrected),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("事件不存在")
+
+    segment_count = int(row["segment_count"] or 0)
+    segment_descriptions = _parse_segment_text_list(row["segment_descriptions_json"])
+    segment_review_descriptions = _parse_segment_text_list(row["segment_review_descriptions_json"])
+    segment_descriptions_en = _parse_segment_text_list(row["segment_descriptions_en_json"])
+    segment_statuses = _parse_json_string_list(row["segment_statuses_json"])
+    align_len = max(segment_count, len(segment_descriptions), len(segment_statuses))
+    segment_descriptions = _pad_string_list(segment_descriptions, align_len)
+    segment_review_descriptions = _pad_string_list(segment_review_descriptions, align_len)
+    segment_descriptions_en = _pad_string_list(segment_descriptions_en, align_len)
+    segment_statuses = _pad_string_list(segment_statuses, align_len, "待定")
+    questions_answers_list = _parse_questions_answers_2d(
+        row["questions_answers_list"],
+        segment_count=segment_count,
+        event_type_code=event_type_corrected,
+        event_id=str(event_id),
+    )
+    accident_questions_answers_list = _parse_accident_questions_answers_2d(
+        row.get("accident_questions_answers_json"),
+        segment_count=segment_count,
+        event_type_code=event_type_corrected,
+    )
+    return {
+        "segment_descriptions": segment_descriptions,
+        "segment_review_descriptions": segment_review_descriptions,
+        "segment_descriptions_en": segment_descriptions_en,
+        "segment_statuses": segment_statuses,
+        "questions_answers_list": questions_answers_list,
+        "accident_questions_answers_list": accident_questions_answers_list,
+    }
+
+
 def update_event_segment_annotations(
     event_id: str,
     project_id: str,
@@ -1194,6 +1394,7 @@ def update_event_segment_annotations(
     segment_descriptions_en: List[str],
     segment_statuses: List[str],
     questions_answers_list: Optional[List[List[Dict[str, str]]]] = None,
+    accident_questions_answers_list: Optional[List[List[Dict[str, str]]]] = None,
 ) -> None:
     lengths = {
         len(segment_descriptions),
@@ -1212,6 +1413,10 @@ def update_event_segment_annotations(
         questions_answers_list if questions_answers_list is not None else [],
         ensure_ascii=False,
     )
+    payload_accident_questions_answers = json.dumps(
+        accident_questions_answers_list if accident_questions_answers_list is not None else [],
+        ensure_ascii=False,
+    )
     with get_event_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1222,7 +1427,8 @@ def update_event_segment_annotations(
                 segment_review_descriptions_json = %s,
                 segment_descriptions_en_json = %s,
                 segment_statuses_json = %s,
-                questions_answers_list = %s
+                questions_answers_list = %s,
+                accident_questions_answers_json = %s
             WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
             """,
             (
@@ -1231,6 +1437,7 @@ def update_event_segment_annotations(
                 payload_descriptions_en,
                 payload_statuses,
                 payload_questions_answers,
+                payload_accident_questions_answers,
                 event_id,
                 project_id,
                 event_type_corrected,

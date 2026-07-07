@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-从 MySQL taglens_taglens.images 表中导出 sz_name 为空的记录对应的「视频质量诊断事件 ID」，
+从 MySQL taglens_taglens.images 表中导出 sz_name 为空的记录对应的「交委指挥中心事件 ID」，
 按 file_path 是否包含关键字分别写入两个目录下的 txt（每行一个 ID）。
 
 文件名约定（与实际上传路径一致）：
@@ -12,7 +12,7 @@
 注意：images.uuid 可能为应用生成的 UUID，与业务事件 ID 不一致，故不再导出 uuid 列。
 
 默认关键字：
-  - 目录「视频质量诊断」：file_path 包含「视频质量诊断」
+  - 目录「交委指挥中心」：file_path 包含「交委指挥中心」
   - 目录「浦东道运」：file_path 包含「浦东道运」
 
 若同一条路径同时包含两个关键字，事件 ID 会同时写入两个文件。
@@ -65,8 +65,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--name-video",
-        default="视频质量诊断",
-        help="匹配 file_path 的子串（输出到子目录「视频质量诊断」）",
+        default="交委指挥中心",
+        help="匹配 file_path 的子串（输出到子目录「交委指挥中心」）",
     )
     parser.add_argument(
         "--name-pudong",

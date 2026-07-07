@@ -1,7 +1,7 @@
 """
 从minio下载指定bucket和prefix下的所有文件到本地目录
 Bucket：bucket-taglens
-Prefix：project_data/视频质量诊断/2026-01-14/
+Prefix：project_data/交委指挥中心/2026-01-14/
 本地保存：你执行命令时的当前目录下 minio/
 """
 
@@ -134,7 +134,7 @@ def download_folder(bucket_name, prefix, local_dir):
 if __name__ == "__main__":
     # 测试配置
     TARGET_BUCKET = "bucket-taglens"
-    TARGET_PREFIX = "project_data/视频质量诊断/2026-01-14/"
+    TARGET_PREFIX = "project_data/交委指挥中心/2026-01-14/"
     
     # 获取当前执行命令的目录作为基准，或者直接使用脚本所在目录
     # 用户要求: "保存在当前目录的'minio'文件夹"

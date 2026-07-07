@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#指挥中心视频质量诊断  
+#交委指挥中心  
 import time
 import threading
 import json
@@ -97,7 +97,7 @@ PULL_LOG_FILE = os.path.join(LOG_DIR, "sync_task_01_pull.log")
 
 
 REMOTE_SH = os.path.join(SCRIPT_DIR, "QualityJudgment.sh")
-PROJECT_NAME="视频质量诊断"
+PROJECT_NAME="交委指挥中心"
 SCRIPT_PATH = "scripts/sync_task_01.py"
 PROJECT_ROOT="/root/CollectionIMGJudgment"
 
