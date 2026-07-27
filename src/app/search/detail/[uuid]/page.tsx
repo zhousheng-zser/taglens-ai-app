@@ -246,7 +246,9 @@ export default function TagSearchDetailPage() {
                                     <div className="shrink-0 border-t border-border/30 p-2.5 bg-background/40 space-y-2.5">
                                         {currentItem.similarity !== undefined && currentItem.similarity !== null ? (
                                             <section className="rounded-lg border border-border/50 bg-muted/20 p-2.5">
-                                                <h3 className="text-[11px] font-semibold uppercase text-muted-foreground mb-1.5">语义相似度</h3>
+                                                <h3 className="text-[11px] font-semibold uppercase text-muted-foreground mb-1.5">
+                                                    {session?.searchMode === 'description' ? '精排得分' : '语义相似度'}
+                                                </h3>
                                                 <div className="flex items-center gap-3">
                                                     <div className="flex-1 bg-secondary rounded-full h-1.5 overflow-hidden">
                                                         <div

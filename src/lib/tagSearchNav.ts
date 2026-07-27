@@ -22,22 +22,26 @@ export interface TagSearchSessionState {
   activeSearchTags: TagWithWeight[];
   isComboMode: boolean;
   similarityThreshold: number;
+  rerankTopN?: number;
   page: number;
   pageSize: number;
   total: number;
   results: TagSearchResultNavItem[];
   currentIndex: number;
+  searchMode?: 'keyword' | 'description';
 }
 
 type TagSearchMemorySnapshot = {
   activeSearchTags: TagWithWeight[];
   isComboMode: boolean;
   similarityThreshold: number;
+  rerankTopN?: number;
   page: number;
   pageSize: number;
   total: number;
   searchResults: ImageSearchResult[];
   allSearchResults: ImageSearchResult[];
+  searchMode?: 'keyword' | 'description';
 };
 
 let memorySnapshot: TagSearchMemorySnapshot | null = null;
@@ -87,6 +91,10 @@ export function matchTagSearchMemorySnapshot(state: TagSearchSessionState): TagS
   if (snapshot.page !== state.page || snapshot.pageSize !== state.pageSize) return null;
   if (!tagsMatch(snapshot.activeSearchTags, state.activeSearchTags)) return null;
   if (Math.abs(snapshot.similarityThreshold - state.similarityThreshold) > 0.0001) return null;
+  const snapTopN = snapshot.rerankTopN ?? 1000;
+  const stateTopN = state.rerankTopN ?? 1000;
+  if ((snapshot.searchMode || 'keyword') === 'description' && snapTopN !== stateTopN) return null;
+  if ((snapshot.searchMode || 'keyword') !== (state.searchMode || 'keyword')) return null;
   return snapshot;
 }
 
@@ -118,6 +126,10 @@ export async function fetchTagSearchPageResults(
       page: state.page,
       pageSize: state.pageSize,
       similarityThreshold: state.similarityThreshold,
+      searchMode: state.searchMode || 'keyword',
+      ...((state.searchMode || 'keyword') === 'description'
+        ? { rerankTopN: state.rerankTopN ?? 1000 }
+        : {}),
     }),
   });
   const payload = await response.json().catch(() => ({}));

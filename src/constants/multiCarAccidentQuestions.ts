@@ -120,7 +120,6 @@ export function normalizeAccidentQuestionsAnswers(
   eventTypeCode?: string | undefined | null,
 ): QuestionAnswerPair[][] {
   const questions = getSpecialQaQuestions(eventTypeCode);
-  if (questions.length === 0) return [];
   const result: QuestionAnswerPair[][] = [];
   for (let i = 0; i < segmentCount; i += 1) {
     const current = Array.isArray(value?.[i]) ? value?.[i] : [];

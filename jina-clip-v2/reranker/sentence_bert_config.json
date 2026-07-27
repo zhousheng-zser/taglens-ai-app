@@ -1,0 +1,23 @@
+{
+    "transformer_task": "feature-extraction",
+    "modality_config": {
+        "text": {
+            "method": "forward",
+            "method_output_name": null
+        },
+        "message": {
+            "method": "forward",
+            "method_output_name": null,
+            "format": "structured"
+        }
+    },
+    "module_output_name": "scores",
+    "config_kwargs": {
+        "num_labels": 1
+    },
+    "processing_kwargs": {
+        "chat_template": {
+            "add_generation_prompt": false
+        }
+    }
+}

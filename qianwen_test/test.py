@@ -8,17 +8,17 @@ from openai import OpenAI
 
 
 # 临时线程池大小，后续要调整并发数改这里即可。
-MAX_WORKERS = 15
+MAX_WORKERS = 3
 
 # 后续视频增多时，继续往这个数组里追加文件名。
 VIDEO_FILES = [
-    "1_002.mp4",
-    "3_000.mp4",
-    "4_000.mp4",
-    "5_000.mp4",
-    "6_001.mp4",
-    "7_000.mp4",
-    "8_003.mp4"
+    #"1_002.mp4",
+    # "3_000.mp4",
+    # "4_000.mp4",
+    # "5_000.mp4",
+    # "6_001.mp4",
+    # "7_000.mp4",
+    "CJSG_2048662386981736450_004.mp4"
 ]
 
 PROMPT = """## 角色与任务
@@ -311,12 +311,12 @@ def analyze_video(video_name: str) -> tuple[str, Path, Path]:
 
     # 每个线程单独创建 client，避免并发复用同一个客户端带来的状态问题。
     client = OpenAI(
-        base_url="https://u149890-jyv3-5b09aec6.westb.seetacloud.com:8443/v1",
+        base_url="http://192.168.11.148:6006/v1",
         api_key="EMPTY",
     )
 
     response = client.chat.completions.create(
-        model="model/RLQ",
+        model="models/QRL",
         messages=[
             {
                 "role": "user",
@@ -331,7 +331,7 @@ def analyze_video(video_name: str) -> tuple[str, Path, Path]:
             "top_k": 20,
             "chat_template_kwargs": {"enable_thinking": True},
             "mm_processor_kwargs": {
-                "fps": 5,
+                #"fps": 5,
                 "do_sample_frames": True,
             },
         },

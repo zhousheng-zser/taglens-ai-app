@@ -12,6 +12,19 @@ function isStreamingContentType(contentType: string): boolean {
   );
 }
 
+function forwardSetCookies(source: Response, target: NextResponse) {
+  const cookies =
+    typeof source.headers.getSetCookie === 'function' ? source.headers.getSetCookie() : [];
+  if (cookies.length > 0) {
+    cookies.forEach((cookie) => target.headers.append('set-cookie', cookie));
+    return;
+  }
+  const single = source.headers.get('set-cookie');
+  if (single) {
+    target.headers.set('set-cookie', single);
+  }
+}
+
 function buildProxyStreamResponse(response: Response): NextResponse {
   const headers = new Headers();
   const contentType = response.headers.get('Content-Type');
@@ -78,10 +91,7 @@ export async function GET(
     // 否则返回 JSON 响应
     const data = await response.json();
     const nextResponse = NextResponse.json(data);
-    const setCookie = response.headers.get('set-cookie');
-    if (setCookie) {
-      nextResponse.headers.set('set-cookie', setCookie);
-    }
+    forwardSetCookies(response, nextResponse);
     return nextResponse;
   } catch (error: any) {
     console.error('代理请求失败:', error);
@@ -132,10 +142,7 @@ export async function POST(
 
     const data = await response.json();
     const nextResponse = NextResponse.json(data);
-    const setCookie = response.headers.get('set-cookie');
-    if (setCookie) {
-      nextResponse.headers.set('set-cookie', setCookie);
-    }
+    forwardSetCookies(response, nextResponse);
     return nextResponse;
   } catch (error: any) {
     console.error('代理请求失败:', error);
@@ -172,10 +179,7 @@ export async function DELETE(
 
     const data = await response.json();
     const nextResponse = NextResponse.json(data);
-    const setCookie = response.headers.get('set-cookie');
-    if (setCookie) {
-      nextResponse.headers.set('set-cookie', setCookie);
-    }
+    forwardSetCookies(response, nextResponse);
     return nextResponse;
   } catch (error: any) {
     console.error('代理请求失败:', error);

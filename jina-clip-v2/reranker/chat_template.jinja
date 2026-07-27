@@ -1,0 +1,26 @@
+{%- macro render(message) -%}
+    {%- if message['content'] is string -%}
+        {{ message['content'] }}
+    {%- else -%}
+        {%- for item in message['content'] -%}
+            {%- if item['type'] == 'text' -%}
+                {{ item['text'] }}
+            {%- elif item['type'] == 'image' or 'image' in item -%}
+                <|vision_start|><|image_pad|><|vision_end|>
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endmacro -%}
+
+{%- set ns = namespace(doc='', query='') -%}
+{%- for message in messages -%}
+    {%- if message['role'] == 'query' -%}
+        {%- set ns.query = render(message) -%}
+    {%- elif message['role'] == 'document' -%}
+        {%- set ns.doc = render(message) -%}
+    {%- endif -%}
+{%- endfor -%}
+**Document**:
+{{ ns.doc }}
+**Query**:
+{{ ns.query }}

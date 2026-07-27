@@ -138,7 +138,10 @@ class SearchRequest(BaseModel):
     bizCategory: Optional[str] = None  # 业态目录模糊匹配（sz_tag_ref_json）
     filePath: Optional[str] = None  # 文件路径模糊匹配（relative_path）
     descriptionKeywords: Optional[List[str]] = None  # 综合描述模糊匹配（多个关键词 AND）
-    similarityThreshold: Optional[float] = 0.6  # 相似度阈值,范围0-1
+    similarityThreshold: Optional[float] = 0.6  # 相似度阈值,范围0-1（仅 keyword）
+    searchMode: Optional[str] = "keyword"  # keyword | description
+    rerankTopN: Optional[int] = 1000  # description：粗排 TopN 后再精排
+
 
 class ExportImageItem(BaseModel):
     filePath: str
@@ -157,8 +160,15 @@ class ExportImagesRequest(BaseModel):
     endDate: Optional[str] = None
     cameraName: Optional[str] = None
     bizCategory: Optional[str] = None
+    searchMode: Optional[str] = "keyword"
+    rerankTopN: Optional[int] = 1000
+
 
 class KeywordCacheLoadRequest(BaseModel):
+    reload: bool = False
+
+
+class DescriptionCacheLoadRequest(BaseModel):
     reload: bool = False
 
 class ImageSearchResult(BaseModel):
@@ -309,6 +319,8 @@ async def lifespan(app: FastAPI):
         print(f"⚠ BGE向量化模型预加载失败: {e}")
 
     asyncio.create_task(_auto_load_keyword_cache_on_startup())
+    asyncio.create_task(_auto_load_description_cache_on_startup())
+    asyncio.create_task(_preload_jina_model_on_startup())
 
     yield
     
@@ -1072,8 +1084,21 @@ def _search_images_sync(
     
     queries = [tag for tag, _ in tags_with_weights]
     weights = [weight for _, weight in tags_with_weights]
-    
-    print(f"请求内容: tags={tags_with_weights}, threshold={request.similarityThreshold}, limit={request.limit}")
+    search_mode = (request.searchMode or "keyword").strip().lower()
+    if search_mode not in ("keyword", "description"):
+        search_mode = "keyword"
+
+    rerank_top_n = request.rerankTopN if request.rerankTopN is not None else 1000
+    try:
+        rerank_top_n = int(rerank_top_n)
+    except (TypeError, ValueError):
+        rerank_top_n = 1000
+    rerank_top_n = max(1, min(rerank_top_n, 5000))
+
+    print(
+        f"请求内容: tags={tags_with_weights}, mode={search_mode}, "
+        f"threshold={request.similarityThreshold}, rerankTopN={rerank_top_n}, limit={request.limit}"
+    )
     print("=" * 60)
     try:
         progress.report("encode", 1, "正在准备搜索…")
@@ -1081,17 +1106,31 @@ def _search_images_sync(
         query_embeddings = []
         if queries:
             try:
-                for idx, query in enumerate(queries):
-                    progress.check_cancelled()
-                    progress.report(
-                        "encode",
-                        2 + (idx / max(len(queries), 1)) * 8,
-                        f"正在向量化标签「{query}」…",
-                    )
-                    embedding = encode_text_to_vector(query)
-                    query_embeddings.append(embedding)
-                    print(f"已生成查询向量: '{query}' (维度: {len(embedding) // 4})")
-                progress.report("encode", 10, "查询标签向量化完成")
+                if search_mode == "description":
+                    from services.jina_embedding_service import encode_description_to_vector
+
+                    for idx, query in enumerate(queries):
+                        progress.check_cancelled()
+                        progress.report(
+                            "encode",
+                            2 + (idx / max(len(queries), 1)) * 8,
+                            f"正在向量化描述查询「{query}」…",
+                        )
+                        embedding, dim = encode_description_to_vector(query)
+                        query_embeddings.append(embedding)
+                        print(f"已生成描述查询向量: '{query}' (维度: {dim})")
+                else:
+                    for idx, query in enumerate(queries):
+                        progress.check_cancelled()
+                        progress.report(
+                            "encode",
+                            2 + (idx / max(len(queries), 1)) * 8,
+                            f"正在向量化标签「{query}」…",
+                        )
+                        embedding = encode_text_to_vector(query)
+                        query_embeddings.append(embedding)
+                        print(f"已生成查询向量: '{query}' (维度: {len(embedding) // 4})")
+                progress.report("encode", 10, "查询向量化完成")
             except SearchCancelledError:
                 raise
             except Exception as e:
@@ -1103,7 +1142,7 @@ def _search_images_sync(
             # 如果查询为空，返回所有图片（不使用向量搜索）
             print("查询关键词为空，将依赖时间范围或返回最新图片。")
         
-        # 验证相似度阈值
+        # 验证相似度阈值（仅 keyword；description 用 TopN + 精排）
         similarity_threshold = request.similarityThreshold or 0.6
         if not 0 <= similarity_threshold <= 1:
             similarity_threshold = 0.6
@@ -1115,7 +1154,11 @@ def _search_images_sync(
         # 如果没有指定分页参数，使用limit（向后兼容）
         use_limit = request.limit if request.page is None and request.pageSize is None else None
         
-        print(f"搜索参数: tags={tags_with_weights}, threshold={similarity_threshold}, page={page}, pageSize={page_size}, limit={use_limit}")
+        print(
+            f"搜索参数: tags={tags_with_weights}, mode={search_mode}, "
+            f"threshold={similarity_threshold}, rerankTopN={rerank_top_n}, "
+            f"page={page}, pageSize={page_size}, limit={use_limit}"
+        )
         
         results, total_count = search_images(
             query=queries[0] if queries else '',  # 向后兼容，传递第一个查询
@@ -1133,6 +1176,8 @@ def _search_images_sync(
             page=page if use_limit is None else None,  # 如果使用limit，则不使用分页
             page_size=page_size if use_limit is None else None,
             on_progress=progress,
+            search_mode=search_mode,
+            rerank_top_n=rerank_top_n if search_mode == "description" else None,
         )
         
         print(f"搜索结果数量: {len(results)}, 总数: {total_count}")
@@ -1146,7 +1191,6 @@ def _search_images_sync(
         image_results = []
         for r in results:
             similarity_value = r.get('similarity')
-            print(f"处理结果 ID={r.get('id')}, similarity={similarity_value}")
             image_results.append(
                 ImageSearchResult(
                     id=r['id'],
@@ -1178,9 +1222,10 @@ def _search_images_sync(
         print(f"搜索图片时发生HTTP异常: {e}")
         raise e
     except Exception as e:
+        from services.description_search_cache import DescriptionCacheNotLoadedError
         from services.keyword_search_cache import KeywordCacheNotLoadedError
 
-        if isinstance(e, KeywordCacheNotLoadedError):
+        if isinstance(e, (KeywordCacheNotLoadedError, DescriptionCacheNotLoadedError)):
             raise HTTPException(status_code=400, detail=str(e))
         print(f"搜索图片时发生错误: {e}")
         import traceback
@@ -1317,6 +1362,78 @@ async def _auto_load_keyword_cache_on_startup() -> None:
         traceback.print_exc()
 
 
+async def _auto_load_description_cache_on_startup() -> None:
+    """服务启动后在后台异步加载描述向量库，不阻塞 HTTP 服务就绪。"""
+    from services.description_search_cache import (
+        DescriptionCacheAlreadyLoadedError,
+        DescriptionCacheLoadingError,
+        get_description_cache_status,
+    )
+
+    enabled = os.getenv("DESCRIPTION_CACHE_AUTO_LOAD", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
+        print("[description_cache] 启动时自动加载已禁用 (DESCRIPTION_CACHE_AUTO_LOAD=false)")
+        return
+
+    status = get_description_cache_status()
+    if status.get("loaded"):
+        print(
+            f"[description_cache] 启动跳过：描述向量库已就绪 "
+            f"({status.get('imageCount', 0)} 张图片)"
+        )
+        return
+    if status.get("loading"):
+        print("[description_cache] 启动跳过：描述向量库正在加载中")
+        return
+
+    print("[description_cache] 正在后台异步加载描述向量库…")
+    try:
+        result = await run_blocking(_load_description_cache_sync, False, None, None)
+        print(
+            "[description_cache] 启动自动加载完成: "
+            f"{result.get('imageCount', 0)} 张图片向量, "
+            f"耗时 {result.get('lastLoadSeconds')}s"
+        )
+    except DescriptionCacheAlreadyLoadedError:
+        pass
+    except DescriptionCacheLoadingError:
+        print("[description_cache] 启动自动加载跳过：已有加载任务进行中")
+    except Exception as exc:
+        print(f"[description_cache] 启动自动加载失败: {exc}")
+        traceback.print_exc()
+
+
+async def _preload_jina_model_on_startup() -> None:
+    """服务启动后在后台预加载 Jina CLIP，避免描述向量首次搜索卡顿。"""
+    enabled = os.getenv("JINA_MODEL_PRELOAD", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
+        print("[jina_embedding] 启动时预加载已禁用 (JINA_MODEL_PRELOAD=false)")
+        return
+
+    print("[jina_embedding] 正在后台预加载 Jina CLIP 模型…")
+    try:
+        from services.jina_embedding_service import get_jina_model
+
+        def _load():
+            return get_jina_model()
+
+        net, device = await run_blocking(_load)
+        print(f"[jina_embedding] 启动预加载完成 device={device}")
+    except Exception as exc:
+        print(f"[jina_embedding] 启动预加载失败: {exc}")
+        traceback.print_exc()
+
+
 @app.get("/keyword-cache/status")
 async def keyword_cache_status_api():
     from services.keyword_search_cache import get_keyword_cache_status
@@ -1399,6 +1516,114 @@ async def keyword_cache_load_stream_api(request: KeywordCacheLoadRequest, http_r
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
+def _load_description_cache_sync(
+    reload: bool,
+    progress_callback: Optional[SearchProgressCallback] = None,
+    cancellation: Optional[SearchCancellation] = None,
+) -> Dict[str, Any]:
+    from services.description_search_cache import (
+        DescriptionCacheAlreadyLoadedError,
+        DescriptionCacheLoadingError,
+        get_description_cache_status,
+        load_description_vectors,
+    )
+
+    progress = SearchProgress(progress_callback, cancellation)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        count = load_description_vectors(cursor, force_reload=reload, progress=progress)
+    status = get_description_cache_status()
+    return {"success": True, "imageCount": count, **status}
+
+
+@app.get("/description-cache/status")
+async def description_cache_status_api():
+    from services.description_search_cache import get_description_cache_status
+
+    return get_description_cache_status()
+
+
+@app.post("/description-cache/release")
+async def description_cache_release_api():
+    from services.description_search_cache import (
+        DescriptionCacheLoadingError,
+        release_description_cache,
+    )
+
+    try:
+        return release_description_cache()
+    except DescriptionCacheLoadingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/description-cache/load/stream")
+async def description_cache_load_stream_api(
+    request: DescriptionCacheLoadRequest,
+    http_request: Request,
+):
+    """流式加载/重载描述向量库。"""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    cancellation = SearchCancellation()
+
+    def progress_callback(event: dict) -> None:
+        if cancellation.is_cancelled():
+            return
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def worker() -> None:
+        from services.description_search_cache import (
+            DescriptionCacheAlreadyLoadedError,
+            DescriptionCacheLoadingError,
+        )
+
+        try:
+            result = await run_blocking(
+                _load_description_cache_sync,
+                request.reload,
+                progress_callback,
+                cancellation,
+            )
+            if cancellation.is_cancelled():
+                return
+            await queue.put({"type": "result", **result})
+        except SearchCancelledError:
+            print("[description-cache/load/stream] 客户端中断加载")
+        except DescriptionCacheAlreadyLoadedError as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 409})
+        except DescriptionCacheLoadingError as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 409})
+        except Exception as exc:
+            if not cancellation.is_cancelled():
+                await queue.put({"type": "error", "message": str(exc), "status": 500})
+        finally:
+            await queue.put(None)
+
+    worker_task = asyncio.create_task(worker())
+
+    async def generate():
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    cancellation.cancel()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        finally:
+            cancellation.cancel()
+            if not worker_task.done():
+                worker_task.cancel()
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
 def _export_search_images_sync(
     request: ExportImagesRequest,
     progress_callback: Optional[SearchProgressCallback] = None,
@@ -1430,6 +1655,8 @@ def _export_search_images_sync(
             bizCategory=request.bizCategory,
             page=1,
             pageSize=10000,
+            searchMode=request.searchMode or "keyword",
+            rerankTopN=request.rerankTopN if request.rerankTopN is not None else 1000,
         )
         search_result = _search_images_sync(
             search_request,

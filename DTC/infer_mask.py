@@ -47,7 +47,7 @@ CATEGORY_TO_STAGE = {
 
 DEFAULT_RESOLUTION = 1008
 DEFAULT_NORM = {"mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5]}
-DEFAULT_ADAPTER = {"adapter_dim": 64, "adapter_heads": 4, "adapter_scale": 0.5}
+DEFAULT_ADAPTER = {"adapter_dim": 64, "adapter_heads": 4, "adapter_scale": 0.6}
 
 
 def build_transform(resolution=DEFAULT_RESOLUTION, norm=None):

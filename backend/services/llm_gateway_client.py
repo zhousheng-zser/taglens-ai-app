@@ -11,10 +11,11 @@ from services.llm_gateway_service import LLMGatewayError
 from services.sync_hard_timeout import HardTimeoutError, call_with_hard_timeout
 
 LLM_GATEWAY_URL = os.getenv("LLM_GATEWAY_URL", "http://127.0.0.1:8020").rstrip("/")
-LLM_GATEWAY_TIMEOUT_SEC = float(os.getenv("LLM_GATEWAY_TIMEOUT_SEC", "180"))
+# 远端 Codex 常超过 3 分钟，默认放宽
+LLM_GATEWAY_TIMEOUT_SEC = float(os.getenv("LLM_GATEWAY_TIMEOUT_SEC", "600"))
 # 略大于 httpx 整请求超时，防止客户端 read drip 导致永不返回
 LLM_GATEWAY_HARD_TIMEOUT_SEC = float(
-    os.getenv("LLM_GATEWAY_HARD_TIMEOUT_SEC", str(LLM_GATEWAY_TIMEOUT_SEC + 20))
+    os.getenv("LLM_GATEWAY_HARD_TIMEOUT_SEC", str(LLM_GATEWAY_TIMEOUT_SEC + 30))
 )
 
 

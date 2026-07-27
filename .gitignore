@@ -72,3 +72,4 @@ reid_tmp*
 /DTC/input
 /DTC/output
 /DTC/ckpt
+model.safetensors

@@ -4,7 +4,6 @@
 """
 import json
 import os
-import subprocess
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -19,11 +18,6 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-BACKUP_DIR = Path(__file__).parent.parent.parent / "data" / "backup"
-BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
-_backup_checked = False
-
-
 def _mysql_connect_kwargs() -> Dict[str, Any]:
     return {
         "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
@@ -33,6 +27,19 @@ def _mysql_connect_kwargs() -> Dict[str, Any]:
         "database": os.getenv("MYSQL_TAGLENS_DATABASE", "taglens_taglens"),
         "charset": os.getenv("MYSQL_CHARSET", "utf8mb4"),
     }
+
+
+def _drop_column_if_exists(cursor, table: str, column: str) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """,
+        (table, column),
+    )
+    if int(cursor.fetchone()["cnt"]) > 0:
+        cursor.execute(f"ALTER TABLE `{table}` DROP COLUMN `{column}`")
+        print(f"已删除 {table}.{column} 字段")
 
 
 def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
@@ -48,53 +55,9 @@ def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
         print(f"已添加 {column} 字段到 {table} 表")
 
 
-def _backup_db_if_needed() -> None:
-    """按天 mysqldump 备份 MySQL taglens_taglens，并清理过期 .sql 备份（保留原有 .db 文件）。"""
-    global _backup_checked
-    if _backup_checked:
-        return
-    _backup_checked = True
-
-    try:
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        backup_path = BACKUP_DIR / f"taglens.{today}.sql"
-        db_name = os.getenv("MYSQL_TAGLENS_DATABASE", "taglens_taglens")
-
-        if not backup_path.exists():
-            kwargs = _mysql_connect_kwargs()
-            cmd = [
-                "mysqldump",
-                f"-h{kwargs['host']}",
-                f"-P{kwargs['port']}",
-                f"-u{kwargs['user']}",
-                f"-p{kwargs['password']}",
-                "--single-transaction",
-                "--quick",
-                "--set-gtid-purged=OFF",
-                db_name,
-            ]
-            with open(backup_path, "w", encoding="utf-8") as outfile:
-                subprocess.run(cmd, stdout=outfile, stderr=subprocess.PIPE, check=True)
-            print(f"已创建本地数据库 MySQL 备份: {backup_path}")
-
-        now_ts = time.time()
-        keep_seconds = BACKUP_KEEP_DAYS * 24 * 60 * 60
-        for path in list(BACKUP_DIR.glob("taglens.*.sql")) + list(BACKUP_DIR.glob("taglens.*.sql.gz")):
-            try:
-                if now_ts - path.stat().st_mtime > keep_seconds:
-                    path.unlink()
-                    print(f"已删除过期数据库备份: {path.name}")
-            except Exception as e:
-                print(f"删除过期备份失败: {path} err={e}")
-    except Exception as e:
-        print(f"数据库备份检查失败(忽略): {e}")
-
-
 @contextmanager
 def get_db_connection():
     """获取 MySQL 数据库连接的上下文管理器。"""
-    _backup_db_if_needed()
     conn = pymysql.connect(
         **_mysql_connect_kwargs(),
         cursorclass=pymysql.cursors.DictCursor,
@@ -177,6 +140,23 @@ def init_database():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS description_embeddings (
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                image_id INT NOT NULL,
+                embedding LONGBLOB NOT NULL,
+                dim INT NOT NULL DEFAULT 1024,
+                model_name VARCHAR(128) NOT NULL DEFAULT 'jina-clip-v2',
+                created_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_description_embeddings_image_id (image_id),
+                KEY idx_description_embeddings_image_id (image_id),
+                CONSTRAINT fk_description_embeddings_image FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+
+        _drop_column_if_exists(cursor, "description_embeddings", "embedding_hex")
+        _drop_column_if_exists(cursor, "description_embeddings", "description")
+
         _ensure_column(cursor, "analysis_results", "qwen_captions_json", "LONGTEXT NOT NULL DEFAULT '[]'")
         for col, definition in (
             ("camera_id", "VARCHAR(128) NULL"),
@@ -219,6 +199,44 @@ def _sz_tag_refs_from_db_value(sz_tag_ref_json: Optional[str]) -> List[str]:
     return []
 
 
+def _try_upsert_description_embedding(image_id: int, description: str) -> None:
+    """
+    在 keyword_embeddings 写入成功后，同步 upsert description_embeddings。
+    description 为空或编码失败时仅打日志，不影响已写入的 keyword。
+    """
+    text = (description or "").strip()
+    if not text:
+        return
+    try:
+        from services.jina_embedding_service import (
+            JINA_MODEL_NAME,
+            encode_description_to_vector,
+        )
+
+        blob, dim = encode_description_to_vector(text)
+        now = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO description_embeddings (
+                    image_id, embedding, dim, model_name, created_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    embedding = VALUES(embedding),
+                    dim = VALUES(dim),
+                    model_name = VALUES(model_name),
+                    created_at = VALUES(created_at)
+                """,
+                (image_id, blob, dim, JINA_MODEL_NAME, now),
+            )
+        print(f"[description_embeddings] upsert ok image_id={image_id} dim={dim}")
+    except Exception as exc:
+        print(
+            f"[description_embeddings] upsert 失败 image_id={image_id}: {exc}"
+        )
+
+
 def save_image_to_db(
     image_uuid: str,
     file_path: str,
@@ -240,7 +258,9 @@ def save_image_to_db(
     返回: 图片记录的 ID
     """
     now = datetime.now().isoformat()
-    
+    wrote_keywords = False
+    image_id = 0
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
@@ -313,8 +333,12 @@ def save_image_to_db(
                         SET embedding = %s, created_at = %s
                         WHERE image_id = %s AND keyword = %s
                     """, (embedding_bytes, now, image_id, keyword))
+            wrote_keywords = True
 
-        return image_id
+    if wrote_keywords:
+        _try_upsert_description_embedding(image_id, description)
+
+    return image_id
 
 
 def search_images(
@@ -330,10 +354,12 @@ def search_images(
     query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
     query_tags: Optional[List[str]] = None,  # 与 query_embeddings 对应的查询标签文本（用于相似度缓存）
     query_weights: Optional[List[float]] = None,  # 每个查询标签的权重列表
-    similarity_threshold: float = 0.3,  # 相似度阈值
+    similarity_threshold: float = 0.3,  # 相似度阈值（keyword 模式）
     page: Optional[int] = None,  # 分页：页码（从1开始）
     page_size: Optional[int] = None,  # 分页：每页数量
     on_progress: Optional[Any] = None,  # SearchProgress 或 None
+    search_mode: str = "keyword",  # keyword | description
+    rerank_top_n: Optional[int] = None,  # description：粗排 TopN 后再精排
 ) -> tuple[List[Dict[str, Any]], int]:
     """
     从数据库搜索图片（使用向量相似度搜索）
@@ -344,11 +370,17 @@ def search_images(
         start_date: 开始日期 (ISO 格式，例如: "2025-01-01T00:00:00")
         end_date: 结束日期 (ISO 格式，例如: "2025-12-31T23:59:59")
         query_embedding: 查询文本的向量化结果（bytes格式）
-        similarity_threshold: 相似度阈值（0-1之间）
+        similarity_threshold: 相似度阈值（0-1之间，仅 keyword）
+        search_mode: keyword 走 keyword_embeddings；description 走 description_embeddings
+        rerank_top_n: description 模式粗排 TopN（默认 1000），再对候选 description 精排
     
-    返回: 图片信息列表（包含similarity字段）
+    返回: 图片信息列表（包含similarity字段；description 模式下为精排分）
     """
     import numpy as np
+
+    mode = (search_mode or "keyword").strip().lower()
+    if mode not in ("keyword", "description"):
+        mode = "keyword"
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -499,13 +531,6 @@ def search_images(
 
         # 使用向量搜索，计算相似度并过滤
         if query_embeddings_list:
-            from services.keyword_search_cache import (
-                get_cache_stats,
-                get_query_keyword_similarity,
-                require_keyword_vectors_loaded,
-                scan_image_keyword_similarities,
-                warm_query_keyword_similarities,
-            )
             from services.search_progress import SearchProgress
 
             progress = on_progress if isinstance(on_progress, SearchProgress) else SearchProgress(on_progress)
@@ -515,91 +540,140 @@ def search_images(
             query_vecs = []
             for emb in query_embeddings_list:
                 vec = np.frombuffer(emb, dtype=np.float32)
-                query_vecs.append(vec / np.linalg.norm(vec))
+                norm = float(np.linalg.norm(vec))
+                if norm <= 0:
+                    raise ValueError("查询向量范数为 0，无法计算相似度")
+                query_vecs.append(vec / norm)
 
             num_queries = len(query_vecs)
             tag_labels = list(query_tags) if query_tags and len(query_tags) == num_queries else [
                 f"__query_{i}__" for i in range(num_queries)
             ]
-            print(f"多标签搜索: 共 {num_queries} 个查询标签，权重: {weights_list}")
+            print(f"多标签搜索 mode={mode}: 共 {num_queries} 个查询，权重: {weights_list}")
 
-            # 阶段1a：使用已手动加载的 keyword 向量（进程内记忆化，每个 keyword 只存一份）
-            require_keyword_vectors_loaded(progress)
-            # 阶段1b：预热 (query_tag, keyword) 相似度；重复搜索同一标签时直接命中缓存
-            warm_query_keyword_similarities(tag_labels, query_vecs, progress)
+            if mode == "description":
+                from services.description_search_cache import (
+                    get_cache_stats as get_desc_cache_stats,
+                    require_description_vectors_loaded,
+                    scan_image_description_similarities,
+                )
 
-            use_memory_mapping = where_clause == "1=1"
-            if use_memory_mapping:
+                require_description_vectors_loaded(progress)
+
+                allowed_image_ids = None
+                if where_clause != "1=1":
+                    filter_sql = f"""
+                        SELECT DISTINCT i.id
+                        FROM images i
+                        LEFT JOIN analysis_results ar ON i.id = ar.image_id
+                        WHERE {where_clause}
+                    """
+                    cursor.execute(filter_sql, params)
+                    allowed_image_ids = {int(row["id"]) for row in cursor.fetchall()}
+
                 (
                     image_query_max,
                     rows_with_keywords_set,
                     embed_row_count,
-                    cache_hits,
-                    cache_miss,
-                ) = scan_image_keyword_similarities(tag_labels, num_queries, progress)
-            else:
-                mapping_count_sql = f"""
-                    SELECT COUNT(*) AS cnt
-                    FROM keyword_embeddings ke
-                    INNER JOIN images i ON i.id = ke.image_id
-                    WHERE {where_clause}
-                """
-                cursor.execute(mapping_count_sql, params)
-                mapping_total = max(1, int(cursor.fetchone()["cnt"]))
-                progress.report("scan", 56, f"正在扫描图片标签映射（共 {mapping_total} 条）…")
-
-                mapping_sql = f"""
-                    SELECT ke.image_id, ke.keyword
-                    FROM keyword_embeddings ke
-                    INNER JOIN images i ON i.id = ke.image_id
-                    WHERE {where_clause}
-                """
-                cursor.execute(mapping_sql, params)
-
-                image_query_max = defaultdict(lambda: [-1.0] * num_queries)
-                rows_with_keywords_set: set[int] = set()
-                embed_row_count = 0
-                cache_hits = 0
+                ) = scan_image_description_similarities(
+                    query_vecs,
+                    progress,
+                    allowed_image_ids=allowed_image_ids,
+                )
+                cache_hits = embed_row_count
                 cache_miss = 0
-                chunk_size = 100_000
+                cache_stats = get_desc_cache_stats()
+                print(
+                    f"描述向量搜索: 向量行数={embed_row_count}, 有向量图片={len(rows_with_keywords_set)}, "
+                    f"缓存 image={cache_stats['image_vectors']}, "
+                    f"耗时={time.time() - t_vec:.2f}s"
+                )
+            else:
+                from services.keyword_search_cache import (
+                    get_cache_stats,
+                    get_query_keyword_similarity,
+                    require_keyword_vectors_loaded,
+                    scan_image_keyword_similarities,
+                    warm_query_keyword_similarities,
+                )
 
-                while True:
-                    batch = cursor.fetchmany(chunk_size)
-                    if not batch:
-                        break
-                    progress.check_cancelled()
-                    embed_row_count += len(batch)
+                # 阶段1a：使用已手动加载的 keyword 向量（进程内记忆化，每个 keyword 只存一份）
+                require_keyword_vectors_loaded(progress)
+                # 阶段1b：预热 (query_tag, keyword) 相似度；重复搜索同一标签时直接命中缓存
+                warm_query_keyword_similarities(tag_labels, query_vecs, progress)
 
-                    for row in batch:
-                        image_id = int(row["image_id"])
-                        keyword = row["keyword"]
-                        rows_with_keywords_set.add(image_id)
+                use_memory_mapping = where_clause == "1=1"
+                if use_memory_mapping:
+                    (
+                        image_query_max,
+                        rows_with_keywords_set,
+                        embed_row_count,
+                        cache_hits,
+                        cache_miss,
+                    ) = scan_image_keyword_similarities(tag_labels, num_queries, progress)
+                else:
+                    mapping_count_sql = f"""
+                        SELECT COUNT(*) AS cnt
+                        FROM keyword_embeddings ke
+                        INNER JOIN images i ON i.id = ke.image_id
+                        WHERE {where_clause}
+                    """
+                    cursor.execute(mapping_count_sql, params)
+                    mapping_total = max(1, int(cursor.fetchone()["cnt"]))
+                    progress.report("scan", 56, f"正在扫描图片标签映射（共 {mapping_total} 条）…")
 
-                        for q_idx, query_tag in enumerate(tag_labels):
-                            sim = get_query_keyword_similarity(query_tag, keyword)
-                            if sim is None:
-                                cache_miss += 1
-                                continue
-                            cache_hits += 1
-                            prev = image_query_max[image_id][q_idx]
-                            if sim > prev:
-                                image_query_max[image_id][q_idx] = sim
+                    mapping_sql = f"""
+                        SELECT ke.image_id, ke.keyword
+                        FROM keyword_embeddings ke
+                        INNER JOIN images i ON i.id = ke.image_id
+                        WHERE {where_clause}
+                    """
+                    cursor.execute(mapping_sql, params)
 
-                    if embed_row_count % chunk_size == 0 or len(batch) < chunk_size:
-                        pct = 56 + min(34, (embed_row_count / mapping_total) * 34)
-                        progress.report(
-                            "scan",
-                            pct,
-                            f"正在匹配图片标签（{embed_row_count}/{mapping_total}）…",
-                        )
+                    image_query_max = defaultdict(lambda: [-1.0] * num_queries)
+                    rows_with_keywords_set: set[int] = set()
+                    embed_row_count = 0
+                    cache_hits = 0
+                    cache_miss = 0
+                    chunk_size = 100_000
 
-            cache_stats = get_cache_stats()
-            print(
-                f"向量搜索: 映射行数={embed_row_count}, 有关键词图片={len(rows_with_keywords_set)}, "
-                f"相似度查找 命中={cache_hits} 未命中={cache_miss}, "
-                f"缓存 keyword={cache_stats['keyword_vectors']} 对={cache_stats['query_keyword_pairs']}, "
-                f"耗时={time.time() - t_vec:.2f}s"
-            )
+                    while True:
+                        batch = cursor.fetchmany(chunk_size)
+                        if not batch:
+                            break
+                        progress.check_cancelled()
+                        embed_row_count += len(batch)
+
+                        for row in batch:
+                            image_id = int(row["image_id"])
+                            keyword = row["keyword"]
+                            rows_with_keywords_set.add(image_id)
+
+                            for q_idx, query_tag in enumerate(tag_labels):
+                                sim = get_query_keyword_similarity(query_tag, keyword)
+                                if sim is None:
+                                    cache_miss += 1
+                                    continue
+                                cache_hits += 1
+                                prev = image_query_max[image_id][q_idx]
+                                if sim > prev:
+                                    image_query_max[image_id][q_idx] = sim
+
+                        if embed_row_count % chunk_size == 0 or len(batch) < chunk_size:
+                            pct = 56 + min(34, (embed_row_count / mapping_total) * 34)
+                            progress.report(
+                                "scan",
+                                pct,
+                                f"正在匹配图片标签（{embed_row_count}/{mapping_total}）…",
+                            )
+
+                cache_stats = get_cache_stats()
+                print(
+                    f"向量搜索: 映射行数={embed_row_count}, 有关键词图片={len(rows_with_keywords_set)}, "
+                    f"相似度查找 命中={cache_hits} 未命中={cache_miss}, "
+                    f"缓存 keyword={cache_stats['keyword_vectors']} 对={cache_stats['query_keyword_pairs']}, "
+                    f"耗时={time.time() - t_vec:.2f}s"
+                )
 
             rows_with_keywords = len(rows_with_keywords_set)
             rows_without_keywords = max(0, total_count - rows_with_keywords)
@@ -614,30 +688,43 @@ def search_images(
                 weighted_similarity = sum(
                     sim * weight for sim, weight in zip(query_similarities, weights_list)
                 )
-                if weighted_similarity >= similarity_threshold:
+                if mode == "description":
+                    # 描述模式：不做阈值过滤，只按粗排分排序后取 TopN
+                    results_with_similarity.append((weighted_similarity, image_id))
+                elif weighted_similarity >= similarity_threshold:
                     results_with_similarity.append((weighted_similarity, image_id))
 
             print(
-                f"向量搜索统计: 总图片数={total_count}, 有关键词向量={rows_with_keywords}, "
-                f"无关键词向量={rows_without_keywords}, 坏维度={bad_dim_count}, "
+                f"向量搜索统计 mode={mode}: 总图片数={total_count}, 有向量={rows_with_keywords}, "
+                f"无向量={rows_without_keywords}, 坏维度={bad_dim_count}, "
                 f"匹配数={len(results_with_similarity)}, 阈值={similarity_threshold}, "
                 f"计算耗时={time.time() - t_vec:.2f}s"
             )
 
             if rows_with_keywords == 0:
-                print("警告: 数据库中没有找到任何keyword向量数据！请确保图片已保存并生成了keyword向量。")
+                if mode == "description":
+                    print("警告: 描述向量库为空或未命中！请先回填 description_embeddings。")
+                else:
+                    print("警告: 数据库中没有找到任何keyword向量数据！请确保图片已保存并生成了keyword向量。")
 
-            progress.report("filter", 92, "正在筛选并排序匹配结果…")
+            progress.report("filter", 88, "正在筛选并排序匹配结果…")
 
             results_with_similarity.sort(key=lambda x: x[0], reverse=True)
-            match_total = len(results_with_similarity)
-            results_with_similarity = results_with_similarity[:limit]
+
+            if mode == "description":
+                top_n = int(rerank_top_n) if rerank_top_n is not None else 1000
+                top_n = max(1, min(top_n, 5000))
+                results_with_similarity = results_with_similarity[:top_n]
+                match_total = len(results_with_similarity)
+            else:
+                match_total = len(results_with_similarity)
+                results_with_similarity = results_with_similarity[:limit]
 
             if not results_with_similarity:
                 progress.report("done", 100, "搜索完成，未找到匹配图片")
                 return [], match_total
 
-            progress.report("meta", 96, f"正在加载 {len(results_with_similarity)} 张匹配图片的详情…")
+            progress.report("meta", 90, f"正在加载 {len(results_with_similarity)} 张匹配图片的详情…")
 
             # 阶段2：仅为命中结果拉取图片元数据
             matched_ids = [image_id for _, image_id in results_with_similarity]
@@ -682,6 +769,49 @@ def search_images(
                     bucket['keywords'].append(tag)
                 else:
                     bucket['yolo_objects'].append(tag)
+
+            # 描述模式：对粗排 TopN 的 description 做精排，similarity 改为精排分
+            if mode == "description":
+                progress.check_cancelled()
+                progress.report(
+                    "rerank",
+                    92,
+                    f"正在对 Top{len(results_with_similarity)} 候选精排…",
+                )
+                from services.jina_reranker_service import rerank_text_pairs
+
+                query_text = " ".join(
+                    t for t in (tag_labels if tag_labels else []) if t and not str(t).startswith("__query_")
+                ).strip()
+                if not query_text and query_tags:
+                    query_text = " ".join(str(t) for t in query_tags if t).strip()
+                if not query_text and query:
+                    query_text = str(query).strip()
+
+                docs: List[str] = []
+                ordered_ids: List[int] = []
+                clip_scores: List[float] = []
+                for clip_sim, image_id in results_with_similarity:
+                    row = image_meta.get(image_id)
+                    if not row:
+                        continue
+                    docs.append((row.get("description") or "").strip() or " ")
+                    ordered_ids.append(image_id)
+                    clip_scores.append(float(clip_sim))
+
+                t_rr = time.time()
+                rerank_scores = rerank_text_pairs(query_text, docs) if docs else []
+                print(
+                    f"描述精排: candidates={len(docs)}, query_len={len(query_text)}, "
+                    f"耗时={time.time() - t_rr:.2f}s"
+                )
+                ranked = sorted(
+                    zip(rerank_scores, ordered_ids, clip_scores),
+                    key=lambda x: x[0],
+                    reverse=True,
+                )
+                results_with_similarity = [(float(score), image_id) for score, image_id, _ in ranked]
+                match_total = len(results_with_similarity)
 
             results = []
             for similarity, image_id in results_with_similarity:
@@ -769,8 +899,8 @@ def search_images(
                     'qwenCaptions': qwen_captions,
                     'yoloObjects': yolo_objects_json,
                 })
-        
-        return results, total_count
+            
+            return results, total_count
 
 
 def get_all_images(limit: int = 100) -> List[Dict[str, Any]]:
@@ -1036,12 +1166,16 @@ def update_image_analysis_with_embeddings(
             except pymysql.err.IntegrityError:
                 pass
 
-        return {
+        result = {
             "relative_path": img_row["relative_path"],
             "uuid": img_row["uuid"],
             "file_name": img_row["file_name"],
             "created_at": now,
         }
+
+    # keyword 已写入；连接释放后再跑 Jina，避免长占 MySQL
+    _try_upsert_description_embedding(image_id, description)
+    return result
 
 
 def get_all_projects_db() -> List[Dict[str, Any]]:

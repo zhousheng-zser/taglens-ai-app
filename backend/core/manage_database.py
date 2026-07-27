@@ -23,6 +23,7 @@ PASSWORD_ITERATIONS = 200_000
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "3edcVFR$"
 SESSION_COOKIE_NAME = "taglens_session"
+SESSION_ADMIN_COOKIE_NAME = "taglens_admin_session"
 SESSION_MAX_AGE_SECONDS = int(os.getenv("MANAGE_SESSION_MAX_AGE", str(7 * 24 * 60 * 60)))
 SESSION_SECRET = os.getenv("MANAGE_SESSION_SECRET", "taglens-manage-default-secret-change-me")
 
@@ -206,6 +207,7 @@ def init_manage_database() -> None:
         _ensure_column(cursor, "event_review_records", "review_description_done", "TINYINT NOT NULL DEFAULT 0")
         _ensure_column(cursor, "event_review_records", "english_description_done", "TINYINT NOT NULL DEFAULT 0")
         _ensure_column(cursor, "event_review_records", "accident_qa_done", "TINYINT NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "users", "initial_password", "VARCHAR(255) NULL")
         cursor.execute(
             """
             UPDATE event_review_records
@@ -524,8 +526,8 @@ def get_project_sync_import_stats(
     }
 
 
-def _row_to_user(row: Mapping[str, Any]) -> Dict[str, Any]:
-    return {
+def _row_to_user(row: Mapping[str, Any], *, include_password: bool = False) -> Dict[str, Any]:
+    result = {
         "id": int(row["id"]),
         "username": row["username"],
         "role": row["role"],
@@ -534,6 +536,9 @@ def _row_to_user(row: Mapping[str, Any]) -> Dict[str, Any]:
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if include_password:
+        result["initialPassword"] = row.get("initial_password") or None
+    return result
 
 
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
@@ -555,32 +560,38 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
         return _row_to_user(row)
 
 
-def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+def get_user_by_id(user_id: int, *, include_password: bool = False) -> Optional[Dict[str, Any]]:
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
+        cols = "id, username, role, display_name, is_active, created_at, updated_at"
+        if include_password:
+            cols += ", initial_password"
         cursor.execute(
-            """
-            SELECT id, username, role, display_name, is_active, created_at, updated_at
+            f"""
+            SELECT {cols}
             FROM users
             WHERE id = %s
             """,
             (user_id,),
         )
         row = cursor.fetchone()
-        return _row_to_user(row) if row else None
+        return _row_to_user(row, include_password=include_password) if row else None
 
 
-def list_users() -> List[Dict[str, Any]]:
+def list_users(*, include_password: bool = False) -> List[Dict[str, Any]]:
     with get_manage_db_connection() as conn:
         cursor = conn.cursor()
+        cols = "id, username, role, display_name, is_active, created_at, updated_at"
+        if include_password:
+            cols += ", initial_password"
         cursor.execute(
-            """
-            SELECT id, username, role, display_name, is_active, created_at, updated_at
+            f"""
+            SELECT {cols}
             FROM users
             ORDER BY id ASC
             """
         )
-        return [_row_to_user(row) for row in cursor.fetchall()]
+        return [_row_to_user(row, include_password=include_password) for row in cursor.fetchall()]
 
 
 def create_user(username: str, password: str, role: str, display_name: Optional[str]) -> Dict[str, Any]:
@@ -591,13 +602,24 @@ def create_user(username: str, password: str, role: str, display_name: Optional[
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO users (username, password_hash, role, display_name, is_active, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, 1, %s, %s)
+            INSERT INTO users (
+                username, password_hash, role, display_name, is_active,
+                initial_password, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, 1, %s, %s, %s)
             """,
-            (username, hash_password(password), role, display_name or username, now, now),
+            (
+                username,
+                hash_password(password),
+                role,
+                display_name or username,
+                password if role == "reviewer" else None,
+                now,
+                now,
+            ),
         )
         user_id = int(cursor.lastrowid)
-    user = get_user_by_id(user_id)
+    user = get_user_by_id(user_id, include_password=True)
     if not user:
         raise RuntimeError("用户创建后读取失败")
     return user

@@ -30,6 +30,12 @@ import {
   type KeywordCacheStatus,
 } from '@/lib/keywordCache';
 import {
+  fetchDescriptionCacheStatus,
+  loadDescriptionCacheWithProgress,
+  releaseDescriptionCache,
+  type DescriptionCacheStatus,
+} from '@/lib/descriptionCache';
+import {
   fetchExportImagesWithProgress,
   triggerExportZipDownload,
 } from '@/lib/exportImagesStream';
@@ -71,6 +77,8 @@ export default function SearchPage() {
   const [selectedTags, setSelectedTags] = useState<TagWithWeight[]>([]);
   const [activeSearchTags, setActiveSearchTags] = useState<TagWithWeight[]>([]);
   const [isComboMode, setIsComboMode] = useState(false);
+  const [searchMode, setSearchMode] = useState<'keyword' | 'description'>('keyword');
+  const searchModeRef = useRef<'keyword' | 'description'>('keyword');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [searchResults, setSearchResults] = useState<ImageSearchResult[]>([]);
   const [allSearchResults, setAllSearchResults] = useState<ImageSearchResult[]>([]);  // 存储所有搜索结果（用于导出）
@@ -85,7 +93,8 @@ export default function SearchPage() {
   const [exportProgressMessage, setExportProgressMessage] = useState('');
   const [exportImagesDialogOpen, setExportImagesDialogOpen] = useState(false);
   const [exportImageLimitInput, setExportImageLimitInput] = useState('');
-  const [similarityThreshold, setSimilarityThreshold] = useState([0.6]);  // 默认阈值0.6
+  const [similarityThreshold, setSimilarityThreshold] = useState([0.6]);  // keyword 默认阈值
+  const [rerankTopN, setRerankTopN] = useState([1000]);  // description 粗排 TopN
   const [currentPage, setCurrentPage] = useState(1);  // 当前页码
   const [pageSize, setPageSize] = useState(20);  // 每页数量
   const [goToPageInput, setGoToPageInput] = useState('');  // 跳转页码输入
@@ -110,35 +119,59 @@ export default function SearchPage() {
     lastLoadSeconds: null,
     dbDistinctCount: null,
   });
+  const [descCacheStatus, setDescCacheStatus] = useState<DescriptionCacheStatus>({
+    loaded: false,
+    loading: false,
+    imageCount: 0,
+    dim: 0,
+    loadedAt: null,
+    lastLoadSeconds: null,
+    dbCount: null,
+  });
   const [isCacheOperating, setIsCacheOperating] = useState(false);
   const [cacheLoadProgress, setCacheLoadProgress] = useState(0);
   const [cacheLoadMessage, setCacheLoadMessage] = useState('');
   const { toast } = useToast();
 
+  const activeCacheLoaded = searchMode === 'description' ? descCacheStatus.loaded : cacheStatus.loaded;
+  const activeCacheLoading = searchMode === 'description' ? descCacheStatus.loading : cacheStatus.loading;
+
   const refreshCacheStatus = async () => {
     try {
-      const status = await fetchKeywordCacheStatus();
-      setCacheStatus(status);
+      if (searchModeRef.current === 'description') {
+        const status = await fetchDescriptionCacheStatus();
+        setDescCacheStatus(status);
+      } else {
+        const status = await fetchKeywordCacheStatus();
+        setCacheStatus(status);
+      }
     } catch {
       // 后端不可用时保持当前状态
     }
   };
 
   useEffect(() => {
+    searchModeRef.current = searchMode;
     void refreshCacheStatus();
-  }, []);
+  }, [searchMode]);
 
   useEffect(() => {
-    if (cacheStatus.loaded && !cacheStatus.loading && !isCacheOperating) return;
+    if (activeCacheLoaded && !activeCacheLoading && !isCacheOperating) return;
     const timer = window.setInterval(() => {
       void refreshCacheStatus();
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [cacheStatus.loaded, cacheStatus.loading, isCacheOperating]);
+  }, [activeCacheLoaded, activeCacheLoading, isCacheOperating, searchMode]);
 
   const formatCacheStatusText = () => {
-    if (cacheStatus.loading || isCacheOperating) {
+    if (activeCacheLoading || isCacheOperating) {
       return '加载中…';
+    }
+    if (searchMode === 'description') {
+      if (descCacheStatus.loaded) {
+        return `已加载 ${descCacheStatus.imageCount.toLocaleString()} 张描述向量`;
+      }
+      return '未加载';
     }
     if (cacheStatus.loaded) {
       const kw = cacheStatus.keywordCount.toLocaleString();
@@ -214,6 +247,86 @@ export default function SearchPage() {
     }
   };
 
+  const handleLoadDescriptionCache = async (reload: boolean) => {
+    cacheLoadAbortRef.current?.abort();
+    const abortController = new AbortController();
+    cacheLoadAbortRef.current = abortController;
+    setIsCacheOperating(true);
+    setCacheLoadProgress(0);
+    setCacheLoadMessage(reload ? '正在重载描述向量库…' : '正在加载描述向量库…');
+    setDescCacheStatus((prev) => ({ ...prev, loading: true }));
+
+    try {
+      const result = await loadDescriptionCacheWithProgress(
+        reload,
+        (event) => {
+          setCacheLoadProgress(event.percent);
+          setCacheLoadMessage(event.message);
+        },
+        abortController.signal,
+      );
+      setDescCacheStatus({
+        loaded: result.loaded,
+        loading: false,
+        imageCount: result.imageCount,
+        dim: result.dim,
+        loadedAt: result.loadedAt,
+        lastLoadSeconds: result.lastLoadSeconds,
+        dbCount: result.dbCount,
+      });
+      toast({
+        title: reload ? '重载完成' : '加载完成',
+        description: `已载入 ${result.imageCount.toLocaleString()} 张图片描述向量`,
+      });
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      const message = error instanceof Error ? error.message : '未知错误';
+      if (!reload && message.includes('已加载')) {
+        toast({ title: '提示', description: message });
+      } else {
+        toast({ variant: 'destructive', title: reload ? '重载失败' : '加载失败', description: message });
+      }
+      await refreshCacheStatus();
+    } finally {
+      setIsCacheOperating(false);
+      setCacheLoadProgress(0);
+      setCacheLoadMessage('');
+    }
+  };
+
+  const handleReleaseDescriptionCache = async () => {
+    if (!descCacheStatus.loaded) {
+      toast({ title: '提示', description: '当前描述向量库未加载' });
+      return;
+    }
+    try {
+      const status = await releaseDescriptionCache();
+      setDescCacheStatus(status);
+      toast({ title: '已释放', description: '描述向量库已从内存中释放' });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast({ variant: 'destructive', title: '释放失败', description: message });
+    }
+  };
+
+  const handleLoadActiveCache = (reload: boolean) => {
+    if (searchMode === 'description') {
+      void handleLoadDescriptionCache(reload);
+    } else {
+      void handleLoadKeywordCache(reload);
+    }
+  };
+
+  const handleReleaseActiveCache = () => {
+    if (searchMode === 'description') {
+      void handleReleaseDescriptionCache();
+    } else {
+      void handleReleaseKeywordCache();
+    }
+  };
+
   const handleCancelCacheLoad = () => {
     cacheLoadAbortRef.current?.abort();
     setCacheLoadMessage('正在停止加载…');
@@ -241,33 +354,39 @@ export default function SearchPage() {
 
   const applyPageFromCache = (page: number, size: number): boolean => {
     const cached = allSearchResultsRef.current;
-    const total = searchTotalCountRef.current;
+    if (cached.length === 0) return false;
+
     const start = (page - 1) * size;
     const end = start + size;
-
-    if (total > 0 && cached.length >= total) {
-      setSearchResults(cached.slice(start, end));
-      return true;
-    }
-    if (cached.length >= end) {
+    // 已有完整（或覆盖本页的）结果时，只做本地切片，绝不重新搜索
+    if (cached.length >= end || start < cached.length) {
       setSearchResults(cached.slice(start, end));
       return true;
     }
     return false;
   };
 
-  // 加载全部搜索结果（用于翻页/导出），返回 Promise 供翻页等待
+  /** 一次取回可分页的全部命中（后端每次请求都会重算向量，翻页不能再打 /search） */
+  const getFullFetchPageSize = () => {
+    if (searchModeRef.current === 'description') {
+      return Math.max(1, Math.min(rerankTopN[0] || 1000, 5000));
+    }
+    return 10000;
+  };
+
+  // 仅在首次搜索后后台补齐全量时使用；翻页不应依赖此路径
   const loadAllSearchResults = (): Promise<void> => {
     const generation = loadAllGenerationRef.current;
 
     const promise = (async () => {
       try {
-        const total = searchTotalCountRef.current;
         const requestBody = {
           tags: activeSearchTagsRef.current.map(item => ({ tag: item.tag, weight: item.weight })),
           page: 1,
-          pageSize: Math.max(total, 10000),
+          pageSize: getFullFetchPageSize(),
           similarityThreshold: similarityThreshold[0],
+          searchMode: searchModeRef.current,
+          rerankTopN: searchModeRef.current === 'description' ? rerankTopN[0] : undefined,
         };
 
         const response = await fetch('/api/backend/search', {
@@ -281,12 +400,12 @@ export default function SearchPage() {
         if (response.ok) {
           const data = await response.json();
           if (data.success && generation === loadAllGenerationRef.current) {
-            setAllSearchResults(data.results);
-            allSearchResultsRef.current = data.results;
-            if (typeof data.total === 'number' && data.total > 0) {
-              setSearchTotalCount(data.total);
-              searchTotalCountRef.current = data.total;
-            }
+            const all = Array.isArray(data.results) ? data.results as ImageSearchResult[] : [];
+            setAllSearchResults(all);
+            allSearchResultsRef.current = all;
+            // 以实际拿到的全量条数为准，保证翻页只切本地缓存
+            setSearchTotalCount(all.length);
+            searchTotalCountRef.current = all.length;
             applyPageFromCache(currentPageRef.current, pageSizeRef.current);
           }
         }
@@ -304,12 +423,13 @@ export default function SearchPage() {
     return promise;
   };
 
-  // 翻页：优先从已缓存的全部结果切片，避免重复向量搜索
+  // 翻页 / 改每页条数：只切本地全量缓存
   const loadPage = async (page: number, size: number) => {
     if (applyPageFromCache(page, size)) return;
 
     if (activeSearchTagsRef.current.length === 0) return;
 
+    // 若首次全量仍在拉取，等它完成后再切片；不再为翻页单独打搜索接口
     setIsPageLoading(true);
     try {
       if (loadAllPromiseRef.current) {
@@ -317,28 +437,11 @@ export default function SearchPage() {
       }
       if (applyPageFromCache(page, size)) return;
 
+      // 缓存仍不足时补一次全量（例如恢复会话），之后仍只切片
       if (!loadAllPromiseRef.current) {
         await loadAllSearchResults();
       }
-      if (applyPageFromCache(page, size)) return;
-
-      const response = await fetch('/api/backend/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tags: activeSearchTagsRef.current.map((item) => ({ tag: item.tag, weight: item.weight })),
-          page,
-          pageSize: size,
-          similarityThreshold: similarityThreshold[0],
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success) {
-          setSearchResults(data.results);
-        }
-      }
+      applyPageFromCache(page, size);
     } catch (error) {
       console.error('翻页加载失败:', error);
     } finally {
@@ -404,7 +507,7 @@ export default function SearchPage() {
   };
 
   const canSubmitSearch = () => {
-    if (!cacheStatus.loaded || cacheStatus.loading || isCacheOperating || isSearching) return false;
+    if (!activeCacheLoaded || activeCacheLoading || isCacheOperating || isSearching) return false;
     return resolveSearchTags() !== null;
   };
 
@@ -500,11 +603,13 @@ export default function SearchPage() {
 
   // 执行搜索
   const handleSearch = async () => {
-    if (!cacheStatus.loaded) {
+    if (!activeCacheLoaded) {
       toast({
         variant: 'destructive',
-        title: '请先加载标签',
-        description: '搜索前需先加载标签库到内存（全部用户共用）',
+        title: searchMode === 'description' ? '请先加载描述向量' : '请先加载标签',
+        description: searchMode === 'description'
+          ? '搜索前需先加载描述向量库到内存'
+          : '搜索前需先加载标签库到内存（全部用户共用）',
       });
       return;
     }
@@ -552,17 +657,24 @@ export default function SearchPage() {
 
     console.log('开始搜索，参数:', {
       tags,
+      searchMode,
       threshold: similarityThreshold[0],
+      rerankTopN: rerankTopN[0],
       page: pageToUse,
-      pageSize: pageSize
+      pageSize: pageSize,
+      fetchAll: getFullFetchPageSize(),
     });
 
     try {
+      // 一次取回全量命中，前端本地分页；避免翻页再次跑向量/精排
+      const fetchSize = getFullFetchPageSize();
       const requestBody = {
         tags: tags.map(item => ({ tag: item.tag, weight: item.weight })),
         page: pageToUse,
-        pageSize: pageSize,
+        pageSize: fetchSize,
         similarityThreshold: similarityThreshold[0],
+        searchMode,
+        ...(searchMode === 'description' ? { rerankTopN: rerankTopN[0] } : {}),
       };
       console.log('发送请求到 /api/backend/search/stream，请求体:', requestBody);
 
@@ -577,27 +689,32 @@ export default function SearchPage() {
 
       console.log('搜索返回数据:', data);
       if (data.success) {
-        // 调试：检查相似度字段
         if (data.results && data.results.length > 0) {
           console.log('第一个结果的相似度:', (data.results[0] as ImageSearchResult).similarity);
         }
 
-        const firstPageResults = data.results as ImageSearchResult[];
-        setSearchResults(firstPageResults);
-        setSearchTotalCount(data.total);
-        searchTotalCountRef.current = data.total;
-        setAllSearchResults(firstPageResults);
-        allSearchResultsRef.current = firstPageResults;
+        const allResults = (data.results || []) as ImageSearchResult[];
+        // 以实际返回条数为分页总数，后续翻页只切本地数组
+        const total = allResults.length;
+        setAllSearchResults(allResults);
+        allSearchResultsRef.current = allResults;
+        setSearchTotalCount(total);
+        searchTotalCountRef.current = total;
+        setSearchResults(allResults.slice(0, pageSize));
 
-        void loadAllSearchResults();
-
-        if (data.results.length === 0) {
+        if (allResults.length === 0) {
           toast({
             title: '未找到结果',
-            description: `没有找到匹配的图片（阈值: ${similarityThreshold[0]}）`,
+            description: searchMode === 'description'
+              ? `没有找到匹配的图片（Top${rerankTopN[0]}）`
+              : `没有找到匹配的图片（阈值: ${similarityThreshold[0]}）`,
           });
         } else {
-          console.log(`找到 ${data.results.length} 个结果，阈值: ${similarityThreshold[0]}`);
+          console.log(
+            searchMode === 'description'
+              ? `找到 ${total} 个结果，TopN: ${rerankTopN[0]}`
+              : `找到 ${total} 个结果，阈值: ${similarityThreshold[0]}`,
+          );
         }
       }
     } catch (error: any) {
@@ -678,7 +795,10 @@ export default function SearchPage() {
   const handlePageChange = (newPage: number) => {
     if (newPage >= 1 && newPage <= Math.ceil(searchTotalCount / pageSize)) {
       setCurrentPage(newPage);
-      void loadPage(newPage, pageSize);
+      currentPageRef.current = newPage;
+      if (!applyPageFromCache(newPage, pageSize)) {
+        void loadPage(newPage, pageSize);
+      }
     }
   };
 
@@ -687,8 +807,11 @@ export default function SearchPage() {
     const page = parseInt(goToPageInput);
     if (page >= 1 && page <= Math.ceil(searchTotalCount / pageSize)) {
       setCurrentPage(page);
+      currentPageRef.current = page;
       setGoToPageInput('');
-      void loadPage(page, pageSize);
+      if (!applyPageFromCache(page, pageSize)) {
+        void loadPage(page, pageSize);
+      }
     } else {
       toast({
         variant: 'destructive',
@@ -738,6 +861,8 @@ export default function SearchPage() {
           page: 1,
           pageSize: 10000,
           similarityThreshold: similarityThreshold[0],
+          searchMode: searchModeRef.current,
+          rerankTopN: searchModeRef.current === 'description' ? rerankTopN[0] : undefined,
         };
 
         const response = await fetch('/api/backend/search', {
@@ -852,6 +977,8 @@ export default function SearchPage() {
         page: 1,
         pageSize: cappedLimit,
         similarityThreshold: similarityThreshold[0],
+        searchMode: searchModeRef.current,
+        ...(searchModeRef.current === 'description' ? { rerankTopN: rerankTopN[0] } : {}),
       }),
     });
 
@@ -992,21 +1119,25 @@ export default function SearchPage() {
       activeSearchTags,
       isComboMode,
       similarityThreshold: similarityThreshold[0],
+      rerankTopN: rerankTopN[0],
       page: currentPage,
       pageSize,
       total: searchTotalCount,
       searchResults,
       allSearchResults,
+      searchMode,
     });
     saveTagSearchSession({
       activeSearchTags,
       isComboMode,
       similarityThreshold: similarityThreshold[0],
+      rerankTopN: rerankTopN[0],
       page: currentPage,
       pageSize,
       total: searchTotalCount,
       results: slimTagSearchResults(searchResults),
       currentIndex: index >= 0 ? index : 0,
+      searchMode,
     });
     router.push(`/search/detail/${encodeURIComponent(image.uuid)}?idx=${index >= 0 ? index : 0}`);
   };
@@ -1022,7 +1153,11 @@ export default function SearchPage() {
       setSelectedTags(saved.activeSearchTags);
     }
     setIsComboMode(saved.isComboMode);
+    const restoredMode = saved.searchMode === 'description' ? 'description' : 'keyword';
+    setSearchMode(restoredMode);
+    searchModeRef.current = restoredMode;
     setSimilarityThreshold([saved.similarityThreshold]);
+    setRerankTopN([typeof saved.rerankTopN === 'number' ? saved.rerankTopN : 1000]);
     setCurrentPage(saved.page);
     currentPageRef.current = saved.page;
     setPageSize(saved.pageSize);
@@ -1052,22 +1187,22 @@ export default function SearchPage() {
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <Database className="h-4 w-4 text-primary shrink-0" />
-                  <span className="font-medium text-sm">标签库</span>
+                  <span className="font-medium text-sm">{searchMode === 'description' ? '描述向量库' : '标签库'}</span>
                   <Badge
-                    variant={cacheStatus.loaded ? 'default' : cacheStatus.loading || isCacheOperating ? 'secondary' : 'outline'}
+                    variant={activeCacheLoaded ? 'default' : activeCacheLoading || isCacheOperating ? 'secondary' : 'outline'}
                     className="text-[10px] max-w-[280px] truncate"
                   >
                     {formatCacheStatusText()}
                   </Badge>
                 </div>
                 <div className="flex items-center gap-1.5 ml-auto">
-                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={cacheStatus.loaded || cacheStatus.loading || isCacheOperating} onClick={() => void handleLoadKeywordCache(false)}>
+                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={activeCacheLoaded || activeCacheLoading || isCacheOperating} onClick={() => handleLoadActiveCache(false)}>
                     加载
                   </Button>
-                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={cacheStatus.loading || isCacheOperating} onClick={() => void handleLoadKeywordCache(true)}>
+                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={activeCacheLoading || isCacheOperating} onClick={() => handleLoadActiveCache(true)}>
                     重载
                   </Button>
-                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={!cacheStatus.loaded || cacheStatus.loading || isCacheOperating} onClick={() => void handleReleaseKeywordCache()}>
+                  <Button variant="outline" size="sm" className="h-7 text-xs" disabled={!activeCacheLoaded || activeCacheLoading || isCacheOperating} onClick={handleReleaseActiveCache}>
                     释放
                   </Button>
                 </div>
@@ -1088,7 +1223,13 @@ export default function SearchPage() {
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
                   <Input
                     type="text"
-                    placeholder={isComboMode ? '输入标签后回车添加…' : '输入标签后回车搜索…'}
+                    placeholder={
+                      isComboMode
+                        ? '输入文本后回车添加…'
+                        : searchMode === 'description'
+                          ? '输入描述关键词后回车搜索…'
+                          : '输入标签后回车搜索…'
+                    }
                     value={tagInput}
                     onChange={(e) => setTagInput(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -1104,6 +1245,32 @@ export default function SearchPage() {
                   <Search className="h-4 w-4 mr-1.5" />
                   搜索
                 </Button>
+                <div className="flex items-center rounded-md border border-border/50 p-0.5 shrink-0">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={searchMode === 'keyword' ? 'default' : 'ghost'}
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => {
+                      setSearchMode('keyword');
+                      setSimilarityThreshold([0.6]);
+                    }}
+                  >
+                    标签向量
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={searchMode === 'description' ? 'default' : 'ghost'}
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => {
+                      setSearchMode('description');
+                      setRerankTopN([1000]);
+                    }}
+                  >
+                    描述向量
+                  </Button>
+                </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <Switch id="combo-mode" checked={isComboMode} onCheckedChange={handleComboModeChange} />
                   <Label htmlFor="combo-mode" className="text-xs cursor-pointer whitespace-nowrap">组合搜索</Label>
@@ -1158,19 +1325,39 @@ export default function SearchPage() {
 
               {showAdvanced && (
                 <div className="space-y-2 pt-1 border-t border-border/30">
-                  <div className="flex items-center justify-between text-xs">
-                    <Label htmlFor="similarity-threshold">相似度阈值 {similarityThreshold[0].toFixed(2)}</Label>
-                    <span className="text-muted-foreground">0.00 – 1.00</span>
-                  </div>
-                  <Slider
-                    id="similarity-threshold"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={similarityThreshold}
-                    onValueChange={setSimilarityThreshold}
-                    className="w-full"
-                  />
+                  {searchMode === 'description' ? (
+                    <>
+                      <div className="flex items-center justify-between text-xs">
+                        <Label htmlFor="rerank-top-n">粗排 TopN {rerankTopN[0]}</Label>
+                        <span className="text-muted-foreground">50 – 2000（精排候选数）</span>
+                      </div>
+                      <Slider
+                        id="rerank-top-n"
+                        min={50}
+                        max={2000}
+                        step={50}
+                        value={rerankTopN}
+                        onValueChange={setRerankTopN}
+                        className="w-full"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between text-xs">
+                        <Label htmlFor="similarity-threshold">相似度阈值 {similarityThreshold[0].toFixed(2)}</Label>
+                        <span className="text-muted-foreground">0.00 – 1.00</span>
+                      </div>
+                      <Slider
+                        id="similarity-threshold"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={similarityThreshold}
+                        onValueChange={setSimilarityThreshold}
+                        className="w-full"
+                      />
+                    </>
+                  )}
                 </div>
               )}
             </CardContent>
@@ -1376,12 +1563,16 @@ export default function SearchPage() {
                           </div>
                           {image.similarity !== undefined && image.similarity !== null ? (
                             <Badge variant="default" className="text-xs ml-2">
-                              相似度: {(image.similarity * 100).toFixed(1)}%
+                              {searchMode === 'description'
+                                ? `精排: ${(image.similarity * 100).toFixed(1)}%`
+                                : `相似度: ${(image.similarity * 100).toFixed(1)}%`}
                             </Badge>
                           ) : (
-                            <Badge variant="outline" className="text-xs ml-2">
-                              无相似度
-                            </Badge>
+                            searchMode === 'description' ? null : (
+                              <Badge variant="outline" className="text-xs ml-2">
+                                无相似度
+                              </Badge>
+                            )
                           )}
                         </div>
                         <p className="text-xs text-muted-foreground line-clamp-2">
@@ -1401,10 +1592,15 @@ export default function SearchPage() {
                     <Select
                       value={pageSize.toString()}
                       onValueChange={(value) => {
-                        const size = parseInt(value);
+                        const size = parseInt(value, 10);
+                        pageSizeRef.current = size;
                         setPageSize(size);
                         setCurrentPage(1);
-                        void loadPage(1, size);
+                        currentPageRef.current = 1;
+                        // 已有全量缓存时同步切片，无需请求后端
+                        if (!applyPageFromCache(1, size)) {
+                          void loadPage(1, size);
+                        }
                       }}
                     >
                       <SelectTrigger className="w-24 h-8">

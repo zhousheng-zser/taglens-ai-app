@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Loader2, LogIn, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { AuthGate } from '@/components/AuthGate';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,6 +28,7 @@ import {
   getPendingWorkload,
   getReviewStats,
   getReviewStatsTimeseries,
+  impersonateUser,
   listTimeRanges,
   listUsers,
   type CurrentUser,
@@ -103,6 +105,7 @@ async function requestReviewTimeseries(s: TimeseriesSnapshot): Promise<ReviewSta
 }
 
 function UserManagementContent() {
+  const router = useRouter();
   const today = useMemo(() => new Date(), []);
   const [users, setUsers] = useState<CurrentUser[]>([]);
   const [rangesByUser, setRangesByUser] = useState<Record<number, UserTimeRange[]>>({});
@@ -263,6 +266,19 @@ function UserManagementContent() {
     await loadData();
   };
 
+  const handleImpersonate = async (user: CurrentUser) => {
+    if (user.role !== 'reviewer') return;
+    if (!window.confirm(`确认以审核员「${user.displayName}」身份登录并跳转到事件数据查询吗？`)) return;
+    try {
+      await impersonateUser(user.id);
+      router.push('/event-query');
+      router.refresh();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '代登录失败';
+      setError(msg);
+    }
+  };
+
   const handleCreateRange = async () => {
     if (!selectedUserId || !newRange.rangeName || !newRange.startTime || !newRange.endTime) return;
     await createTimeRange(selectedUserId, {
@@ -380,6 +396,7 @@ function UserManagementContent() {
                   <TableHead>角色</TableHead>
                   <TableHead>任务段</TableHead>
                   <TableHead>六类完成数</TableHead>
+                  <TableHead>密码</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -403,10 +420,32 @@ function UserManagementContent() {
                           ? `样本 ${userStats?.statusDone || 0} / 问答 ${userStats?.qaDone || 0} / AI描述 ${userStats?.aiDescriptionDone || 0} / 审核描述 ${userStats?.reviewDescriptionDone || 0} / 英文描述 ${userStats?.englishDescriptionDone || 0} / 专项问答 ${userStats?.accidentQaDone || 0}`
                           : '-'}
                       </TableCell>
+                      <TableCell>
+                        {user.role === 'reviewer' ? (
+                          <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                            {user.initialPassword || '—'}
+                          </code>
+                        ) : (
+                          '-'
+                        )}
+                      </TableCell>
                       <TableCell className="text-right">
-                        <Button variant="ghost" size="sm" onClick={() => handleDeleteUser(user)} disabled={user.username === 'admin'}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          {user.role === 'reviewer' ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="代登录"
+                              onClick={() => void handleImpersonate(user)}
+                            >
+                              <LogIn className="mr-1 h-4 w-4" />
+                              代登录
+                            </Button>
+                          ) : null}
+                          <Button variant="ghost" size="sm" onClick={() => handleDeleteUser(user)} disabled={user.username === 'admin'}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );

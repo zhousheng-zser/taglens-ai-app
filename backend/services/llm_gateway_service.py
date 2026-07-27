@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,61 @@ CODEX_LOCAL_WORKDIR = os.getenv(
 )
 CODEX_LOCAL_HTTP_PROXY = os.getenv("HTTP_PROXY", "http://192.168.2.245:10808")
 CODEX_LOCAL_HTTPS_PROXY = os.getenv("HTTPS_PROXY", "http://192.168.2.245:10808")
-CODEX_MODEL = os.getenv("CODEX_MODEL", "").strip()
+# spark 等纯文本模型无法看图；交通标注必须用支持 image 的模型
+CODEX_MODEL = os.getenv("CODEX_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+
+# 临时：Codex 卸载到内网机器（SSH/scp）；CODEX_REMOTE_ENABLED=0 回退本机 CLI
+CODEX_REMOTE_ENABLED = os.getenv("CODEX_REMOTE_ENABLED", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+CODEX_REMOTE_HOST = os.getenv("CODEX_REMOTE_HOST", "192.168.2.145").strip()
+CODEX_REMOTE_USER = os.getenv("CODEX_REMOTE_USER", "root").strip()
+CODEX_REMOTE_PASSWORD = os.getenv("CODEX_REMOTE_PASSWORD", "md@xinxi2022")
+CODEX_REMOTE_PORT = os.getenv("CODEX_REMOTE_PORT", "").strip()
+CODEX_REMOTE_DIR = os.getenv("CODEX_REMOTE_DIR", "/root/codex_tmp").strip()
+CODEX_REMOTE_KEEP = max(1, int(os.getenv("CODEX_REMOTE_KEEP", "100")))
+# 远端 145 DNS 常挂；Codex 出网须走局域网 HTTP 代理（不可用 127.0.0.1）
+_DEFAULT_LAN_PROXY = "http://192.168.2.245:10808"
+
+
+def _sanitize_remote_proxy(url: str) -> str:
+    u = (url or "").strip() or _DEFAULT_LAN_PROXY
+    # Cursor/本机沙箱代理对远端 145 不可达
+    if "127.0.0.1" in u or "localhost" in u:
+        print(f"[codex-remote] 忽略不可达代理 {u}，改用 {_DEFAULT_LAN_PROXY}")
+        return _DEFAULT_LAN_PROXY
+    return u
+
+
+CODEX_REMOTE_HTTP_PROXY = _sanitize_remote_proxy(
+    os.getenv("CODEX_REMOTE_HTTP_PROXY")
+    or os.getenv("HTTP_PROXY")
+    or os.getenv("http_proxy")
+    or _DEFAULT_LAN_PROXY
+)
+CODEX_REMOTE_HTTPS_PROXY = _sanitize_remote_proxy(
+    os.getenv("CODEX_REMOTE_HTTPS_PROXY")
+    or os.getenv("HTTPS_PROXY")
+    or os.getenv("https_proxy")
+    or CODEX_REMOTE_HTTP_PROXY
+)
+CODEX_REMOTE_NO_PROXY = os.getenv(
+    "CODEX_REMOTE_NO_PROXY", "127.0.0.1,localhost,192.168.0.0/16"
+)
+# 远端 ~/.codex/config.toml 常设 model_reasoning_effort=xhigh，看图批量会极慢甚至卡死
+CODEX_REASONING_EFFORT = (
+    os.getenv("CODEX_REASONING_EFFORT", "medium").strip() or "medium"
+)
+# 远端 Codex 并发上限（标签补齐默认 5 路，xhigh/高并发下易把网关线程占满）
+CODEX_REMOTE_MAX_CONCURRENT = max(
+    1, int(os.getenv("CODEX_REMOTE_MAX_CONCURRENT", "2"))
+)
+_CODEX_REMOTE_SEM = threading.Semaphore(CODEX_REMOTE_MAX_CONCURRENT)
+
+_resolved_remote_port: Optional[int] = None
 
 MOCK_ANALYSIS_DATA: Dict[str, Any] = {
     "semantic_search": {"description": "", "keywords": []},
@@ -231,6 +286,129 @@ def _run_cmd(cmd: list[str], cwd: str | None = None, env: dict[str, str] | None 
     return subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=cwd, env=env)
 
 
+def _sshpass_base() -> list[str]:
+    if shutil.which("sshpass") is None:
+        raise LLMGatewayError("缺少依赖 sshpass（远端 Codex 需要）")
+    return ["sshpass", "-p", CODEX_REMOTE_PASSWORD]
+
+
+def _ssh_common_opts(port: int) -> list[str]:
+    return [
+        "-p",
+        str(port),
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "LogLevel=ERROR",
+    ]
+
+
+def _resolve_remote_port() -> int:
+    """优先 CODEX_REMOTE_PORT；否则探测 22，再 2222。"""
+    global _resolved_remote_port
+    if CODEX_REMOTE_PORT:
+        return int(CODEX_REMOTE_PORT)
+    if _resolved_remote_port is not None:
+        return _resolved_remote_port
+    for port in (22, 2222):
+        cmd = _sshpass_base() + ["ssh"] + _ssh_common_opts(port) + [
+            f"{CODEX_REMOTE_USER}@{CODEX_REMOTE_HOST}",
+            "echo ok",
+        ]
+        ret = _run_cmd(cmd)
+        if ret.returncode == 0:
+            _resolved_remote_port = port
+            print(f"[codex-remote] SSH 端口就绪: {port}")
+            return port
+    raise LLMGatewayError(
+        f"无法 SSH 连接 {CODEX_REMOTE_HOST}（端口 22/2222 均失败）"
+    )
+
+
+def _remote_ssh(remote_cmd: str, *, timeout_sec: int = 300) -> subprocess.CompletedProcess:
+    port = _resolve_remote_port()
+    cmd = _sshpass_base() + ["ssh"] + _ssh_common_opts(port) + [
+        f"{CODEX_REMOTE_USER}@{CODEX_REMOTE_HOST}",
+        remote_cmd,
+    ]
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=timeout_sec
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise LLMGatewayError(f"远端 SSH 超时({timeout_sec}s): {exc}") from exc
+
+
+def _remote_scp_to(local_path: Path, remote_path: str) -> None:
+    port = _resolve_remote_port()
+    cmd = _sshpass_base() + [
+        "scp",
+        "-P",
+        str(port),
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        str(local_path),
+        f"{CODEX_REMOTE_USER}@{CODEX_REMOTE_HOST}:{remote_path}",
+    ]
+    ret = _run_cmd(cmd)
+    if ret.returncode != 0:
+        raise LLMGatewayError(f"scp 上传失败: {(ret.stderr or ret.stdout).strip()}")
+
+
+def _remote_scp_from(remote_path: str, local_path: Path) -> None:
+    port = _resolve_remote_port()
+    cmd = _sshpass_base() + [
+        "scp",
+        "-P",
+        str(port),
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        f"{CODEX_REMOTE_USER}@{CODEX_REMOTE_HOST}:{remote_path}",
+        str(local_path),
+    ]
+    ret = _run_cmd(cmd)
+    if ret.returncode != 0:
+        raise LLMGatewayError(f"scp 下载失败: {(ret.stderr or ret.stdout).strip()}")
+
+
+def _remote_prune_codex_tmp() -> None:
+    """远端只保留最新 CODEX_REMOTE_KEEP 组（同 stem 的图/prompt/result）。"""
+    keep = CODEX_REMOTE_KEEP
+    remote_dir = CODEX_REMOTE_DIR
+    script = f"""
+set -e
+DIR='{remote_dir}'
+KEEP={keep}
+cd "$DIR" || exit 0
+mapfile -t imgs < <(ls -1t img_* 2>/dev/null | grep -vE '\\.(prompt|result)\\.txt$' || true)
+if [ "${{#imgs[@]}}" -le "$KEEP" ]; then
+  exit 0
+fi
+for f in "${{imgs[@]:$KEEP}}"; do
+  stem="${{f%.*}}"
+  rm -f "$stem".*
+done
+"""
+    try:
+        ret = _remote_ssh(script, timeout_sec=60)
+        if ret.returncode != 0:
+            print(f"[codex-remote] 清理旧文件警告: {(ret.stderr or ret.stdout).strip()}")
+    except Exception as exc:
+        print(f"[codex-remote] 清理旧文件失败: {exc}")
+
+
 def _ensure_codex_workdir() -> Path:
     wd = Path(CODEX_LOCAL_WORKDIR).expanduser().resolve()
     wd.mkdir(parents=True, exist_ok=True)
@@ -261,9 +439,7 @@ def _normalize_codex_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _call_codex(data_uri: str, prompt: str) -> dict[str, Any]:
-    if "," not in data_uri:
-        raise LLMGatewayError("无效图片 data URI", status_code=400)
+def _call_codex_local(data_uri: str, prompt: str) -> dict[str, Any]:
     if shutil.which("codex") is None:
         raise LLMGatewayError("缺少依赖 codex CLI")
     head, b64 = data_uri.split(",", 1)
@@ -286,6 +462,9 @@ def _call_codex(data_uri: str, prompt: str) -> dict[str, Any]:
             "codex",
             "exec",
             "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-c",
+            f"model_reasoning_effort={CODEX_REASONING_EFFORT}",
             "-i",
             str(local_img),
             "-o",
@@ -315,6 +494,138 @@ def _call_codex(data_uri: str, prompt: str) -> dict[str, Any]:
                     p.unlink()
             except Exception:
                 pass
+
+
+def _call_codex_remote(data_uri: str, prompt: str) -> dict[str, Any]:
+    """临时：上传图+prompt 到远端执行 codex，拉回结果；远端仅保留最新 N 组。"""
+    head, b64 = data_uri.split(",", 1)
+    ext = ".jpg"
+    if "image/png" in head:
+        ext = ".png"
+    elif "image/webp" in head:
+        ext = ".webp"
+    elif "image/gif" in head:
+        ext = ".gif"
+
+    workdir = _ensure_codex_workdir()
+    unique = uuid.uuid4().hex[:10]
+    stem = f"img_{unique}"
+    img_name = f"{stem}{ext}"
+    prompt_name = f"{stem}.prompt.txt"
+    out_name = f"{stem}.result.txt"
+    local_img = workdir / img_name
+    local_prompt = workdir / prompt_name
+    local_out = workdir / out_name
+    remote_img = f"{CODEX_REMOTE_DIR}/{img_name}"
+    remote_prompt = f"{CODEX_REMOTE_DIR}/{prompt_name}"
+    remote_out = f"{CODEX_REMOTE_DIR}/{out_name}"
+
+    try:
+        local_img.write_bytes(base64.b64decode(b64))
+        local_prompt.write_text(prompt, encoding="utf-8")
+
+        mkdir_ret = _remote_ssh(f"mkdir -p '{CODEX_REMOTE_DIR}'", timeout_sec=30)
+        if mkdir_ret.returncode != 0:
+            raise LLMGatewayError(
+                f"远端创建目录失败: {(mkdir_ret.stderr or mkdir_ret.stdout).strip()}"
+            )
+
+        which_ret = _remote_ssh("which codex", timeout_sec=30)
+        if which_ret.returncode != 0:
+            raise LLMGatewayError("远端缺少 codex CLI")
+
+        _remote_scp_to(local_img, remote_img)
+        _remote_scp_to(local_prompt, remote_prompt)
+
+        # 非交互 SSH 须绕过审批；prompt 走 stdin（不要再传 `-`，避免与重定向混淆）；
+        # 绝对路径 -i；远端必须带 HTTP 代理（145 本机 DNS 不可用）。
+        # 覆盖远端 config.toml 的 xhigh，避免批量看图卡死。
+        remote_exec = (
+            f"cd '{CODEX_REMOTE_DIR}' && "
+            f"export HTTP_PROXY='{CODEX_REMOTE_HTTP_PROXY}' "
+            f"HTTPS_PROXY='{CODEX_REMOTE_HTTPS_PROXY}' "
+            f"http_proxy='{CODEX_REMOTE_HTTP_PROXY}' "
+            f"https_proxy='{CODEX_REMOTE_HTTPS_PROXY}' "
+            f"ALL_PROXY='{CODEX_REMOTE_HTTP_PROXY}' "
+            f"NO_PROXY='{CODEX_REMOTE_NO_PROXY}' "
+            f"no_proxy='{CODEX_REMOTE_NO_PROXY}' && "
+            f"codex exec --skip-git-repo-check "
+            f"--dangerously-bypass-approvals-and-sandbox "
+            f"-c model_reasoning_effort={CODEX_REASONING_EFFORT} "
+            f"-m '{CODEX_MODEL}' "
+            f"-C '{CODEX_REMOTE_DIR}' "
+            f"-i '{remote_img}' -o '{out_name}' "
+            f"< '{prompt_name}'"
+        )
+        print(
+            f"[codex-remote] 等待并发槽位 "
+            f"(max={CODEX_REMOTE_MAX_CONCURRENT}) {CODEX_REMOTE_HOST}:{img_name}"
+        )
+        with _CODEX_REMOTE_SEM:
+            print(
+                f"[codex-remote] 开始远端执行 {CODEX_REMOTE_HOST}:{img_name} "
+                f"model={CODEX_MODEL} effort={CODEX_REASONING_EFFORT} "
+                f"proxy={CODEX_REMOTE_HTTP_PROXY}"
+            )
+            exec_ret = _remote_ssh(remote_exec, timeout_sec=900)
+
+            # 即使 CLI 非 0，只要结果文件可读 JSON 仍可成功（网络重试等场景）
+            try:
+                _remote_scp_from(remote_out, local_out)
+            except LLMGatewayError:
+                if exec_ret.returncode != 0:
+                    err = (exec_ret.stderr or exec_ret.stdout or "").strip()
+                    # 避免把 banner/超长 prompt 整段塞进错误；取末尾更有信号
+                    err_tail = err[-1500:] if len(err) > 1500 else err
+                    raise LLMGatewayError(
+                        f"远端 codex 执行失败 (exit={exec_ret.returncode}): {err_tail}"
+                    ) from None
+                raise
+
+            if not local_out.exists() or local_out.stat().st_size == 0:
+                err = (exec_ret.stderr or exec_ret.stdout or "").strip()
+                err_tail = err[-1500:] if len(err) > 1500 else err
+                raise LLMGatewayError(
+                    f"远端结果文件为空或不存在: {out_name}"
+                    + (f"; stderr={err_tail}" if err_tail else "")
+                )
+
+            try:
+                payload = _parse_json_from_model_text(
+                    local_out.read_text(encoding="utf-8", errors="replace")
+                )
+                normalized = _normalize_codex_payload(payload)
+            except Exception as parse_exc:
+                if exec_ret.returncode != 0:
+                    err = (exec_ret.stderr or exec_ret.stdout or "").strip()
+                    err_tail = err[-1500:] if len(err) > 1500 else err
+                    raise LLMGatewayError(
+                        f"远端 codex 执行失败 (exit={exec_ret.returncode}): {err_tail}"
+                    ) from parse_exc
+                raise
+
+            if exec_ret.returncode != 0:
+                print(
+                    f"[codex-remote] CLI exit={exec_ret.returncode} 但结果 JSON 可用，继续"
+                )
+            _remote_prune_codex_tmp()
+            print(f"[codex-remote] 完成 {stem}")
+            return normalized
+    finally:
+        for p in (local_img, local_prompt, local_out):
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+
+
+def _call_codex(data_uri: str, prompt: str) -> dict[str, Any]:
+    if "," not in data_uri:
+        raise LLMGatewayError("无效图片 data URI", status_code=400)
+    if CODEX_REMOTE_ENABLED:
+        return _call_codex_remote(data_uri, prompt)
+    return _call_codex_local(data_uri, prompt)
 
 
 def infer_traffic_image(

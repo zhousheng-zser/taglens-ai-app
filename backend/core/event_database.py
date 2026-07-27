@@ -5,8 +5,6 @@
 import json
 import os
 import random
-import subprocess
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -18,10 +16,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-BACKUP_DIR = Path(__file__).parent.parent.parent / "data" / "backup"
-BACKUP_KEEP_DAYS = int(os.getenv("DB_BACKUP_KEEP_DAYS", "7"))
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bucket-taglens")
-_event_backup_checked = False
 _event_dict_cache: Dict[str, Any] = {
     "projectOptions": [],
     "eventTypeOptions": [],
@@ -61,6 +56,8 @@ STANDARD_PROJECT_OPTIONS: List[Tuple[str, str]] = [
     ("WSWW-9089", "外四外五"),
     ("WHJM-9096", "外环嘉闵"),
     ("JWZHZX", "交委指挥中心"),
+    ("OTHER", "其它"),
+    ("S32", "S32申嘉湖"),
 ]
 
 STANDARD_EVENT_TYPE_OPTIONS: List[Tuple[str, str]] = [
@@ -150,53 +147,9 @@ def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
         print(f"已添加 {column} 字段到 {table} 表")
 
 
-def _backup_event_db_if_needed() -> None:
-    """按天 mysqldump 备份 MySQL taglens_event，并清理过期 .sql 备份（保留原有 .db 文件）。"""
-    global _event_backup_checked
-    if _event_backup_checked:
-        return
-    _event_backup_checked = True
-
-    try:
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        backup_path = BACKUP_DIR / f"event.{today}.sql"
-        db_name = os.getenv("MYSQL_EVENT_DATABASE", "taglens_event")
-
-        if not backup_path.exists():
-            kwargs = _mysql_connect_kwargs()
-            cmd = [
-                "mysqldump",
-                f"-h{kwargs['host']}",
-                f"-P{kwargs['port']}",
-                f"-u{kwargs['user']}",
-                f"-p{kwargs['password']}",
-                "--single-transaction",
-                "--quick",
-                "--set-gtid-purged=OFF",
-                db_name,
-            ]
-            with open(backup_path, "w", encoding="utf-8") as outfile:
-                subprocess.run(cmd, stdout=outfile, stderr=subprocess.PIPE, check=True)
-            print(f"已创建事件数据库 MySQL 备份: {backup_path}")
-
-        now_ts = time.time()
-        keep_seconds = BACKUP_KEEP_DAYS * 24 * 60 * 60
-        for path in list(BACKUP_DIR.glob("event.*.sql")) + list(BACKUP_DIR.glob("event.*.sql.gz")):
-            try:
-                if now_ts - path.stat().st_mtime > keep_seconds:
-                    path.unlink()
-                    print(f"已删除过期事件数据库备份: {path.name}")
-            except Exception as exc:
-                print(f"删除过期事件数据库备份失败: {path} err={exc}")
-    except Exception as exc:
-        print(f"事件数据库备份检查失败(忽略): {exc}")
-
-
 @contextmanager
 def get_event_db_connection():
     """获取事件 MySQL 数据库连接。"""
-    _backup_event_db_if_needed()
     conn = pymysql.connect(
         **_mysql_connect_kwargs(),
         cursorclass=pymysql.cursors.DictCursor,

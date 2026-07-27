@@ -73,7 +73,7 @@ trainer:
     adapter_config: {
                       "adapter_dim": 64,
                       "adapter_heads": 4,
-                      "adapter_scale": 1.0,
+                      "adapter_scale": 0.6,
                     }
     copy_adapter: True
     share_mlp_params: ${scratch.share_mlp_params}

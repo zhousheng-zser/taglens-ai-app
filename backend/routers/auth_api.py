@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from core.sync_executor import run_blocking
 from core.manage_database import (
+    SESSION_ADMIN_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
     authenticate_user,
@@ -19,6 +20,7 @@ from core.manage_database import (
     get_pending_workload_daily,
     get_review_stats,
     get_review_stats_timeseries,
+    get_user_by_id,
     list_user_time_ranges,
     list_users,
     verify_session_token,
@@ -92,6 +94,7 @@ async def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = await run_blocking(create_session_token, int(user["id"]))
     response.set_cookie(SESSION_COOKIE_NAME, token, **_cookie_kwargs())
+    response.delete_cookie(SESSION_ADMIN_COOKIE_NAME, path="/")
     time_ranges = await run_blocking(list_user_time_ranges, int(user["id"]))
     result = dict(user)
     result["timeRanges"] = time_ranges
@@ -101,20 +104,29 @@ async def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
 @router.post("/logout")
 async def logout(response: Response) -> Dict[str, Any]:
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(SESSION_ADMIN_COOKIE_NAME, path="/")
     return {"success": True}
 
 
 @router.get("/me")
-async def me(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+async def me(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    taglens_admin_session: Optional[str] = Cookie(default=None, alias=SESSION_ADMIN_COOKIE_NAME),
+) -> Dict[str, Any]:
     time_ranges = await run_blocking(list_user_time_ranges, int(current_user["id"]))
     user = dict(current_user)
     user["timeRanges"] = time_ranges
+    user["impersonating"] = bool(taglens_admin_session)
+    if taglens_admin_session:
+        admin_user = await run_blocking(verify_session_token, taglens_admin_session)
+        if admin_user and admin_user.get("role") == "admin":
+            user["impersonatedByAdmin"] = admin_user.get("displayName") or admin_user.get("username")
     return {"success": True, "user": user}
 
 
 @router.get("/users")
 async def users(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-    return {"success": True, "users": list_users()}
+    return {"success": True, "users": await run_blocking(list_users, include_password=True)}
 
 
 @router.post("/users")
@@ -145,6 +157,41 @@ async def remove_user(user_id: int, _: Dict[str, Any] = Depends(require_admin)) 
     if not deleted:
         raise HTTPException(status_code=404, detail="用户不存在")
     return {"success": True}
+
+
+@router.post("/impersonate/{user_id}")
+async def impersonate_user(
+    user_id: int,
+    response: Response,
+    current_user: Dict[str, Any] = Depends(require_admin),
+    taglens_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    taglens_admin_session: Optional[str] = Cookie(default=None, alias=SESSION_ADMIN_COOKIE_NAME),
+) -> Dict[str, Any]:
+    target = await run_blocking(get_user_by_id, user_id)
+    if not target or target.get("role") != "reviewer" or not target.get("isActive"):
+        raise HTTPException(status_code=400, detail="只能代登录审核员账号")
+    if int(current_user["id"]) == user_id and taglens_admin_session:
+        raise HTTPException(status_code=400, detail="当前已是该审核员身份")
+    if not taglens_admin_session and taglens_session:
+        response.set_cookie(SESSION_ADMIN_COOKIE_NAME, taglens_session, **_cookie_kwargs())
+    token = await run_blocking(create_session_token, user_id)
+    response.set_cookie(SESSION_COOKIE_NAME, token, **_cookie_kwargs())
+    return {"success": True, "user": await run_blocking(_with_time_ranges, target)}
+
+
+@router.post("/stop-impersonate")
+async def stop_impersonate(
+    response: Response,
+    taglens_admin_session: Optional[str] = Cookie(default=None, alias=SESSION_ADMIN_COOKIE_NAME),
+) -> Dict[str, Any]:
+    if not taglens_admin_session:
+        raise HTTPException(status_code=400, detail="当前不是代登录状态")
+    admin_user = await run_blocking(verify_session_token, taglens_admin_session)
+    if not admin_user or admin_user.get("role") != "admin":
+        raise HTTPException(status_code=400, detail="管理员会话已失效，请重新登录")
+    response.set_cookie(SESSION_COOKIE_NAME, taglens_admin_session, **_cookie_kwargs())
+    response.delete_cookie(SESSION_ADMIN_COOKIE_NAME, path="/")
+    return {"success": True, "user": await run_blocking(_with_time_ranges, admin_user)}
 
 
 @router.get("/users/{user_id}/time-ranges")

@@ -28,6 +28,9 @@ export interface CurrentUser {
   createdAt: string;
   updatedAt: string;
   timeRanges?: UserTimeRange[];
+  initialPassword?: string | null;
+  impersonating?: boolean;
+  impersonatedByAdmin?: string;
 }
 
 export interface ReviewStatsItem {
@@ -104,6 +107,30 @@ export async function login(username: string, password: string): Promise<Current
 export async function logout(): Promise<void> {
   await readJson(await fetch('/api/backend/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
   notifyAuthStateChanged();
+}
+
+export async function impersonateUser(userId: number): Promise<CurrentUser> {
+  const data = await readJson<{ success: boolean; user: CurrentUser }>(
+    await fetch(`/api/backend/auth/impersonate/${userId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }),
+  );
+  notifyAuthStateChanged();
+  return data.user;
+}
+
+export async function stopImpersonate(): Promise<CurrentUser> {
+  const data = await readJson<{ success: boolean; user: CurrentUser }>(
+    await fetch('/api/backend/auth/stop-impersonate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }),
+  );
+  notifyAuthStateChanged();
+  return data.user;
 }
 
 export async function getCurrentUser(): Promise<CurrentUser | null> {

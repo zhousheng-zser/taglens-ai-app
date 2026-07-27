@@ -79,7 +79,7 @@ def build_postprocessor(detection_threshold=0.5):
     )
 
 
-def build_adapter_config(adapter_scale: float = 0.5) -> dict:
+def build_adapter_config(adapter_scale: float = 0.6) -> dict:
     return {
         "adapter_dim": 64,
         "adapter_heads": 4,
@@ -87,7 +87,7 @@ def build_adapter_config(adapter_scale: float = 0.5) -> dict:
     }
 
 
-def build_model(checkpoint_path, category, device="cuda", adapter_scale: float = 0.5):
+def build_model(checkpoint_path, category, device="cuda", adapter_scale: float = 0.6):
     """Build and load model once（固定 GPU）。"""
     stage = CATEGORY_TO_STAGE[category]
     model = build_sam3_image_model(
