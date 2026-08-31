@@ -16,6 +16,11 @@ source venv/bin/activate
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
+# Reranker 固定到空闲卡，避免与 GPU0 上 CLIP/DTC 抢显存
+export JINA_RERANKER_DEVICE="${JINA_RERANKER_DEVICE:-cuda:2}"
+# 远端 Codex 耗时更长，放宽调用 LLM 网关的超时
+export LLM_GATEWAY_TIMEOUT_SEC="${LLM_GATEWAY_TIMEOUT_SEC:-600}"
+export LLM_GATEWAY_HARD_TIMEOUT_SEC="${LLM_GATEWAY_HARD_TIMEOUT_SEC:-630}"
 
 echo "正在初始化数据库..."
 python3 -c "from core.database import init_database; init_database()" || echo "⚠ 数据库初始化可能失败"

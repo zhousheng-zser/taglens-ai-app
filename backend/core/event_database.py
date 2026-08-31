@@ -1427,6 +1427,101 @@ def get_event_record_media_paths(
         }
 
 
+def resolve_event_overlay_paths(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+) -> Dict[str, Optional[str]]:
+    """解析 big/overlay 对象路径；不写库。"""
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT image_paths
+            FROM event_records
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
+            LIMIT 1
+            """,
+            (event_id, project_id, event_type_corrected),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("目标事件记录不存在")
+
+        image_paths = str(row["image_paths"] or "").strip()
+        parts = [segment.strip() for segment in image_paths.split(",") if segment.strip()]
+        big_path = next((item for item in parts if item.endswith("/image_big.jpg")), None)
+        if not big_path:
+            raise ValueError("事件缺少 image_big.jpg，无法生成 overlay")
+
+        overlay_db_path = big_path[: -len("image_big.jpg")] + "image_overlay.jpg"
+        has_overlay = any(item.endswith("/image_overlay.jpg") for item in parts)
+        big_object = _normalize_video_object_path(big_path)
+        overlay_object = _normalize_video_object_path(overlay_db_path)
+        return {
+            "big_object_path": big_object,
+            "overlay_object_path": overlay_object,
+            "overlay_db_path": overlay_db_path,
+            "needs_path_append": not has_overlay,
+            "imageOverlayUrl": _build_video_url(overlay_object),
+            "imageBigUrl": _build_video_url(big_object),
+        }
+
+
+def upsert_event_image_overlay_path(
+    event_id: str,
+    project_id: str,
+    event_type_corrected: str,
+    overlay_db_path: Optional[str] = None,
+) -> Dict[str, Optional[str]]:
+    """
+    确保 image_paths 包含与 image_big.jpg 同目录的 image_overlay.jpg。
+    若已存在 overlay 路径则不改动；否则追加。
+    """
+    with get_event_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT image_paths
+            FROM event_records
+            WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
+            LIMIT 1
+            """,
+            (event_id, project_id, event_type_corrected),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("目标事件记录不存在")
+
+        image_paths = str(row["image_paths"] or "").strip()
+        parts = [segment.strip() for segment in image_paths.split(",") if segment.strip()]
+        big_path = next((item for item in parts if item.endswith("/image_big.jpg")), None)
+        if not big_path:
+            raise ValueError("事件缺少 image_big.jpg，无法生成 overlay")
+
+        target_overlay = overlay_db_path or (big_path[: -len("image_big.jpg")] + "image_overlay.jpg")
+        has_overlay = any(item.endswith("/image_overlay.jpg") for item in parts)
+        if not has_overlay:
+            parts.append(target_overlay)
+            cursor.execute(
+                """
+                UPDATE event_records
+                SET image_paths = %s
+                WHERE event_id = %s AND project_id = %s AND event_type_corrected = %s
+                """,
+                (",".join(parts), event_id, project_id, event_type_corrected),
+            )
+
+        big_object = _normalize_video_object_path(big_path)
+        overlay_object = _normalize_video_object_path(target_overlay)
+        return {
+            "big_object_path": big_object,
+            "overlay_object_path": overlay_object,
+            "imageOverlayUrl": _build_video_url(overlay_object),
+            "imageBigUrl": _build_video_url(big_object),
+        }
+
+
 def delete_event_record(
     event_id: str,
     project_id: str,

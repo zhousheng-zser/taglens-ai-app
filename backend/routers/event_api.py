@@ -13,8 +13,10 @@ from core.event_database import (
     get_event_record_media_paths,
     get_event_segment_annotations,
     get_event_dict_cache,
+    resolve_event_overlay_paths,
     search_events,
     update_event_segment_annotations,
+    upsert_event_image_overlay_path,
     _get_special_qa_questions,
 )
 from core.manage_database import (
@@ -123,6 +125,20 @@ class EventDeleteRequest(BaseModel):
     eventId: str
     projectId: str
     eventTypeCode: str
+
+
+class OverlayBox(BaseModel):
+    x1: float = Field(..., ge=0.0, le=1.0)
+    y1: float = Field(..., ge=0.0, le=1.0)
+    x2: float = Field(..., ge=0.0, le=1.0)
+    y2: float = Field(..., ge=0.0, le=1.0)
+
+
+class EventOverlayUpdateRequest(BaseModel):
+    eventId: str
+    projectId: str
+    eventTypeCode: str
+    box: OverlayBox
 
 
 class SegmentAiDescriptionRequest(BaseModel):
@@ -571,6 +587,77 @@ async def update_event_segment_annotations_api(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"分段标注保存失败: {exc}")
+
+
+def _render_overlay_jpeg(big_bytes: bytes, box: OverlayBox) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    image = Image.open(BytesIO(big_bytes)).convert("RGB")
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        raise ValueError("image_big.jpg 尺寸无效")
+
+    x1 = int(round(min(box.x1, box.x2) * width))
+    y1 = int(round(min(box.y1, box.y2) * height))
+    x2 = int(round(max(box.x1, box.x2) * width))
+    y2 = int(round(max(box.y1, box.y2) * height))
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(0, min(width - 1, x2))
+    y2 = max(0, min(height - 1, y2))
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        raise ValueError("矩形框过小，请重新绘制")
+
+    line_width = max(2, min(8, int(round(min(width, height) * 0.003))))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([x1, y1, x2, y2], outline=(0, 0, 255), width=line_width)
+
+    out = BytesIO()
+    image.save(out, format="JPEG", quality=92)
+    return out.getvalue()
+
+
+@router.post("/overlay")
+async def update_event_overlay_api(
+    request: EventOverlayUpdateRequest,
+    _: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    try:
+        paths = resolve_event_overlay_paths(
+            event_id=request.eventId,
+            project_id=request.projectId,
+            event_type_corrected=request.eventTypeCode,
+        )
+        big_object = paths.get("big_object_path") or ""
+        overlay_object = paths.get("overlay_object_path") or ""
+        if not big_object or not overlay_object:
+            raise ValueError("无法解析 big/overlay 对象路径")
+
+        client = get_storage_client(skip_bucket_check=True)
+
+        def _build_and_upload() -> str:
+            big_bytes = client.download_file_data(big_object)
+            jpeg_bytes = _render_overlay_jpeg(big_bytes, request.box)
+            client.upload_file_data(jpeg_bytes, overlay_object, content_type="image/jpeg")
+            if paths.get("needs_path_append"):
+                upsert_event_image_overlay_path(
+                    event_id=request.eventId,
+                    project_id=request.projectId,
+                    event_type_corrected=request.eventTypeCode,
+                    overlay_db_path=paths.get("overlay_db_path"),
+                )
+            return paths.get("imageOverlayUrl") or f"/{EVENT_MINIO_BUCKET}/{overlay_object}"
+
+        image_overlay_url = await run_blocking(_build_and_upload)
+        return {"success": True, "imageOverlayUrl": image_overlay_url}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"overlay 保存失败: {exc}") from exc
 
 
 @router.post("/delete")

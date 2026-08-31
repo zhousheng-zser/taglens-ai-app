@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PanelRightClose, PanelRightOpen, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -25,6 +25,7 @@ import {
 import { isTaskCategoryEditable, type TaskCategory } from '@/constants/taskAssignment';
 
 const DESCRIPTION_PANEL_STORAGE_KEY = 'taglens-description-panel-visible';
+const PREFERRED_IMAGE_TYPE_STORAGE_KEY = 'taglens-event-preferred-image-type';
 
 function readDescriptionPanelVisible(): boolean {
   if (typeof window === 'undefined') return false;
@@ -37,6 +38,32 @@ function writeDescriptionPanelVisible(visible: boolean): void {
     window.localStorage.setItem(DESCRIPTION_PANEL_STORAGE_KEY, '1');
   } else {
     window.localStorage.removeItem(DESCRIPTION_PANEL_STORAGE_KEY);
+  }
+}
+
+export type EventPreferredImageType = 'big' | 'composite' | 'overlay';
+
+function readPreferredImageType(): EventPreferredImageType | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const value = window.sessionStorage.getItem(PREFERRED_IMAGE_TYPE_STORAGE_KEY);
+    if (value === 'big' || value === 'composite' || value === 'overlay') return value;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function writePreferredImageType(imageType: EventPreferredImageType | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (imageType) {
+      window.sessionStorage.setItem(PREFERRED_IMAGE_TYPE_STORAGE_KEY, imageType);
+    } else {
+      window.sessionStorage.removeItem(PREFERRED_IMAGE_TYPE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
   }
 }
 
@@ -79,27 +106,89 @@ export type EventStreamSavePayload = {
   accidentQuestionsAnswersList: Array<Array<{ question: string; answer: string }>>;
 };
 
+export type EventOverlaySavePayload = {
+  eventId: string;
+  projectId: string;
+  eventTypeCode: string;
+  imageOverlayUrl: string;
+};
+
+type NormBox = { x1: number; y1: number; x2: number; y2: number };
+
+function stripCacheBust(url: string): string {
+  const value = (url || '').trim();
+  if (!value) return '';
+  const q = value.indexOf('?');
+  return q >= 0 ? value.slice(0, q) : value;
+}
+
+function withCacheBust(url: string): string {
+  const base = stripCacheBust(url);
+  if (!base) return '';
+  return `${base}?t=${Date.now()}`;
+}
+
+/** 计算 object-contain 时图片在容器内的实际绘制区域（相对容器像素） */
+function getObjectContainRect(
+  containerW: number,
+  containerH: number,
+  naturalW: number,
+  naturalH: number,
+): { left: number; top: number; width: number; height: number } | null {
+  if (containerW <= 0 || containerH <= 0 || naturalW <= 0 || naturalH <= 0) return null;
+  const scale = Math.min(containerW / naturalW, containerH / naturalH);
+  const width = naturalW * scale;
+  const height = naturalH * scale;
+  return {
+    left: (containerW - width) / 2,
+    top: (containerH - height) / 2,
+    width,
+    height,
+  };
+}
+
 export type EventStreamPlayerProps = {
   record: EventSearchResult;
   onDirtyChange: (dirty: boolean) => void;
   onSaved: (payload: EventStreamSavePayload) => void;
+  onOverlaySaved?: (payload: EventOverlaySavePayload) => void;
   /** null/undefined 表示全部可编辑；有值时仅对应任务类别可编辑 */
   editableTaskCategories?: TaskCategory[] | null;
 };
+
+function resolvePreferredImageUrl(
+  record: EventSearchResult,
+  imageType: EventPreferredImageType | null | undefined,
+  overlayUrl: string,
+): string {
+  if (!imageType) return '';
+  if (imageType === 'big') return (record.imageBigUrl || '').trim();
+  if (imageType === 'composite') return (record.imageCompositeUrl || '').trim();
+  return (overlayUrl || record.imageOverlayUrl || '').trim();
+}
 
 export const EventStreamPlayer = React.memo(function EventStreamPlayer({
   record,
   onDirtyChange,
   onSaved,
+  onOverlaySaved,
   editableTaskCategories = null,
 }: EventStreamPlayerProps) {
   const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const previewImageRef = useRef<HTMLImageElement | null>(null);
+  const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number>(-1);
   const [activeStreamUrl, setActiveStreamUrl] = useState<string>('');
   const [activeStreamPath, setActiveStreamPath] = useState<string>('');
   const [activeMediaKind, setActiveMediaKind] = useState<'video' | 'image'>('video');
   const [activeImageType, setActiveImageType] = useState<'big' | 'composite' | 'overlay' | null>(null);
+  const [localOverlayUrl, setLocalOverlayUrl] = useState<string>(record.imageOverlayUrl || '');
+  const [overlayEditMode, setOverlayEditMode] = useState(false);
+  const [draftBox, setDraftBox] = useState<NormBox | null>(null);
+  const [isOverlaySaving, setIsOverlaySaving] = useState(false);
   const [draftDescriptions, setDraftDescriptions] = useState<string[]>([]);
   const [draftReviewDescriptions, setDraftReviewDescriptions] = useState<string[]>([]);
   const [draftEnglishDescriptions, setDraftEnglishDescriptions] = useState<string[]>([]);
@@ -188,10 +277,24 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
 
   useEffect(() => {
     setActiveStreamIndex(-1);
-    setActiveStreamUrl(record.videoUrl || '');
-    setActiveStreamPath(record.videoPath || '-');
-    setActiveMediaKind('video');
-    setActiveImageType(null);
+    setLocalOverlayUrl(record.imageOverlayUrl || '');
+    const preferredImageType = readPreferredImageType();
+    const preferredUrl = resolvePreferredImageUrl(
+      record,
+      preferredImageType,
+      record.imageOverlayUrl || '',
+    );
+    if (preferredImageType && preferredUrl) {
+      setActiveMediaKind('image');
+      setActiveImageType(preferredImageType);
+      setActiveStreamUrl(preferredUrl);
+      setActiveStreamPath(stripCacheBust(preferredUrl));
+    } else {
+      setActiveMediaKind('video');
+      setActiveImageType(null);
+      setActiveStreamUrl(record.videoUrl || '');
+      setActiveStreamPath(record.videoPath || '-');
+    }
     const nextDescriptions = Array.from({ length: segmentLineCount }, (_, idx) => (record.segmentDescriptions || [])[idx] || '');
     const nextReviewDescriptions = Array.from({ length: segmentLineCount }, (_, idx) => (record.segmentReviewDescriptions || [])[idx] || '');
     const nextEnglishDescriptions = Array.from({ length: segmentLineCount }, (_, idx) => (record.segmentDescriptionsEn || [])[idx] || '');
@@ -222,7 +325,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
     setQuickMarkStatus(null);
     setDescriptionPanelMode('ai');
     onDirtyChange(false);
-  }, [record.uuid, record.videoUrl, record.videoPath]);
+  }, [record.uuid, record.videoUrl, record.videoPath, record.imageBigUrl, record.imageCompositeUrl, record.imageOverlayUrl]);
 
   useEffect(() => {
     setDescriptionPanelVisible(readDescriptionPanelVisible());
@@ -283,8 +386,10 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
   }, [isDirty, onDirtyChange]);
 
   const switchStream = (targetIndex: number) => {
+    if (overlayEditMode) return;
     setActiveMediaKind('video');
     setActiveImageType(null);
+    writePreferredImageType(null);
     if (targetIndex < 0) {
       setActiveStreamIndex(-1);
       setActiveStreamUrl(record.videoUrl || '');
@@ -298,17 +403,180 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
     setActiveStreamPath(path);
   };
 
-  const switchImage = (imageType: 'big' | 'composite' | 'overlay') => {
+  const switchImage = (imageType: EventPreferredImageType) => {
+    if (overlayEditMode && imageType !== 'big') return;
     const imageUrl = imageType === 'big'
       ? (record.imageBigUrl || '')
       : imageType === 'composite'
         ? (record.imageCompositeUrl || '')
-        : (record.imageOverlayUrl || '');
+        : (localOverlayUrl || record.imageOverlayUrl || '');
     if (!imageUrl) return;
     setActiveMediaKind('image');
     setActiveImageType(imageType);
     setActiveStreamUrl(imageUrl);
-    setActiveStreamPath(imageUrl);
+    setActiveStreamPath(stripCacheBust(imageUrl));
+    writePreferredImageType(imageType);
+  };
+
+  const exitOverlayEditMode = () => {
+    setOverlayEditMode(false);
+    setDraftBox(null);
+    dragStartRef.current = null;
+  };
+
+  const startOverlayEdit = () => {
+    if (!record.imageBigUrl || isOverlaySaving) return;
+    setOverlayEditMode(true);
+    setDraftBox(null);
+    dragStartRef.current = null;
+    setActiveMediaKind('image');
+    setActiveImageType('big');
+    setActiveStreamIndex(-1);
+    setActiveStreamUrl(record.imageBigUrl);
+    setActiveStreamPath(stripCacheBust(record.imageBigUrl));
+  };
+
+  const paintDraftBox = useCallback((box: NormBox | null) => {
+    const canvas = drawCanvasRef.current;
+    const img = previewImageRef.current;
+    const container = previewContainerRef.current;
+    if (!canvas || !img || !container) return;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cw, ch);
+    if (!box) return;
+    const rect = getObjectContainRect(cw, ch, img.naturalWidth, img.naturalHeight);
+    if (!rect) return;
+    const x1 = rect.left + Math.min(box.x1, box.x2) * rect.width;
+    const y1 = rect.top + Math.min(box.y1, box.y2) * rect.height;
+    const x2 = rect.left + Math.max(box.x1, box.x2) * rect.width;
+    const y2 = rect.top + Math.max(box.y1, box.y2) * rect.height;
+    ctx.strokeStyle = 'rgb(0, 0, 255)';
+    ctx.lineWidth = Math.max(2, Math.min(8, Math.round(Math.min(rect.width, rect.height) * 0.003)));
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  }, []);
+
+  useEffect(() => {
+    if (!overlayEditMode) {
+      const canvas = drawCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      return;
+    }
+    paintDraftBox(draftBox);
+  }, [overlayEditMode, draftBox, paintDraftBox, activeStreamUrl]);
+
+  useEffect(() => {
+    setLocalOverlayUrl(record.imageOverlayUrl || '');
+  }, [record.uuid, record.imageOverlayUrl]);
+
+  const pointerToNormBoxCorner = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const container = previewContainerRef.current;
+    const img = previewImageRef.current;
+    if (!container || !img || !img.naturalWidth || !img.naturalHeight) return null;
+    const bounds = container.getBoundingClientRect();
+    const rect = getObjectContainRect(bounds.width, bounds.height, img.naturalWidth, img.naturalHeight);
+    if (!rect) return null;
+    const px = clientX - bounds.left;
+    const py = clientY - bounds.top;
+    const x = Math.min(1, Math.max(0, (px - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (py - rect.top) / rect.height));
+    return { x, y };
+  };
+
+  const handleOverlayPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!overlayEditMode || isOverlaySaving) return;
+    event.preventDefault();
+    const corner = pointerToNormBoxCorner(event.clientX, event.clientY);
+    if (!corner) return;
+    dragStartRef.current = corner;
+    setDraftBox({ x1: corner.x, y1: corner.y, x2: corner.x, y2: corner.y });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleOverlayPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!overlayEditMode || !dragStartRef.current) return;
+    const corner = pointerToNormBoxCorner(event.clientX, event.clientY);
+    if (!corner) return;
+    setDraftBox({
+      x1: dragStartRef.current.x,
+      y1: dragStartRef.current.y,
+      x2: corner.x,
+      y2: corner.y,
+    });
+  };
+
+  const handleOverlayPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!overlayEditMode) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragStartRef.current = null;
+  };
+
+  const saveOverlayEdit = async () => {
+    if (!draftBox || isOverlaySaving) return;
+    const w = Math.abs(draftBox.x2 - draftBox.x1);
+    const h = Math.abs(draftBox.y2 - draftBox.y1);
+    if (w < 0.005 || h < 0.005) {
+      toast({ title: '矩形过小', description: '请拖拽画出更大的框', variant: 'destructive' });
+      return;
+    }
+    setIsOverlaySaving(true);
+    try {
+      const response = await fetch('/api/backend/events/overlay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: record.eventId,
+          projectId: record.projectId,
+          eventTypeCode: record.eventTypeCode,
+          box: {
+            x1: Math.min(draftBox.x1, draftBox.x2),
+            y1: Math.min(draftBox.y1, draftBox.y2),
+            x2: Math.max(draftBox.x1, draftBox.x2),
+            y2: Math.max(draftBox.y1, draftBox.y2),
+          },
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || 'overlay 保存失败');
+      }
+      const data = await response.json() as { success?: boolean; imageOverlayUrl?: string };
+      const nextUrl = withCacheBust(data.imageOverlayUrl || '');
+      if (!nextUrl) throw new Error('未返回 overlay URL');
+      setLocalOverlayUrl(nextUrl);
+      exitOverlayEditMode();
+      setActiveMediaKind('image');
+      setActiveImageType('overlay');
+      setActiveStreamUrl(nextUrl);
+      setActiveStreamPath(stripCacheBust(nextUrl));
+      writePreferredImageType('overlay');
+      onOverlaySaved?.({
+        eventId: record.eventId,
+        projectId: record.projectId,
+        eventTypeCode: record.eventTypeCode,
+        imageOverlayUrl: nextUrl,
+      });
+      toast({ title: 'overlay 已保存' });
+    } catch (err) {
+      toast({
+        title: '保存失败',
+        description: err instanceof Error ? err.message : '未知错误',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsOverlaySaving(false);
+    }
   };
 
   const applyQuickMarkToSegment = (segmentIndex: number) => {
@@ -449,7 +717,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
       toast({ title: '无法生成', description: '当前分段没有可访问的视频地址', variant: 'destructive' });
       return;
     }
-    const overlayRaw = (record.imageOverlayUrl || '').trim();
+    const overlayRaw = (localOverlayUrl || record.imageOverlayUrl || '').trim();
     const overlayImageUrl = overlayRaw ? resolveMediaUrlForApi(overlayRaw) : undefined;
 
     setIsAiGenerating(true);
@@ -511,7 +779,10 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
         }
       >
         <div className="flex flex-col gap-3 min-h-0 h-full">
-          <div className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video min-h-[240px] shrink-0">
+          <div
+            ref={previewContainerRef}
+            className="relative w-full overflow-hidden rounded-lg border border-border/50 bg-black aspect-video min-h-[240px] shrink-0"
+          >
             {activeStreamUrl ? (
               activeMediaKind === 'video' ? (
                 <video
@@ -524,22 +795,45 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
                   preload="metadata"
                 />
               ) : (
-                <img
-                  src={activeStreamUrl}
-                  alt="事件图片预览"
-                  className="absolute inset-0 h-full w-full object-contain bg-black"
-                />
+                <>
+                  <img
+                    ref={previewImageRef}
+                    src={activeStreamUrl}
+                    alt="事件图片预览"
+                    className="absolute inset-0 h-full w-full object-contain bg-black"
+                    draggable={false}
+                    onLoad={() => {
+                      if (overlayEditMode) paintDraftBox(draftBox);
+                    }}
+                  />
+                  {overlayEditMode ? (
+                    <canvas
+                      ref={drawCanvasRef}
+                      className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
+                      onPointerDown={handleOverlayPointerDown}
+                      onPointerMove={handleOverlayPointerMove}
+                      onPointerUp={handleOverlayPointerUp}
+                      onPointerCancel={handleOverlayPointerUp}
+                    />
+                  ) : null}
+                </>
               )
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
                 当前事件暂无可播放视频
               </div>
             )}
+            {overlayEditMode ? (
+              <div className="absolute left-2 top-2 z-10 rounded bg-black/70 px-2 py-1 text-[11px] text-blue-100">
+                拖拽绘制蓝色矩形（仅一个框）
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
               size="sm"
+              disabled={overlayEditMode}
               onClick={() => switchStream(-1)}
               className={
                 activeMediaKind === 'video' && activeStreamIndex === -1
@@ -553,6 +847,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
               <Button
                 type="button"
                 size="sm"
+                disabled={overlayEditMode}
                 onClick={() => switchImage('big')}
                 className={
                   activeMediaKind === 'image' && activeImageType === 'big'
@@ -567,6 +862,7 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
               <Button
                 type="button"
                 size="sm"
+                disabled={overlayEditMode}
                 onClick={() => switchImage('composite')}
                 className={
                   activeMediaKind === 'image' && activeImageType === 'composite'
@@ -577,10 +873,11 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
                 composite
               </Button>
             ) : null}
-            {record.imageOverlayUrl ? (
+            {localOverlayUrl ? (
               <Button
                 type="button"
                 size="sm"
+                disabled={overlayEditMode}
                 onClick={() => switchImage('overlay')}
                 className={
                   activeMediaKind === 'image' && activeImageType === 'overlay'
@@ -591,11 +888,45 @@ export const EventStreamPlayer = React.memo(function EventStreamPlayer({
                 overlay
               </Button>
             ) : null}
+            {record.imageBigUrl ? (
+              overlayEditMode ? (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={isOverlaySaving || !draftBox}
+                    onClick={() => void saveOverlayEdit()}
+                    className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400"
+                  >
+                    {isOverlaySaving ? '保存中…' : '保存 overlay'}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={isOverlaySaving}
+                    onClick={exitOverlayEditMode}
+                    className="h-8 px-3 text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-100 border border-zinc-500"
+                  >
+                    取消
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={startOverlayEdit}
+                  className="h-8 px-3 text-xs bg-indigo-700/70 hover:bg-indigo-600/80 text-indigo-50 border border-indigo-400/70"
+                >
+                  编辑 overlay
+                </Button>
+              )
+            ) : null}
             {(record.segmentUrls || []).map((_, idx) => (
               <Button
                 key={`${record.uuid}-segment-${idx}`}
                 type="button"
                 size="sm"
+                disabled={overlayEditMode}
                 onClick={() => handleSegmentButtonClick(idx)}
                 className={
                   activeStreamIndex === idx

@@ -1,4 +1,4 @@
-import type { EventStreamSavePayload } from '@/components/event-query/EventStreamPlayer';
+import type { EventOverlaySavePayload, EventStreamSavePayload } from '@/components/event-query/EventStreamPlayer';
 import type { EventSearchRequest, EventSearchResult } from '@/types/event';
 import { isAccidentQaReviewDone } from '@/constants/multiCarAccidentQuestions';
 import type { TaskCategory } from '@/constants/taskAssignment';
@@ -29,8 +29,6 @@ export type EventSearchResultNavItem = {
     accidentQaReviewDone?: boolean;
     assignedTaskCategories?: TaskCategory[] | null;
 };
-
-import type { TaskCategory } from '@/constants/taskAssignment';
 
 export interface EventQuerySessionState {
     selectedProjectCategories: string[];
@@ -246,6 +244,16 @@ export function applySegmentSaveToRecord(
     };
 }
 
+export function applyOverlaySaveToRecord(
+    item: EventSearchResult,
+    payload: EventOverlaySavePayload,
+): EventSearchResult {
+    return {
+        ...item,
+        imageOverlayUrl: payload.imageOverlayUrl,
+    };
+}
+
 function applySegmentSaveToNavItem(
     item: EventSearchResultNavItem,
     payload: EventStreamSavePayload,
@@ -298,6 +306,21 @@ export function updateEventQuerySessionAfterSave(payload: EventStreamSavePayload
                 && item.eventTypeCode === payload.eventTypeCode
             ) {
                 return applySegmentSaveToRecord(item, payload);
+            }
+            return item;
+        });
+    }
+}
+
+export function updateEventQuerySessionAfterOverlaySave(payload: EventOverlaySavePayload): void {
+    if (memoryPageCache) {
+        memoryPageCache.results = memoryPageCache.results.map((item) => {
+            if (
+                item.eventId === payload.eventId
+                && item.projectId === payload.projectId
+                && item.eventTypeCode === payload.eventTypeCode
+            ) {
+                return applyOverlaySaveToRecord(item, payload);
             }
             return item;
         });

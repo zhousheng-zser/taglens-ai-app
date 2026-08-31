@@ -5,17 +5,23 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { format } from 'date-fns';
 import { ArrowLeft, ChevronLeft, ChevronRight } from 'lucide-react';
 import { AuthGate } from '@/components/AuthGate';
-import { EventStreamPlayer, type EventStreamSavePayload } from '@/components/event-query/EventStreamPlayer';
+import {
+    EventStreamPlayer,
+    type EventOverlaySavePayload,
+    type EventStreamSavePayload,
+} from '@/components/event-query/EventStreamPlayer';
 import { ParticleBackground } from '@/components/ParticleBackground';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import type { CurrentUser } from '@/lib/auth';
 import {
+    applyOverlaySaveToRecord,
     applySegmentSaveToRecord,
     fetchEventQueryPageResults,
     loadEventQuerySession,
     markEventQueryRestore,
     takeCachedEventQueryPageResults,
+    updateEventQuerySessionAfterOverlaySave,
     updateEventQuerySessionAfterSave,
     updateEventQuerySessionIndex,
     type EventQuerySessionState,
@@ -149,6 +155,20 @@ function EventQueryDetailContent({ currentUser }: { currentUser: CurrentUser }) 
         }));
     };
 
+    const handleOverlaySaved = (payload: EventOverlaySavePayload) => {
+        updateEventQuerySessionAfterOverlaySave(payload);
+        setFullResults((prev) => prev.map((item) => {
+            if (
+                item.eventId === payload.eventId
+                && item.projectId === payload.projectId
+                && item.eventTypeCode === payload.eventTypeCode
+            ) {
+                return applyOverlaySaveToRecord(item, payload);
+            }
+            return item;
+        }));
+    };
+
     if (!ready) {
         return (
             <div className="relative min-h-[60vh] flex items-center justify-center">
@@ -251,6 +271,7 @@ function EventQueryDetailContent({ currentUser }: { currentUser: CurrentUser }) 
                             }
                             onDirtyChange={setHasUnsavedEdits}
                             onSaved={handleSegmentSaved}
+                            onOverlaySaved={handleOverlaySaved}
                         />
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-2 border-t border-border/20">
