@@ -3,16 +3,21 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { format } from 'date-fns';
-import { ArrowLeft, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Pencil, Save, X } from 'lucide-react';
 import { ParticleBackground } from '@/components/ParticleBackground';
-import { Badge } from '@/components/ui/badge';
+import { EditableTagSection } from '@/components/tag-query/EditableTagSection';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
+import { getCurrentUser, type CurrentUser } from '@/lib/auth';
 import { getImageUrl } from '@/lib/imageStorage';
 import {
     loadTagQuerySession,
     markTagQueryRestore,
+    saveTagQuerySession,
+    updateTagQuerySessionDescription,
+    updateTagQuerySessionTags,
     updateTagQuerySessionIndex,
     type TagQuerySessionState,
 } from '@/lib/tagQueryNav';
@@ -27,9 +32,20 @@ export default function TagQueryDetailPage() {
     const [session, setSession] = useState<TagQuerySessionState | null>(null);
     const [currentIndex, setCurrentIndex] = useState(-1);
     const [ready, setReady] = useState(false);
+    const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+    const [isEditingDescription, setIsEditingDescription] = useState(false);
+    const [descriptionDraft, setDescriptionDraft] = useState('');
+    const [isSavingDescription, setIsSavingDescription] = useState(false);
+    const [isSavingKeywords, setIsSavingKeywords] = useState(false);
+    const [isSavingYolo, setIsSavingYolo] = useState(false);
 
     const uuid = decodeURIComponent(params.uuid || '');
     const idxFromQuery = parseInt(searchParams.get('idx') || '-1', 10);
+    const isAdmin = currentUser?.role === 'admin';
+
+    useEffect(() => {
+        getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null));
+    }, []);
 
     useEffect(() => {
         const saved = loadTagQuerySession();
@@ -55,12 +71,18 @@ export default function TagQueryDetailPage() {
         return session.results[currentIndex];
     }, [session, currentIndex]);
 
+    useEffect(() => {
+        if (!currentItem || isEditingDescription) return;
+        setDescriptionDraft(currentItem.description || '');
+    }, [currentItem, isEditingDescription]);
+
     const navigate = useCallback(
         (delta: number) => {
             if (!session) return;
             const next = currentIndex + delta;
             if (next < 0 || next >= session.results.length) return;
             const item = session.results[next];
+            setIsEditingDescription(false);
             setCurrentIndex(next);
             updateTagQuerySessionIndex(next);
             router.replace(`/tag-query/detail/${encodeURIComponent(item.uuid)}?idx=${next}`);
@@ -71,6 +93,7 @@ export default function TagQueryDetailPage() {
     useEffect(() => {
         if (!currentItem) return;
         const onKeyDown = (event: KeyboardEvent) => {
+            if (isEditingDescription) return;
             if (event.key === 'ArrowLeft') {
                 event.preventDefault();
                 navigate(-1);
@@ -81,11 +104,171 @@ export default function TagQueryDetailPage() {
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [currentItem, navigate]);
+    }, [currentItem, navigate, isEditingDescription]);
 
     const handleBack = () => {
         markTagQueryRestore();
         router.push('/tag-query');
+    };
+
+    const handleStartEditDescription = () => {
+        if (!currentItem) return;
+        setDescriptionDraft(currentItem.description || '');
+        setIsEditingDescription(true);
+    };
+
+    const handleCancelEditDescription = () => {
+        setDescriptionDraft(currentItem?.description || '');
+        setIsEditingDescription(false);
+    };
+
+    const handleSaveDescription = async () => {
+        if (!currentItem || isSavingDescription) return;
+        setIsSavingDescription(true);
+        try {
+            const response = await fetch('/api/backend/images/update-description', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    uuid: currentItem.uuid,
+                    description: descriptionDraft,
+                }),
+            });
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                throw new Error(payload?.detail || payload?.error || '保存失败');
+            }
+            const result = await response.json();
+            const savedDescription = String(result?.description ?? descriptionDraft);
+
+            setSession((prev) => {
+                if (!prev) return prev;
+                const nextResults = prev.results.map((item) =>
+                    item.uuid === currentItem.uuid
+                        ? { ...item, description: savedDescription }
+                        : item,
+                );
+                const nextSession = { ...prev, results: nextResults };
+                saveTagQuerySession(nextSession);
+                return nextSession;
+            });
+            updateTagQuerySessionDescription(currentItem.uuid, savedDescription);
+            setIsEditingDescription(false);
+            toast({
+                title: '保存成功',
+                description: result?.embedding_updated
+                    ? '综合描述已更新，描述向量已同步重算。'
+                    : result?.embedding_removed
+                        ? '综合描述已清空，描述向量已移除。'
+                        : '综合描述已更新。',
+            });
+        } catch (error: any) {
+            toast({
+                variant: 'destructive',
+                title: '保存失败',
+                description: error?.message || '未知错误',
+            });
+        } finally {
+            setIsSavingDescription(false);
+        }
+    };
+
+    const persistTags = async (keywords: string[], yoloObjects: string[]) => {
+        if (!currentItem) {
+            throw new Error('当前记录不存在');
+        }
+        const response = await fetch('/api/backend/images/update-tags', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid: currentItem.uuid,
+                keywords,
+                yoloObjects,
+            }),
+        });
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload?.detail || payload?.error || '保存失败');
+        }
+        return response.json();
+    };
+
+    const applySavedTags = (keywords: string[], yoloObjects: string[]) => {
+        if (!currentItem) return;
+        setSession((prev) => {
+            if (!prev) return prev;
+            const nextResults = prev.results.map((item) =>
+                item.uuid === currentItem.uuid
+                    ? { ...item, keywords, yoloObjects }
+                    : item,
+            );
+            const nextSession = { ...prev, results: nextResults };
+            saveTagQuerySession(nextSession);
+            return nextSession;
+        });
+        updateTagQuerySessionTags(currentItem.uuid, { keywords, yoloObjects });
+    };
+
+    const handleSaveKeywords = async (nextKeywords: string[]) => {
+        if (!currentItem || isSavingKeywords) return;
+        setIsSavingKeywords(true);
+        try {
+            const result = await persistTags(
+                nextKeywords,
+                currentItem.yoloObjects || [],
+            );
+            const keywords = Array.isArray(result?.keywords) ? result.keywords : nextKeywords;
+            const yoloObjects = Array.isArray(result?.yoloObjects)
+                ? result.yoloObjects
+                : (currentItem.yoloObjects || []);
+            applySavedTags(keywords, yoloObjects);
+            toast({
+                title: '保存成功',
+                description: result?.cache_synced
+                    ? '关键词已更新，标签向量库已同步。'
+                    : '关键词已更新。若关键词搜索未生效，请在数据管理页重载标签库。',
+            });
+        } catch (error: any) {
+            toast({
+                variant: 'destructive',
+                title: '保存失败',
+                description: error?.message || '未知错误',
+            });
+            throw error;
+        } finally {
+            setIsSavingKeywords(false);
+        }
+    };
+
+    const handleSaveYoloObjects = async (nextYoloObjects: string[]) => {
+        if (!currentItem || isSavingYolo) return;
+        setIsSavingYolo(true);
+        try {
+            const result = await persistTags(
+                currentItem.keywords || [],
+                nextYoloObjects,
+            );
+            const keywords = Array.isArray(result?.keywords)
+                ? result.keywords
+                : (currentItem.keywords || []);
+            const yoloObjects = Array.isArray(result?.yoloObjects)
+                ? result.yoloObjects
+                : nextYoloObjects;
+            applySavedTags(keywords, yoloObjects);
+            toast({
+                title: '保存成功',
+                description: 'YOLO 标签已更新。',
+            });
+        } catch (error: any) {
+            toast({
+                variant: 'destructive',
+                title: '保存失败',
+                description: error?.message || '未知错误',
+            });
+            throw error;
+        } finally {
+            setIsSavingYolo(false);
+        }
     };
 
     if (!ready) {
@@ -186,50 +369,83 @@ export default function TagQueryDetailPage() {
 
                             <div className="flex flex-col border-t xl:border-t-0 xl:border-l border-border/40 min-h-0">
                                 <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-                                    {currentItem.description ? (
+                                    {(currentItem.description || isAdmin) ? (
                                         <section className="rounded-lg border border-cyan-200/50 dark:border-cyan-900/40 bg-cyan-50/20 dark:bg-cyan-900/10 p-3">
-                                            <h3 className="text-[11px] font-semibold mb-1.5 text-cyan-700 dark:text-cyan-400 uppercase tracking-wider">
-                                                综合描述
-                                            </h3>
-                                            <p className="text-sm leading-6 text-foreground/90 whitespace-pre-wrap break-words">
-                                                {currentItem.description}
-                                            </p>
-                                        </section>
-                                    ) : null}
-
-                                    {currentItem.keywords && currentItem.keywords.length > 0 ? (
-                                        <section>
-                                            <h3 className="text-[11px] font-semibold mb-1.5 text-muted-foreground uppercase tracking-wider">
-                                                关键词
-                                            </h3>
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {currentItem.keywords.map((keyword, idx) => (
-                                                    <Badge key={idx} variant="secondary" className="text-[11px] font-normal px-2 py-0.5">
-                                                        {keyword}
-                                                    </Badge>
-                                                ))}
-                                            </div>
-                                        </section>
-                                    ) : null}
-
-                                    {currentItem.tags && currentItem.tags.length > 0 ? (
-                                        <section>
-                                            <h3 className="text-[11px] font-semibold mb-1.5 text-muted-foreground uppercase tracking-wider">
-                                                标签列表
-                                            </h3>
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {currentItem.tags.map((tag, idx) => (
-                                                    <Badge
-                                                        key={idx}
-                                                        variant="outline"
-                                                        className="text-[11px] px-2 py-0.5 border-primary/20 text-primary/90"
+                                            <div className="flex items-center justify-between gap-2 mb-1.5">
+                                                <h3 className="text-[11px] font-semibold text-cyan-700 dark:text-cyan-400 uppercase tracking-wider">
+                                                    综合描述
+                                                </h3>
+                                                {isAdmin && !isEditingDescription ? (
+                                                    <Button
+                                                        type="button"
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        className="h-7 px-2 text-xs gap-1"
+                                                        onClick={handleStartEditDescription}
                                                     >
-                                                        {tag}
-                                                    </Badge>
-                                                ))}
+                                                        <Pencil className="h-3.5 w-3.5" />
+                                                        编辑
+                                                    </Button>
+                                                ) : null}
                                             </div>
+                                            {isAdmin && isEditingDescription ? (
+                                                <div className="space-y-2">
+                                                    <Textarea
+                                                        value={descriptionDraft}
+                                                        onChange={(e) => setDescriptionDraft(e.target.value)}
+                                                        rows={8}
+                                                        className="text-sm leading-6 bg-background/80"
+                                                        placeholder="请输入综合描述"
+                                                    />
+                                                    <div className="flex justify-end gap-2">
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-8 gap-1"
+                                                            onClick={handleCancelEditDescription}
+                                                            disabled={isSavingDescription}
+                                                        >
+                                                            <X className="h-3.5 w-3.5" />
+                                                            取消
+                                                        </Button>
+                                                        <Button
+                                                            type="button"
+                                                            size="sm"
+                                                            className="h-8 gap-1"
+                                                            onClick={handleSaveDescription}
+                                                            disabled={isSavingDescription}
+                                                        >
+                                                            <Save className="h-3.5 w-3.5" />
+                                                            {isSavingDescription ? '保存中...' : '保存'}
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <p className="text-sm leading-6 text-foreground/90 whitespace-pre-wrap break-words">
+                                                    {currentItem.description || '（暂无综合描述）'}
+                                                </p>
+                                            )}
                                         </section>
                                     ) : null}
+
+                                    <EditableTagSection
+                                        title="关键词"
+                                        tags={currentItem.keywords || []}
+                                        variant="keyword"
+                                        isAdmin={isAdmin}
+                                        isSaving={isSavingKeywords}
+                                        onSave={handleSaveKeywords}
+                                    />
+
+                                    <EditableTagSection
+                                        title="yolo标签"
+                                        tags={currentItem.yoloObjects || []}
+                                        variant="yolo"
+                                        isAdmin={isAdmin}
+                                        isSaving={isSavingYolo}
+                                        onSave={handleSaveYoloObjects}
+                                    />
                                 </div>
 
                                 <div className="shrink-0 border-t border-border/30 p-3 bg-muted/20">

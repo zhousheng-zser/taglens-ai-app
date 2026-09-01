@@ -428,3 +428,61 @@ def get_query_keyword_similarity(query_tag: str, keyword: str) -> Optional[float
     """读取已缓存的 (query_tag, keyword) 相似度。"""
     with _CACHE_LOCK:
         return _QUERY_KEYWORD_SIM_CACHE.get((query_tag, keyword))
+
+
+def patch_image_keywords_in_cache(
+    image_id: int,
+    keyword_embedding_pairs: List[Tuple[str, bytes]],
+) -> bool:
+    """
+    若关键词向量库已加载，增量更新单张图的关键词映射与全局 keyword 向量。
+  返回是否成功同步到内存缓存。
+    """
+    global _MAPPING_IMAGE_IDS, _MAPPING_KEYWORDS, _MAPPING_ROW_COUNT
+
+    with _CACHE_LOCK:
+        if not _cache_fully_loaded():
+            return False
+
+        old_keywords = {
+            _MAPPING_KEYWORDS[idx]
+            for idx, iid in enumerate(_MAPPING_IMAGE_IDS)
+            if int(iid) == int(image_id)
+        }
+
+        new_image_ids = array("I")
+        new_keywords: List[str] = []
+        for idx, iid in enumerate(_MAPPING_IMAGE_IDS):
+            if int(iid) != int(image_id):
+                new_image_ids.append(int(iid))
+                new_keywords.append(_MAPPING_KEYWORDS[idx])
+
+        for keyword, embedding_bytes in keyword_embedding_pairs:
+            vec = np.frombuffer(embedding_bytes, dtype=np.float32)
+            norm = float(np.linalg.norm(vec))
+            if norm <= 0:
+                continue
+            normalized = (vec / norm).astype(np.float32, copy=False)
+
+            kw = str(keyword).strip()
+            if not kw:
+                continue
+            if kw not in _KEYWORD_VEC_CACHE:
+                _KEYWORD_VEC_CACHE[kw] = normalized
+            new_image_ids.append(int(image_id))
+            new_keywords.append(kw)
+
+        removed_keywords = old_keywords - {kw for kw, _ in keyword_embedding_pairs}
+        if removed_keywords:
+            keys_to_drop = [
+                key
+                for key in list(_QUERY_KEYWORD_SIM_CACHE.keys())
+                if key[1] in removed_keywords
+            ]
+            for key in keys_to_drop:
+                _QUERY_KEYWORD_SIM_CACHE.pop(key, None)
+
+        _MAPPING_IMAGE_IDS = new_image_ids
+        _MAPPING_KEYWORDS = new_keywords
+        _MAPPING_ROW_COUNT = len(new_keywords)
+        return True

@@ -562,6 +562,7 @@ export interface SearchRequest {
   bizCategory?: string;
   filePath?: string;
   descriptionKeywords?: string[];
+  tagExtracted?: boolean;
   page?: number;
   pageSize?: number;
   similarityThreshold?: number;

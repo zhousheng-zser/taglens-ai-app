@@ -199,14 +199,14 @@ def _sz_tag_refs_from_db_value(sz_tag_ref_json: Optional[str]) -> List[str]:
     return []
 
 
-def _try_upsert_description_embedding(image_id: int, description: str) -> None:
+def upsert_description_embedding(image_id: int, description: str) -> Optional[bytes]:
     """
-    在 keyword_embeddings 写入成功后，同步 upsert description_embeddings。
-    description 为空或编码失败时仅打日志，不影响已写入的 keyword。
+    将 description 编码并 upsert 到 description_embeddings。
+    成功时返回 embedding bytes（供内存缓存同步）；description 为空或失败时返回 None。
     """
     text = (description or "").strip()
     if not text:
-        return
+        return None
     try:
         from services.jina_embedding_service import (
             JINA_MODEL_NAME,
@@ -231,10 +231,31 @@ def _try_upsert_description_embedding(image_id: int, description: str) -> None:
                 (image_id, blob, dim, JINA_MODEL_NAME, now),
             )
         print(f"[description_embeddings] upsert ok image_id={image_id} dim={dim}")
+        return blob
     except Exception as exc:
         print(
             f"[description_embeddings] upsert 失败 image_id={image_id}: {exc}"
         )
+        return None
+
+
+def delete_description_embedding(image_id: int) -> bool:
+    """删除 description_embeddings 中指定图片的向量。"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM description_embeddings WHERE image_id = %s",
+            (image_id,),
+        )
+        return cursor.rowcount > 0
+
+
+def _try_upsert_description_embedding(image_id: int, description: str) -> None:
+    """
+    在 keyword_embeddings 写入成功后，同步 upsert description_embeddings。
+    description 为空或编码失败时仅打日志，不影响已写入的 keyword。
+    """
+    upsert_description_embedding(image_id, description)
 
 
 def save_image_to_db(
@@ -350,6 +371,7 @@ def search_images(
     biz_category: Optional[str] = None,
     file_path: Optional[str] = None,
     description_keywords: Optional[List[str]] = None,
+    tag_extracted: Optional[bool] = None,
     query_embedding: Optional[bytes] = None,  # 单个查询文本的向量化结果（向后兼容）
     query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
     query_tags: Optional[List[str]] = None,  # 与 query_embeddings 对应的查询标签文本（用于相似度缓存）
@@ -419,6 +441,15 @@ def search_images(
                 if kw:
                     where_conditions.append("ar.description LIKE %s")
                     params.append(f"%{kw}%")
+
+        if tag_extracted is True:
+            where_conditions.append(
+                "(ar.description IS NOT NULL AND TRIM(ar.description) <> '')"
+            )
+        elif tag_extracted is False:
+            where_conditions.append(
+                "(ar.description IS NULL OR TRIM(ar.description) = '')"
+            )
 
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         
@@ -1176,6 +1207,189 @@ def update_image_analysis_with_embeddings(
     # keyword 已写入；连接释放后再跑 Jina，避免长占 MySQL
     _try_upsert_description_embedding(image_id, description)
     return result
+
+
+def update_image_description_by_uuid(image_uuid: str, description: str) -> Dict[str, Any]:
+    """更新 analysis_results.description，并同步 description_embeddings。"""
+    image_uuid = (image_uuid or "").strip()
+    if not image_uuid:
+        raise ValueError("uuid 不能为空")
+
+    text = (description or "").strip()
+    now = datetime.now().isoformat()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM images WHERE uuid = %s", (image_uuid,))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("图片记录不存在")
+        image_id = int(row["id"])
+
+        cursor.execute("SELECT id FROM analysis_results WHERE image_id = %s", (image_id,))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute(
+                """
+                UPDATE analysis_results
+                SET description = %s, created_at = %s
+                WHERE image_id = %s
+                """,
+                (text, now, image_id),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO analysis_results (
+                    image_id, description, keywords_json,
+                    qwen_captions_json, yolo_objects_json, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (image_id, text, "[]", "[]", "[]", now),
+            )
+
+    embedding_blob: Optional[bytes] = None
+    embedding_removed = False
+    if text:
+        embedding_blob = upsert_description_embedding(image_id, text)
+    else:
+        embedding_removed = delete_description_embedding(image_id)
+
+    return {
+        "image_id": image_id,
+        "uuid": image_uuid,
+        "description": text,
+        "embedding_updated": embedding_blob is not None,
+        "embedding_removed": embedding_removed,
+        "embedding_blob": embedding_blob,
+    }
+
+
+def update_image_tags_by_uuid(
+    image_uuid: str,
+    keywords: List[str],
+    yolo_objects: List[str],
+) -> Dict[str, Any]:
+    """更新 analysis_results 关键词/YOLO 标签，并同步 tags、keyword_embeddings。"""
+    from services.text_embedding_service import encode_text_to_vector
+
+    image_uuid = (image_uuid or "").strip()
+    if not image_uuid:
+        raise ValueError("uuid 不能为空")
+
+    keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    yolo_objects = [str(o).strip() for o in (yolo_objects or []) if str(o).strip()]
+    now = datetime.now().isoformat()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT i.id, ar.description, ar.qwen_captions_json
+            FROM images i
+            LEFT JOIN analysis_results ar ON i.id = ar.image_id
+            WHERE i.uuid = %s
+            """,
+            (image_uuid,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("图片记录不存在")
+        image_id = int(row["id"])
+        description = row.get("description") or ""
+        try:
+            qwen_captions = json.loads(row.get("qwen_captions_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            qwen_captions = []
+
+        keywords_json_str = json.dumps(keywords, ensure_ascii=False)
+        yolo_objects_json_str = json.dumps(yolo_objects, ensure_ascii=False)
+
+        cursor.execute("SELECT id FROM analysis_results WHERE image_id = %s", (image_id,))
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute(
+                """
+                UPDATE analysis_results
+                SET description = %s, keywords_json = %s, qwen_captions_json = %s,
+                    yolo_objects_json = %s, created_at = %s
+                WHERE image_id = %s
+                """,
+                (
+                    description,
+                    keywords_json_str,
+                    json.dumps(qwen_captions, ensure_ascii=False),
+                    yolo_objects_json_str,
+                    now,
+                    image_id,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO analysis_results (
+                    image_id, description, keywords_json,
+                    qwen_captions_json, yolo_objects_json, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    image_id,
+                    description,
+                    keywords_json_str,
+                    json.dumps(qwen_captions, ensure_ascii=False),
+                    yolo_objects_json_str,
+                    now,
+                ),
+            )
+
+        cursor.execute(
+            "DELETE FROM tags WHERE image_id = %s AND tag_type IN ('keyword', 'yolo_object')",
+            (image_id,),
+        )
+        for k in keywords:
+            try:
+                cursor.execute(
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (%s, %s, %s)",
+                    (image_id, k, "keyword"),
+                )
+            except pymysql.err.IntegrityError:
+                pass
+        for o in yolo_objects:
+            try:
+                cursor.execute(
+                    "INSERT INTO tags (image_id, tag, tag_type) VALUES (%s, %s, %s)",
+                    (image_id, o, "yolo_object"),
+                )
+            except pymysql.err.IntegrityError:
+                pass
+
+        cursor.execute("DELETE FROM keyword_embeddings WHERE image_id = %s", (image_id,))
+
+    keyword_embedding_pairs: List[tuple[str, bytes]] = []
+    for keyword in keywords:
+        try:
+            embedding_bytes = encode_text_to_vector(keyword)
+            keyword_embedding_pairs.append((keyword, embedding_bytes))
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO keyword_embeddings (image_id, keyword, embedding, created_at)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (image_id, keyword, embedding_bytes, now),
+                )
+        except Exception as exc:
+            print(f"[update_image_tags] keyword 向量化失败 '{keyword}': {exc}")
+
+    return {
+        "image_id": image_id,
+        "uuid": image_uuid,
+        "keywords": keywords,
+        "yoloObjects": yolo_objects,
+        "keywords_embedding_count": len(keyword_embedding_pairs),
+        "keyword_embedding_pairs": keyword_embedding_pairs,
+    }
 
 
 def get_all_projects_db() -> List[Dict[str, Any]]:

@@ -12,6 +12,7 @@ export interface TagQuerySessionState {
     bizCategoryFilter: string;
     filePathFilter: string;
     descriptionKeywords: string[];
+    tagExtractedFilter: 'all' | 'yes' | 'no';
     selectedRange: string;
     page: number;
     pageSize: number;
@@ -41,6 +42,34 @@ export function updateTagQuerySessionIndex(index: number): void {
     const state = loadTagQuerySession();
     if (!state) return;
     state.currentIndex = index;
+    saveTagQuerySession(state);
+}
+
+export function updateTagQuerySessionDescription(uuid: string, description: string): void {
+    const state = loadTagQuerySession();
+    if (!state) return;
+    const idx = state.results.findIndex((item) => item.uuid === uuid);
+    if (idx < 0) return;
+    state.results[idx] = {
+        ...state.results[idx],
+        description,
+    };
+    saveTagQuerySession(state);
+}
+
+export function updateTagQuerySessionTags(
+    uuid: string,
+    payload: { keywords?: string[]; yoloObjects?: string[] },
+): void {
+    const state = loadTagQuerySession();
+    if (!state) return;
+    const idx = state.results.findIndex((item) => item.uuid === uuid);
+    if (idx < 0) return;
+    state.results[idx] = {
+        ...state.results[idx],
+        ...(payload.keywords !== undefined ? { keywords: payload.keywords } : {}),
+        ...(payload.yoloObjects !== undefined ? { yoloObjects: payload.yoloObjects } : {}),
+    };
     saveTagQuerySession(state);
 }
 

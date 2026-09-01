@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form, Request, Request
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Form, Request, Request, Depends
 from fastapi.responses import Response, StreamingResponse, FileResponse
 import mimetypes
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +48,8 @@ from core.database import (
     delete_image_by_uuid,
     get_project_by_name_or_script_db,
     update_project_last_run_db,
+    update_image_description_by_uuid,
+    update_image_tags_by_uuid,
 )
 from services.project_sync_systemd import (
     is_managed_sync_script,
@@ -80,6 +82,7 @@ from routers import management_api
 from routers import dtc_api
 from routers import event_api
 from routers import auth_api
+from routers.auth_api import require_admin
 from routers import llm_proxy_api
 from schemas.llm_schemas import SemanticSearch, TrafficAnalysisOutput, TrainingData
 from services.llm_gateway_client import LLM_GATEWAY_URL, check_gateway_health, infer_traffic_image
@@ -138,6 +141,7 @@ class SearchRequest(BaseModel):
     bizCategory: Optional[str] = None  # 业态目录模糊匹配（sz_tag_ref_json）
     filePath: Optional[str] = None  # 文件路径模糊匹配（relative_path）
     descriptionKeywords: Optional[List[str]] = None  # 综合描述模糊匹配（多个关键词 AND）
+    tagExtracted: Optional[bool] = None  # True=description 有内容；False=description 为空
     similarityThreshold: Optional[float] = 0.6  # 相似度阈值,范围0-1（仅 keyword）
     searchMode: Optional[str] = "keyword"  # keyword | description
     rerankTopN: Optional[int] = 1000  # description：粗排 TopN 后再精排
@@ -194,6 +198,18 @@ class SearchResponse(BaseModel):
 
 class DeleteImageRequest(BaseModel):
     uuid: str
+
+
+class UpdateImageDescriptionRequest(BaseModel):
+    uuid: str
+    description: str
+
+
+class UpdateImageTagsRequest(BaseModel):
+    uuid: str
+    keywords: List[str]
+    yoloObjects: List[str]
+
 
 class ImageSimilarityCheckRequest(BaseModel):
     image: str  # Base64 data URI
@@ -1169,6 +1185,7 @@ def _search_images_sync(
             biz_category=request.bizCategory,
             file_path=request.filePath,
             description_keywords=request.descriptionKeywords,
+            tag_extracted=request.tagExtracted,
             query_embeddings=query_embeddings if query_embeddings else None,  # 传递多个向量
             query_tags=queries if queries else None,
             query_weights=weights if weights else None,  # 传递权重列表
@@ -1818,6 +1835,79 @@ async def delete_image_api(request: DeleteImageRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除图片失败: {str(e)}")
+
+
+def _update_image_description_sync(image_uuid: str, description: str) -> Dict[str, Any]:
+    from services.description_search_cache import (
+        patch_description_embedding_in_cache,
+        remove_description_embedding_from_cache,
+    )
+
+    result = update_image_description_by_uuid(image_uuid, description)
+    embedding_blob = result.pop("embedding_blob", None)
+    image_id = int(result["image_id"])
+
+    cache_synced = False
+    if embedding_blob:
+        cache_synced = patch_description_embedding_in_cache(image_id, embedding_blob)
+    elif result.get("embedding_removed"):
+        cache_synced = remove_description_embedding_from_cache(image_id)
+
+    result["cache_synced"] = cache_synced
+    return result
+
+
+@app.post("/images/update-description")
+async def update_image_description_api(
+    request: UpdateImageDescriptionRequest,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """管理员更新标签查询图片的综合描述，并同步 description_embeddings。"""
+    image_uuid = (request.uuid or "").strip()
+    if not image_uuid:
+        raise HTTPException(status_code=400, detail="uuid 不能为空")
+    try:
+        return await run_blocking(
+            _update_image_description_sync,
+            image_uuid,
+            request.description or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新综合描述失败: {str(e)}")
+
+
+def _update_image_tags_sync(image_uuid: str, keywords: List[str], yolo_objects: List[str]) -> Dict[str, Any]:
+    from services.keyword_search_cache import patch_image_keywords_in_cache
+
+    result = update_image_tags_by_uuid(image_uuid, keywords, yolo_objects)
+    pairs = result.pop("keyword_embedding_pairs", [])
+    image_id = int(result["image_id"])
+    result["cache_synced"] = patch_image_keywords_in_cache(image_id, pairs)
+    return result
+
+
+@app.post("/images/update-tags")
+async def update_image_tags_api(
+    request: UpdateImageTagsRequest,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """管理员更新标签查询图片的关键词与 YOLO 标签。"""
+    image_uuid = (request.uuid or "").strip()
+    if not image_uuid:
+        raise HTTPException(status_code=400, detail="uuid 不能为空")
+    try:
+        return await run_blocking(
+            _update_image_tags_sync,
+            image_uuid,
+            request.keywords or [],
+            request.yoloObjects or [],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新标签失败: {str(e)}")
 
 # --- 直接读取文件系统图片接口 ---
 def _get_image_direct_sync(path: str) -> Response:

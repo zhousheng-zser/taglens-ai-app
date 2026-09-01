@@ -260,3 +260,56 @@ def scan_image_description_similarities(
         progress.report("scan", 90, f"描述向量匹配完成（{total}/{total}）…")
 
     return image_query_sims, rows_with_vectors, total
+
+
+def patch_description_embedding_in_cache(image_id: int, embedding_bytes: bytes) -> bool:
+    """若内存缓存已加载，更新或追加单条描述向量。"""
+    global _IMAGE_IDS, _MATRIX, _IMAGE_INDEX, _LOADED
+
+    vec = np.frombuffer(embedding_bytes, dtype=np.float32)
+    if len(vec) != EXPECTED_DIM:
+        return False
+    norm = float(np.linalg.norm(vec))
+    if norm <= 0:
+        return False
+    normalized = (vec / norm).astype(np.float32, copy=False)
+
+    with _CACHE_LOCK:
+        if not _cache_fully_loaded() or _MATRIX is None:
+            return False
+        if image_id in _IMAGE_INDEX:
+            idx = _IMAGE_INDEX[image_id]
+            _MATRIX[idx] = normalized
+            return True
+
+        _IMAGE_IDS.append(int(image_id))
+        new_idx = len(_IMAGE_IDS) - 1
+        _IMAGE_INDEX[int(image_id)] = new_idx
+        _MATRIX = np.vstack([_MATRIX, normalized.reshape(1, -1)]).astype(np.float32, copy=False)
+        _LOADED = True
+        return True
+
+
+def remove_description_embedding_from_cache(image_id: int) -> bool:
+    """若内存缓存已加载，移除单条描述向量。"""
+    global _IMAGE_IDS, _MATRIX, _IMAGE_INDEX, _LOADED
+
+    with _CACHE_LOCK:
+        if not _cache_fully_loaded() or _MATRIX is None:
+            return False
+        idx = _IMAGE_INDEX.get(int(image_id))
+        if idx is None:
+            return False
+
+        keep_mask = np.ones(len(_IMAGE_IDS), dtype=bool)
+        keep_mask[idx] = False
+        _IMAGE_IDS = [iid for i, iid in enumerate(_IMAGE_IDS) if keep_mask[i]]
+        if _IMAGE_IDS:
+            _MATRIX = _MATRIX[keep_mask]
+            _IMAGE_INDEX = {iid: i for i, iid in enumerate(_IMAGE_IDS)}
+            _LOADED = True
+        else:
+            _MATRIX = None
+            _IMAGE_INDEX = {}
+            _LOADED = False
+        return True

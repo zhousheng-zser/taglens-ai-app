@@ -56,6 +56,7 @@ export default function TagQueryPage() {
     const [filePathFilter, setFilePathFilter] = useState<string>('');
     const [descriptionKeywords, setDescriptionKeywords] = useState<string[]>([]);
     const [descriptionKeywordInput, setDescriptionKeywordInput] = useState<string>('');
+    const [tagExtractedFilter, setTagExtractedFilter] = useState<'all' | 'yes' | 'no'>('all');
 
     const [selectedRange, setSelectedRange] = useState<string>('today');
     const [results, setResults] = useState<ImageSearchResult[]>([]);
@@ -113,6 +114,7 @@ export default function TagQueryPage() {
         bizCategory: bizCategoryFilter.trim() || undefined,
         filePath: filePathFilter.trim() || undefined,
         descriptionKeywords: descriptionKeywords.length > 0 ? descriptionKeywords : undefined,
+        tagExtracted: tagExtractedFilter === 'yes' ? true : tagExtractedFilter === 'no' ? false : undefined,
         page: targetPage,
         pageSize: size,
     });
@@ -211,6 +213,7 @@ export default function TagQueryPage() {
         setBizCategoryFilter(saved.bizCategoryFilter);
         setFilePathFilter(saved.filePathFilter);
         setDescriptionKeywords(saved.descriptionKeywords);
+        setTagExtractedFilter(saved.tagExtractedFilter || 'all');
         setSelectedRange(saved.selectedRange);
         setPage(saved.page);
         setPageSize(saved.pageSize);
@@ -254,6 +257,7 @@ export default function TagQueryPage() {
         setFilePathFilter('');
         setDescriptionKeywords([]);
         setDescriptionKeywordInput('');
+        setTagExtractedFilter('all');
         setPage(1);
         setTimeout(() => fetchResults(1), 100);
     };
@@ -319,6 +323,7 @@ export default function TagQueryPage() {
             bizCategoryFilter,
             filePathFilter,
             descriptionKeywords,
+            tagExtractedFilter,
             selectedRange,
             page,
             pageSize,
@@ -465,6 +470,22 @@ export default function TagQueryPage() {
                                     </div>
                                 </div>
                                 <div className="space-y-2 w-36 shrink-0">
+                                    <label className="text-xs font-medium text-muted-foreground">标签提取成功</label>
+                                    <Select
+                                        value={tagExtractedFilter}
+                                        onValueChange={(value: 'all' | 'yes' | 'no') => setTagExtractedFilter(value)}
+                                    >
+                                        <SelectTrigger className="h-8 bg-background/40 border-border/40 text-xs">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="all">不限</SelectItem>
+                                            <SelectItem value="yes">是</SelectItem>
+                                            <SelectItem value="no">否</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div className="space-y-2 w-36 shrink-0">
                                     <label className="text-xs font-medium text-muted-foreground">开始日期</label>
                                     <div className="relative">
                                         <Input
@@ -594,7 +615,7 @@ export default function TagQueryPage() {
                                     <TableRow className="hover:bg-transparent border-b border-border/40">
                                         <TableHead className="w-[100px] pl-6 font-semibold">预览</TableHead>
                                         <TableHead className="w-[180px] font-semibold">保存时间</TableHead>
-                                        <TableHead className="font-semibold">标签列表</TableHead>
+                                        <TableHead className="font-semibold">yolo标签</TableHead>
                                         <TableHead className="w-[200px] pr-6 font-semibold">文件名</TableHead>
                                     </TableRow>
                                 </TableHeader>
@@ -650,7 +671,7 @@ export default function TagQueryPage() {
                                                 </TableCell>
                                                 <TableCell>
                                                     <div className="flex flex-wrap gap-1.5 max-w-2xl">
-                                                        {(item.tags || []).slice(0, 15).map((tag, idx) => (
+                                                        {(item.yoloObjects || []).slice(0, 15).map((tag, idx) => (
                                                             <Badge
                                                                 key={idx}
                                                                 variant="secondary"
@@ -659,9 +680,9 @@ export default function TagQueryPage() {
                                                                 {tag}
                                                             </Badge>
                                                         ))}
-                                                        {(item.tags || []).length > 15 && (
+                                                        {(item.yoloObjects || []).length > 15 && (
                                                             <span className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">
-                                                                +{(item.tags || []).length - 15}
+                                                                +{(item.yoloObjects || []).length - 15}
                                                             </span>
                                                         )}
                                                     </div>
@@ -802,7 +823,7 @@ export default function TagQueryPage() {
                                                             )}
                                                         </div>
                                                         <div className="flex flex-wrap gap-1 max-h-[3.2rem] overflow-hidden">
-                                                            {(item.tags || []).slice(0, 12).map((tag, idx) => (
+                                                            {(item.yoloObjects || []).slice(0, 12).map((tag, idx) => (
                                                                 <span
                                                                     key={idx}
                                                                     className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary-foreground/80 border border-primary/30"
@@ -810,9 +831,9 @@ export default function TagQueryPage() {
                                                                     {tag}
                                                                 </span>
                                                             ))}
-                                                            {(item.tags || []).length > 12 && (
+                                                            {(item.yoloObjects || []).length > 12 && (
                                                                 <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                                                                    +{(item.tags || []).length - 12}
+                                                                    +{(item.yoloObjects || []).length - 12}
                                                                 </span>
                                                             )}
                                                         </div>
