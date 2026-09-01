@@ -22,19 +22,24 @@ import {
 } from 'recharts';
 import {
   createTimeRange,
+  createTagTaskBatch,
   createUser,
+  deleteTagTaskBatch,
   deleteTimeRange,
   deleteUser,
   getPendingWorkload,
   getReviewStats,
   getReviewStatsTimeseries,
+  getTagPendingWorkload,
   impersonateUser,
+  listTagTaskBatches,
   listTimeRanges,
   listUsers,
   type CurrentUser,
   type PendingWorkloadSummary,
   type ReviewStatsItem,
   type ReviewStatsTimeseries,
+  type TagTaskBatch,
   type UserTimeRange,
 } from '@/lib/auth';
 import {
@@ -109,6 +114,7 @@ function UserManagementContent() {
   const today = useMemo(() => new Date(), []);
   const [users, setUsers] = useState<CurrentUser[]>([]);
   const [rangesByUser, setRangesByUser] = useState<Record<number, UserTimeRange[]>>({});
+  const [tagBatchesByUser, setTagBatchesByUser] = useState<Record<number, TagTaskBatch[]>>({});
   const [stats, setStats] = useState<ReviewStatsItem[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -138,9 +144,14 @@ function UserManagementContent() {
   const [pendingWorkload, setPendingWorkload] = useState<PendingWorkloadSummary | null>(null);
   const [pendingLoading, setPendingLoading] = useState(false);
   const [pendingError, setPendingError] = useState('');
+  const [tagPendingImages, setTagPendingImages] = useState<number | null>(null);
+  const [tagPendingLoading, setTagPendingLoading] = useState(false);
+  const [tagPendingError, setTagPendingError] = useState('');
+  const [newTagBatch, setNewTagBatch] = useState({ rangeName: '', workloadImages: '100' });
 
   const reviewers = useMemo(() => users.filter((user) => user.role === 'reviewer'), [users]);
   const selectedRanges = selectedUserId ? rangesByUser[selectedUserId] || [] : [];
+  const selectedTagBatches = selectedUserId ? tagBatchesByUser[selectedUserId] || [] : [];
   const tsChartRows = useMemo(() => {
     if (!tsData?.labels?.length || !tsData.datasets?.length) return [];
     return tsData.labels.map((label, i) => {
@@ -190,6 +201,21 @@ function UserManagementContent() {
     }
   };
 
+  const fetchTagPendingWorkload = async () => {
+    setTagPendingLoading(true);
+    setTagPendingError('');
+    try {
+      const count = await getTagPendingWorkload();
+      setTagPendingImages(count);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '加载标签待分配数量失败';
+      setTagPendingError(msg);
+      setTagPendingImages(null);
+    } finally {
+      setTagPendingLoading(false);
+    }
+  };
+
   const loadData = async () => {
     setIsLoading(true);
     setError('');
@@ -199,14 +225,18 @@ function UserManagementContent() {
       const rangesEntries = await Promise.all(
         nextUsers.map(async (user) => [user.id, await listTimeRanges(user.id)] as const),
       );
+      const tagBatchEntries = await Promise.all(
+        nextUsers.map(async (user) => [user.id, await listTagTaskBatches(user.id)] as const),
+      );
       setUsers(nextUsers);
       setStats(nextStats);
       setRangesByUser(Object.fromEntries(rangesEntries));
+      setTagBatchesByUser(Object.fromEntries(tagBatchEntries));
       if (!selectedUserId && nextUsers.length > 0) {
         const firstReviewer = nextUsers.find((user) => user.role === 'reviewer');
         setSelectedUserId(firstReviewer?.id ?? nextUsers[0].id);
       }
-      await Promise.all([fetchTimeseries(), fetchPendingWorkload()]);
+      await Promise.all([fetchTimeseries(), fetchPendingWorkload(), fetchTagPendingWorkload()]);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '加载失败';
       setError(msg);
@@ -308,6 +338,27 @@ function UserManagementContent() {
 
   const handleDeleteRange = async (rangeId: number) => {
     await deleteTimeRange(rangeId);
+    await loadData();
+  };
+
+  const handleCreateTagBatch = async () => {
+    if (!selectedUserId || !newTagBatch.rangeName.trim()) return;
+    const workloadImages = Number(newTagBatch.workloadImages) || 0;
+    if (workloadImages <= 0) return;
+    const batch = await createTagTaskBatch(selectedUserId, {
+      rangeName: newTagBatch.rangeName.trim(),
+      workloadImages,
+    });
+    if (batch.warning) {
+      window.alert(batch.warning);
+    }
+    setNewTagBatch({ rangeName: '', workloadImages: '100' });
+    await loadData();
+  };
+
+  const handleDeleteTagBatch = async (batchId: number) => {
+    if (!window.confirm('确认删除该标签任务批次吗？')) return;
+    await deleteTagTaskBatch(batchId);
     await loadData();
   };
 
@@ -615,6 +666,97 @@ function UserManagementContent() {
               {selectedRanges.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={6} className="text-center text-muted-foreground">暂无任务时间段</TableCell>
+                </TableRow>
+              ) : null}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>标签任务批次分配</CardTitle>
+          <CardDescription>
+            为审核员分配标签数据查询任务：从未分配且标签提取成功的图片池中按数量自动抽取，每张图片全局唯一归属一名审核员，任务长期有效。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="rounded-lg border border-border/40 bg-background/30 px-4 py-3">
+            <p className="text-xs text-muted-foreground">待分配图片数（标签提取成功）</p>
+            {tagPendingError ? (
+              <p className="mt-1 text-sm text-destructive">{tagPendingError}</p>
+            ) : tagPendingLoading && tagPendingImages == null ? (
+              <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在统计…
+              </div>
+            ) : (
+              <p className="mt-1 text-2xl font-semibold tabular-nums">{(tagPendingImages ?? 0).toLocaleString()}</p>
+            )}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="space-y-2">
+              <Label>审核员</Label>
+              <Select value={selectedUserId ? String(selectedUserId) : ''} onValueChange={(value) => setSelectedUserId(Number(value))}>
+                <SelectTrigger>
+                  <SelectValue placeholder="选择审核员" />
+                </SelectTrigger>
+                <SelectContent>
+                  {reviewers.map((user) => (
+                    <SelectItem key={user.id} value={String(user.id)}>{user.displayName}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>任务名称</Label>
+              <Input
+                value={newTagBatch.rangeName}
+                onChange={(event) => setNewTagBatch({ ...newTagBatch, rangeName: event.target.value })}
+                placeholder="例如：9月第1批"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>分配图片数</Label>
+              <Input
+                type="number"
+                min={1}
+                value={newTagBatch.workloadImages}
+                onChange={(event) => setNewTagBatch({ ...newTagBatch, workloadImages: event.target.value })}
+              />
+            </div>
+          </div>
+          <Button onClick={handleCreateTagBatch} disabled={!selectedUserId || !newTagBatch.rangeName.trim()}>
+            <Plus className="mr-2 h-4 w-4" />
+            添加标签任务批次
+          </Button>
+
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>任务名称</TableHead>
+                <TableHead>创建时间</TableHead>
+                <TableHead>配额 / 已分配</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {selectedTagBatches.map((batch) => (
+                <TableRow key={batch.id}>
+                  <TableCell>{batch.rangeName}</TableCell>
+                  <TableCell>{batch.createdAt}</TableCell>
+                  <TableCell>{batch.workloadImages || 0} / {batch.assignedImages || 0}</TableCell>
+                  <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" onClick={() => handleDeleteTagBatch(batch.id)}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {selectedTagBatches.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={4} className="text-center text-muted-foreground">暂无标签任务批次</TableCell>
                 </TableRow>
               ) : null}
             </TableBody>

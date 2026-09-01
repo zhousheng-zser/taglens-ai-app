@@ -82,8 +82,10 @@ from routers import management_api
 from routers import dtc_api
 from routers import event_api
 from routers import auth_api
-from routers.auth_api import require_admin
+from routers.auth_api import get_current_user, require_admin
+from routers import tag_review_api
 from routers import llm_proxy_api
+from core.tag_task_assignment import is_tag_image_editable_by_user
 from schemas.llm_schemas import SemanticSearch, TrafficAnalysisOutput, TrainingData
 from services.llm_gateway_client import LLM_GATEWAY_URL, check_gateway_health, infer_traffic_image
 from services.llm_prompts import PROMPT_PART_1, PROMPT_PART_2_TEMPLATE, PROMPT_PART_3, build_default_analysis_prompt
@@ -360,6 +362,7 @@ app.include_router(management_api.router)
 app.include_router(dtc_api.router)
 app.include_router(event_api.router)
 app.include_router(auth_api.router)
+app.include_router(tag_review_api.router)
 app.include_router(llm_proxy_api.router)
 
 # --- 批量导入相关常量与工具 ---
@@ -1824,7 +1827,10 @@ def _delete_image_sync(image_uuid: str) -> Dict[str, Any]:
 
 
 @app.post("/images/delete")
-async def delete_image_api(request: DeleteImageRequest):
+async def delete_image_api(
+    request: DeleteImageRequest,
+    _: Dict[str, Any] = Depends(require_admin),
+):
     """删除标签查询图片：数据库关联记录 + Faiss 向量。"""
     image_uuid = (request.uuid or "").strip()
     if not image_uuid:
@@ -1860,12 +1866,20 @@ def _update_image_description_sync(image_uuid: str, description: str) -> Dict[st
 @app.post("/images/update-description")
 async def update_image_description_api(
     request: UpdateImageDescriptionRequest,
-    _: Dict[str, Any] = Depends(require_admin),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """管理员更新标签查询图片的综合描述，并同步 description_embeddings。"""
+    """管理员或已分配审核员更新标签查询图片的综合描述。"""
     image_uuid = (request.uuid or "").strip()
     if not image_uuid:
         raise HTTPException(status_code=400, detail="uuid 不能为空")
+    if current_user.get("role") != "admin":
+        allowed = await run_blocking(
+            is_tag_image_editable_by_user,
+            int(current_user["id"]),
+            image_uuid,
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="无权修改该图片")
     try:
         return await run_blocking(
             _update_image_description_sync,
@@ -1891,12 +1905,20 @@ def _update_image_tags_sync(image_uuid: str, keywords: List[str], yolo_objects: 
 @app.post("/images/update-tags")
 async def update_image_tags_api(
     request: UpdateImageTagsRequest,
-    _: Dict[str, Any] = Depends(require_admin),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """管理员更新标签查询图片的关键词与 YOLO 标签。"""
+    """管理员或已分配审核员更新标签查询图片的关键词与 YOLO 标签。"""
     image_uuid = (request.uuid or "").strip()
     if not image_uuid:
         raise HTTPException(status_code=400, detail="uuid 不能为空")
+    if current_user.get("role") != "admin":
+        allowed = await run_blocking(
+            is_tag_image_editable_by_user,
+            int(current_user["id"]),
+            image_uuid,
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="无权修改该图片")
     try:
         return await run_blocking(
             _update_image_tags_sync,

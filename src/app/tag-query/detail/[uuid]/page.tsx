@@ -42,6 +42,8 @@ export default function TagQueryDetailPage() {
     const uuid = decodeURIComponent(params.uuid || '');
     const idxFromQuery = parseInt(searchParams.get('idx') || '-1', 10);
     const isAdmin = currentUser?.role === 'admin';
+    const isReviewer = currentUser?.role === 'reviewer';
+    const canEdit = isAdmin || isReviewer;
 
     useEffect(() => {
         getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null));
@@ -369,13 +371,13 @@ export default function TagQueryDetailPage() {
 
                             <div className="flex flex-col border-t xl:border-t-0 xl:border-l border-border/40 min-h-0">
                                 <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-                                    {(currentItem.description || isAdmin) ? (
+                                    {(currentItem.description || canEdit) ? (
                                         <section className="rounded-lg border border-cyan-200/50 dark:border-cyan-900/40 bg-cyan-50/20 dark:bg-cyan-900/10 p-3">
                                             <div className="flex items-center justify-between gap-2 mb-1.5">
                                                 <h3 className="text-[11px] font-semibold text-cyan-700 dark:text-cyan-400 uppercase tracking-wider">
                                                     综合描述
                                                 </h3>
-                                                {isAdmin && !isEditingDescription ? (
+                                                {canEdit && !isEditingDescription ? (
                                                     <Button
                                                         type="button"
                                                         variant="ghost"
@@ -388,7 +390,7 @@ export default function TagQueryDetailPage() {
                                                     </Button>
                                                 ) : null}
                                             </div>
-                                            {isAdmin && isEditingDescription ? (
+                                            {canEdit && isEditingDescription ? (
                                                 <div className="space-y-2">
                                                     <Textarea
                                                         value={descriptionDraft}
@@ -433,7 +435,7 @@ export default function TagQueryDetailPage() {
                                         title="关键词"
                                         tags={currentItem.keywords || []}
                                         variant="keyword"
-                                        isAdmin={isAdmin}
+                                        isAdmin={canEdit}
                                         isSaving={isSavingKeywords}
                                         onSave={handleSaveKeywords}
                                     />
@@ -442,7 +444,7 @@ export default function TagQueryDetailPage() {
                                         title="yolo标签"
                                         tags={currentItem.yoloObjects || []}
                                         variant="yolo"
-                                        isAdmin={isAdmin}
+                                        isAdmin={canEdit}
                                         isSaving={isSavingYolo}
                                         onSave={handleSaveYoloObjects}
                                     />

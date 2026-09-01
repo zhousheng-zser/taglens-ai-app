@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { ParticleBackground } from '@/components/ParticleBackground';
+import { AuthGate } from '@/components/AuthGate';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -17,7 +18,7 @@ import { handleSearch } from '@/app/actions';
 import type { ImageSearchResult } from '@/types/analysis';
 import { getCurrentUser, type CurrentUser } from '@/lib/auth';
 import { getImageUrl } from '@/lib/imageStorage';
-import { consumeTagQueryRestore, loadTagQuerySession, saveTagQuerySession } from '@/lib/tagQueryNav';
+import { consumeTagQueryRestore, loadTagQuerySession, saveTagQuerySession, searchTagImages } from '@/lib/tagQueryNav';
 import {
     Select,
     SelectContent,
@@ -43,10 +44,10 @@ const QUICK_TIME_RANGES = [
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500];
 
-export default function TagQueryPage() {
+function TagQueryContent({ currentUser }: { currentUser: CurrentUser }) {
     const router = useRouter();
     // 状态定义
-    const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+    const [selectedTagBatchId, setSelectedTagBatchId] = useState<string>('');
     const [startDate, setStartDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
     const [endDate, setEndDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
     const [startTime, setStartTime] = useState<string>('00:00:00');
@@ -62,7 +63,7 @@ export default function TagQueryPage() {
     const [results, setResults] = useState<ImageSearchResult[]>([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
-    const [pageSize, setPageSize] = useState(10);
+    const [pageSize, setPageSize] = useState(50);
     const [isLoading, setIsLoading] = useState(false);
     const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
     const [jumpPageInput, setJumpPageInput] = useState<string>('1');
@@ -81,7 +82,9 @@ export default function TagQueryPage() {
     const { toast } = useToast();
 
     const DELETE_API_ENDPOINT = '/api/backend/images/delete';
-    const isAdmin = currentUser?.role === 'admin';
+    const isAdmin = currentUser.role === 'admin';
+    const isReviewer = currentUser.role === 'reviewer';
+    const tagBatches = currentUser.tagTaskBatches || [];
 
     const openDatePicker = (inputRef: React.RefObject<HTMLInputElement | null>) => {
         const input = inputRef.current;
@@ -108,8 +111,8 @@ export default function TagQueryPage() {
     };
 
     const buildSearchParams = (targetPage: number, size: number = pageSize) => ({
-        startDate: startDate ? `${startDate}T${startTime}` : undefined,
-        endDate: endDate ? `${endDate}T${endTime}` : undefined,
+        startDate: isReviewer ? undefined : (startDate ? `${startDate}T${startTime}` : undefined),
+        endDate: isReviewer ? undefined : (endDate ? `${endDate}T${endTime}` : undefined),
         cameraName: cameraNameFilter.trim() || undefined,
         bizCategory: bizCategoryFilter.trim() || undefined,
         filePath: filePathFilter.trim() || undefined,
@@ -117,7 +120,19 @@ export default function TagQueryPage() {
         tagExtracted: tagExtractedFilter === 'yes' ? true : tagExtractedFilter === 'no' ? false : undefined,
         page: targetPage,
         pageSize: size,
+        assignedBatchId: isReviewer && selectedTagBatchId ? Number(selectedTagBatchId) : undefined,
     });
+
+    const runSearch = async (targetPage: number, size: number = pageSize) => {
+        const params = buildSearchParams(targetPage, size);
+        if (isReviewer) {
+            if (!params.assignedBatchId) {
+                throw new Error('请选择标签任务批次');
+            }
+            return searchTagImages(params);
+        }
+        return handleSearch(params);
+    };
 
     // 处理快捷时间选择
     const handleQuickRangeSelect = (range: string) => {
@@ -179,7 +194,7 @@ export default function TagQueryPage() {
     const fetchResults = async (targetPage: number = 1) => {
         setIsLoading(true);
         try {
-            const response = await handleSearch(buildSearchParams(targetPage));
+            const response = await runSearch(targetPage);
 
             if (response.success) {
                 setResults(response.results);
@@ -215,6 +230,7 @@ export default function TagQueryPage() {
         setDescriptionKeywords(saved.descriptionKeywords);
         setTagExtractedFilter(saved.tagExtractedFilter || 'all');
         setSelectedRange(saved.selectedRange);
+        setSelectedTagBatchId(saved.assignedBatchId || '');
         setPage(saved.page);
         setPageSize(saved.pageSize);
         setTotal(saved.total);
@@ -222,14 +238,42 @@ export default function TagQueryPage() {
         setViewMode(saved.viewMode);
     };
 
+    useEffect(() => {
+        if (isReviewer && tagBatches.length > 0 && !selectedTagBatchId) {
+            setSelectedTagBatchId(String(tagBatches[0].id));
+        }
+    }, [isReviewer, tagBatches, selectedTagBatchId]);
+
     // 初始加载：优先从详情页返回时恢复搜索状态
     useEffect(() => {
-        getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null));
-
         const shouldRestore = consumeTagQueryRestore();
         const saved = loadTagQuerySession();
         if (shouldRestore && saved) {
             applySessionState(saved);
+            return;
+        }
+
+        if (isReviewer) {
+            if (tagBatches.length === 0) return;
+            const batchId = String(tagBatches[0].id);
+            setSelectedTagBatchId(batchId);
+            const initReviewerSearch = async () => {
+                setIsLoading(true);
+                try {
+                    const response = await searchTagImages({
+                        assignedBatchId: Number(batchId),
+                        page: 1,
+                        pageSize,
+                    });
+                    if (response.success) {
+                        setResults(response.results);
+                        setTotal(response.total);
+                    }
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+            void initReviewerSearch();
             return;
         }
 
@@ -247,6 +291,7 @@ export default function TagQueryPage() {
             }
         };
         initSearch();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // 重置表单
@@ -271,7 +316,7 @@ export default function TagQueryPage() {
         // 使用新的 pageSize 重新查询
         setIsLoading(true);
         try {
-            const response = await handleSearch(buildSearchParams(1, size));
+            const response = await runSearch(1, size);
 
             if (response.success) {
                 setResults(response.results);
@@ -325,6 +370,7 @@ export default function TagQueryPage() {
             descriptionKeywords,
             tagExtractedFilter,
             selectedRange,
+            assignedBatchId: selectedTagBatchId,
             page,
             pageSize,
             total,
@@ -375,6 +421,70 @@ export default function TagQueryPage() {
             <ParticleBackground />
 
             <div className="relative z-10 space-y-4">
+                {isReviewer && tagBatches.length === 0 ? (
+                    <Card className="border-amber-500/30 bg-amber-500/5">
+                        <CardContent className="py-6 text-sm text-muted-foreground">
+                            当前账号尚未分配标签任务批次，请联系管理员在用户管理中创建标签任务。
+                        </CardContent>
+                    </Card>
+                ) : null}
+
+                {isReviewer && tagBatches.length > 0 ? (
+                    <Card className="border-border/40 bg-background/80 backdrop-blur-md">
+                        <CardContent className="py-4">
+                            <div className="flex flex-wrap items-end gap-3">
+                                <div className="space-y-2 min-w-[220px]">
+                                    <label className="text-xs font-medium text-muted-foreground">标签任务批次</label>
+                                    <Select
+                                        value={selectedTagBatchId}
+                                        onValueChange={(value) => {
+                                            setSelectedTagBatchId(value);
+                                            void (async () => {
+                                                setIsLoading(true);
+                                                try {
+                                                    const response = await searchTagImages({
+                                                        assignedBatchId: Number(value),
+                                                        page: 1,
+                                                        pageSize,
+                                                        cameraName: cameraNameFilter.trim() || undefined,
+                                                        bizCategory: bizCategoryFilter.trim() || undefined,
+                                                        filePath: filePathFilter.trim() || undefined,
+                                                        descriptionKeywords: descriptionKeywords.length > 0 ? descriptionKeywords : undefined,
+                                                        tagExtracted: tagExtractedFilter === 'yes' ? true : tagExtractedFilter === 'no' ? false : undefined,
+                                                    });
+                                                    if (response.success) {
+                                                        setResults(response.results);
+                                                        setTotal(response.total);
+                                                        setPage(1);
+                                                    }
+                                                } catch (error: any) {
+                                                    toast({
+                                                        variant: 'destructive',
+                                                        title: '查询失败',
+                                                        description: error?.message || '无法获取标签数据',
+                                                    });
+                                                } finally {
+                                                    setIsLoading(false);
+                                                }
+                                            })();
+                                        }}
+                                    >
+                                        <SelectTrigger className="h-9">
+                                            <SelectValue placeholder="选择任务批次" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {tagBatches.map((batch) => (
+                                                <SelectItem key={batch.id} value={String(batch.id)}>
+                                                    {batch.rangeName}（{batch.assignedImages || 0} 张）
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+                ) : null}
 
                 {/* 筛选区域 */}
                 <Card className="border-border/40 bg-background/60 backdrop-blur-md shadow-xl">
@@ -891,5 +1001,15 @@ export default function TagQueryPage() {
                 </Card>
             </div>
         </div>
+    );
+}
+
+export default function TagQueryPage() {
+    const [user, setUser] = useState<CurrentUser | null>(null);
+
+    return (
+        <AuthGate onUser={setUser}>
+            {user ? <TagQueryContent currentUser={user} /> : null}
+        </AuthGate>
     );
 }

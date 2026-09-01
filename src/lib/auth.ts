@@ -19,6 +19,16 @@ export interface UserTimeRange {
   assignedAccidentQa?: number;
 }
 
+export interface TagTaskBatch {
+  id: number;
+  userId: number;
+  rangeName: string;
+  workloadImages: number;
+  createdAt: string;
+  assignedImages?: number;
+  warning?: string;
+}
+
 export interface CurrentUser {
   id: number;
   username: string;
@@ -28,6 +38,7 @@ export interface CurrentUser {
   createdAt: string;
   updatedAt: string;
   timeRanges?: UserTimeRange[];
+  tagTaskBatches?: TagTaskBatch[];
   initialPassword?: string | null;
   impersonating?: boolean;
   impersonatedByAdmin?: string;
@@ -201,6 +212,38 @@ export async function createTimeRange(userId: number, input: {
 
 export async function deleteTimeRange(rangeId: number): Promise<void> {
   await readJson(await fetch(`/api/backend/auth/time-ranges/${rangeId}`, { method: 'DELETE' }));
+}
+
+export async function getTagPendingWorkload(): Promise<number> {
+  const data = await readJson<{ success: boolean; pendingImages: number }>(
+    await fetch('/api/backend/auth/tag-pending-workload', { cache: 'no-store' }),
+  );
+  return data.pendingImages;
+}
+
+export async function listTagTaskBatches(userId: number): Promise<TagTaskBatch[]> {
+  const data = await readJson<{ success: boolean; tagTaskBatches: TagTaskBatch[] }>(
+    await fetch(`/api/backend/auth/users/${userId}/tag-task-batches`, { cache: 'no-store' }),
+  );
+  return data.tagTaskBatches;
+}
+
+export async function createTagTaskBatch(userId: number, input: {
+  rangeName: string;
+  workloadImages: number;
+}): Promise<TagTaskBatch> {
+  const data = await readJson<{ success: boolean; tagTaskBatch: TagTaskBatch }>(
+    await fetch(`/api/backend/auth/users/${userId}/tag-task-batches`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
+  return data.tagTaskBatch;
+}
+
+export async function deleteTagTaskBatch(batchId: number): Promise<void> {
+  await readJson(await fetch(`/api/backend/auth/tag-task-batches/${batchId}`, { method: 'DELETE' }));
 }
 
 export async function getReviewStats(): Promise<ReviewStatsItem[]> {

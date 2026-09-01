@@ -372,6 +372,7 @@ def search_images(
     file_path: Optional[str] = None,
     description_keywords: Optional[List[str]] = None,
     tag_extracted: Optional[bool] = None,
+    uuid_filter: Optional[List[str]] = None,
     query_embedding: Optional[bytes] = None,  # 单个查询文本的向量化结果（向后兼容）
     query_embeddings: Optional[List[bytes]] = None,  # 多个查询文本的向量化结果列表
     query_tags: Optional[List[str]] = None,  # 与 query_embeddings 对应的查询标签文本（用于相似度缓存）
@@ -450,6 +451,14 @@ def search_images(
             where_conditions.append(
                 "(ar.description IS NULL OR TRIM(ar.description) = '')"
             )
+
+        if uuid_filter is not None:
+            uuids = [u.strip() for u in uuid_filter if u and str(u).strip()]
+            if not uuids:
+                return [], 0
+            placeholders = ",".join(["%s"] * len(uuids))
+            where_conditions.append(f"i.uuid IN ({placeholders})")
+            params.extend(uuids)
 
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         

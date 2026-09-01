@@ -13,18 +13,22 @@ from core.manage_database import (
     SESSION_MAX_AGE_SECONDS,
     authenticate_user,
     create_session_token,
+    create_tag_task_batch,
     create_time_range,
     create_user,
+    delete_tag_task_batch,
     delete_time_range,
     delete_user,
     get_pending_workload_daily,
     get_review_stats,
     get_review_stats_timeseries,
     get_user_by_id,
+    list_user_tag_task_batches,
     list_user_time_ranges,
     list_users,
     verify_session_token,
 )
+from core.tag_task_assignment import get_tag_pending_workload_count
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -54,6 +58,11 @@ class CreateTimeRangeRequest(BaseModel):
     workloadAccidentQa: int = 0
 
 
+class CreateTagTaskBatchRequest(BaseModel):
+    rangeName: str
+    workloadImages: int = 0
+
+
 def _cookie_kwargs() -> Dict[str, Any]:
     return {
         "httponly": True,
@@ -67,6 +76,7 @@ def _cookie_kwargs() -> Dict[str, Any]:
 def _with_time_ranges(user: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(user)
     result["timeRanges"] = list_user_time_ranges(int(user["id"]))
+    result["tagTaskBatches"] = list_user_tag_task_batches(int(user["id"]))
     return result
 
 
@@ -96,8 +106,10 @@ async def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
     response.set_cookie(SESSION_COOKIE_NAME, token, **_cookie_kwargs())
     response.delete_cookie(SESSION_ADMIN_COOKIE_NAME, path="/")
     time_ranges = await run_blocking(list_user_time_ranges, int(user["id"]))
+    tag_batches = await run_blocking(list_user_tag_task_batches, int(user["id"]))
     result = dict(user)
     result["timeRanges"] = time_ranges
+    result["tagTaskBatches"] = tag_batches
     return {"success": True, "user": result}
 
 
@@ -114,8 +126,10 @@ async def me(
     taglens_admin_session: Optional[str] = Cookie(default=None, alias=SESSION_ADMIN_COOKIE_NAME),
 ) -> Dict[str, Any]:
     time_ranges = await run_blocking(list_user_time_ranges, int(current_user["id"]))
+    tag_batches = await run_blocking(list_user_tag_task_batches, int(current_user["id"]))
     user = dict(current_user)
     user["timeRanges"] = time_ranges
+    user["tagTaskBatches"] = tag_batches
     user["impersonating"] = bool(taglens_admin_session)
     if taglens_admin_session:
         admin_user = await run_blocking(verify_session_token, taglens_admin_session)
@@ -232,6 +246,46 @@ async def remove_time_range(range_id: int, _: Dict[str, Any] = Depends(require_a
     deleted = delete_time_range(range_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="时间段不存在")
+    return {"success": True}
+
+
+@router.get("/tag-pending-workload")
+async def tag_pending_workload(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    count = await run_blocking(get_tag_pending_workload_count)
+    return {"success": True, "pendingImages": count}
+
+
+@router.get("/users/{user_id}/tag-task-batches")
+async def get_tag_task_batches(user_id: int, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return {"success": True, "tagTaskBatches": list_user_tag_task_batches(user_id)}
+
+
+@router.post("/users/{user_id}/tag-task-batches")
+async def add_tag_task_batch(
+    user_id: int,
+    request: CreateTagTaskBatchRequest,
+    _: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    if not request.rangeName.strip():
+        raise HTTPException(status_code=400, detail="任务名称不能为空")
+    if int(request.workloadImages or 0) <= 0:
+        raise HTTPException(status_code=400, detail="分配图片数必须大于 0")
+    try:
+        batch = create_tag_task_batch(
+            user_id=user_id,
+            range_name=request.rangeName.strip(),
+            workload_images=int(request.workloadImages),
+        )
+        return {"success": True, "tagTaskBatch": batch}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/tag-task-batches/{batch_id}")
+async def remove_tag_task_batch(batch_id: int, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    deleted = delete_tag_task_batch(batch_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="标签任务批次不存在")
     return {"success": True}
 
 

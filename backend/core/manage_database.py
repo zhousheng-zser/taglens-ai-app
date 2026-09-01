@@ -210,6 +210,38 @@ def init_manage_database() -> None:
         _ensure_column(cursor, "users", "initial_password", "VARCHAR(255) NULL")
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS tag_user_task_batches (
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                range_name VARCHAR(255) NOT NULL,
+                workload_images INT NOT NULL DEFAULT 0,
+                created_at VARCHAR(64) NOT NULL,
+                KEY idx_tag_batches_user_id (user_id),
+                CONSTRAINT fk_tag_batches_user
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tag_task_assignments (
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                batch_id INT NOT NULL,
+                image_uuid VARCHAR(255) NOT NULL,
+                image_id INT NOT NULL,
+                created_at VARCHAR(64) NOT NULL,
+                UNIQUE KEY uk_tag_task_image_uuid (image_uuid),
+                UNIQUE KEY uk_tag_task_user_image (user_id, image_uuid),
+                KEY idx_tag_task_user_batch (user_id, batch_id),
+                KEY idx_tag_task_batch (batch_id),
+                CONSTRAINT fk_tag_task_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                CONSTRAINT fk_tag_task_batch FOREIGN KEY (batch_id) REFERENCES tag_user_task_batches(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        cursor.execute(
+            """
             UPDATE event_review_records
             SET ai_description_done = 1
             WHERE description_review_done = 1 AND ai_description_done = 0
@@ -858,6 +890,90 @@ def get_pending_workload_daily() -> Dict[str, Any]:
         counts=counts,
     )
     return _pending_workload_snapshot_to_api(saved, from_cache=False)
+
+
+def _tag_batch_row_to_dict(row: Dict[str, Any], assigned_images: Optional[int] = None) -> Dict[str, Any]:
+    result = {
+        "id": int(row["id"]),
+        "userId": int(row["user_id"]),
+        "rangeName": row["range_name"],
+        "workloadImages": int(row.get("workload_images") or 0),
+        "createdAt": row["created_at"],
+    }
+    if assigned_images is not None:
+        result["assignedImages"] = int(assigned_images)
+    return result
+
+
+def list_user_tag_task_batches(user_id: int) -> List[Dict[str, Any]]:
+    from core.tag_task_assignment import get_tag_assigned_counts_by_batch
+
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, user_id, range_name, workload_images, created_at
+            FROM tag_user_task_batches
+            WHERE user_id = %s
+            ORDER BY created_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        rows = cursor.fetchall()
+    return [
+        _tag_batch_row_to_dict(row, get_tag_assigned_counts_by_batch(int(row["id"])))
+        for row in rows
+    ]
+
+
+def create_tag_task_batch(
+    user_id: int,
+    range_name: str,
+    workload_images: int,
+) -> Dict[str, Any]:
+    from core.tag_task_assignment import allocate_tag_images_for_batch, get_tag_assigned_counts_by_batch
+
+    quota = max(0, int(workload_images))
+    now = datetime.now().isoformat()
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            raise ValueError("用户不存在")
+        cursor.execute(
+            """
+            INSERT INTO tag_user_task_batches (user_id, range_name, workload_images, created_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (user_id, range_name, quota, now),
+        )
+        batch_id = int(cursor.lastrowid)
+    try:
+        allocate_result = allocate_tag_images_for_batch(batch_id)
+    except Exception as exc:
+        delete_tag_task_batch(batch_id)
+        raise ValueError(f"标签任务分配失败: {exc}") from exc
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, user_id, range_name, workload_images, created_at
+            FROM tag_user_task_batches WHERE id = %s
+            """,
+            (batch_id,),
+        )
+        row = cursor.fetchone()
+    result = _tag_batch_row_to_dict(row, get_tag_assigned_counts_by_batch(batch_id))
+    if allocate_result.get("warning"):
+        result["warning"] = allocate_result["warning"]
+    return result
+
+
+def delete_tag_task_batch(batch_id: int) -> bool:
+    with get_manage_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tag_user_task_batches WHERE id = %s", (batch_id,))
+        return cursor.rowcount > 0
 
 
 def delete_time_range(range_id: int) -> bool:
